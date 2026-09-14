@@ -12,7 +12,7 @@ Desktop.ini
 
 # --- Environment / secrets ---
 .env
-# .env.*
+.env.*
 .env.prod
 !.env.example
 !.env.sample
