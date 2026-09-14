@@ -1,0 +1,92 @@
+name: remymy
+
+services:
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: remymy-app:dev
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      ENV: ${ENV:-nonprod}
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      MCP_URL: http://mcp:8000
+      MODEL_SERVICE_URL: http://models:8001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-remymy}:${POSTGRES_PASSWORD:-remymy_dev_password}@database:5432/${POSTGRES_DB:-remymy}
+    depends_on:
+      mcp:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    networks:
+      - remymy
+
+  mcp:
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    image: remymy-mcp:dev
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      ENV: ${ENV:-nonprod}
+      HOST: 0.0.0.0
+      PORT: 8000
+      MODEL_SERVICE_URL: http://models:8001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-remymy}:${POSTGRES_PASSWORD:-remymy_dev_password}@database:5432/${POSTGRES_DB:-remymy}
+    depends_on:
+      models:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    networks:
+      - remymy
+
+  models:
+    build:
+      context: ./models
+      dockerfile: Dockerfile
+    image: remymy-models:dev
+    restart: unless-stopped
+    ports:
+      - "${MODEL_PORT:-8001}:8001"
+    environment:
+      ENV: ${ENV:-nonprod}
+      HOST: 0.0.0.0
+      PORT: 8001
+      MODEL_ARTIFACT_PATH: /models
+    volumes:
+      - model_cache:/models
+    networks:
+      - remymy
+
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-remymy}
+      POSTGRES_USER: ${POSTGRES_USER:-remymy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-remymy_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - remymy
+
+volumes:
+  model_cache:
+  postgres_data:
+
+networks:
+  remymy:
+    driver: bridge
