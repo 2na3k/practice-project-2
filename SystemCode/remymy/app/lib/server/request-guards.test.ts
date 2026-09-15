@@ -48,6 +48,19 @@ describe("request guards", () => {
     ).toBe(false);
   });
 
+  it("allows localhost when Next builds the request URL from 0.0.0.0", () => {
+    const localRequest = new Request("http://0.0.0.0:3100/api/connection", {
+      method: "POST",
+      headers: {
+        origin: "http://localhost:3100",
+        referer: "http://localhost:3100/",
+        host: "localhost:3100",
+      },
+    });
+
+    expect(isSameOriginMutation(localRequest as never)).toBe(true);
+  });
+
   it("turns guard errors into safe, compact responses", async () => {
     const response = errorResponse(new RequestGuardError("bad payload", 422));
     expect(response.status).toBe(422);

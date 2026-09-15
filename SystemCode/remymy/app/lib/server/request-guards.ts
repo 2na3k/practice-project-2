@@ -6,13 +6,24 @@ export const MAX_CHAT_TURNS = 24;
 export const MAX_CHAT_TEXT_CHARS = 2000;
 
 export function isSameOriginMutation(request: NextRequest): boolean {
-  const expectedOrigin = new URL(request.url).origin;
+  const requestUrl = new URL(request.url);
+  // Next may construct request.url from the bind address (0.0.0.0) in local
+  // development, while the browser uses localhost or 127.0.0.1. The Host
+  // header is the authority actually used for this request, so accept that
+  // origin as well while still rejecting a different site.
+  const allowedOrigins = new Set([requestUrl.origin]);
+  const host = request.headers.get("host")?.trim();
+  if (host) allowedOrigins.add(`${requestUrl.protocol}//${host}`);
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  if (forwardedHost) allowedOrigins.add(`${forwardedProto || requestUrl.protocol.replace(/:$/, "")}://${forwardedHost}`);
+
   const origin = request.headers.get("origin");
-  if (origin && origin !== expectedOrigin) return false;
+  if (origin && !allowedOrigins.has(origin)) return false;
   const referer = request.headers.get("referer");
   if (referer) {
     try {
-      if (new URL(referer).origin !== expectedOrigin) return false;
+      if (!allowedOrigins.has(new URL(referer).origin)) return false;
     } catch {
       return false;
     }

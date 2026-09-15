@@ -146,6 +146,34 @@ describe("connection and chat routes", () => {
     expect(await finalStatus.json()).toEqual({ connected: false });
   });
 
+  it("normalizes a pasted Bearer prefix and gives Groq auth failures a useful message", async () => {
+    completeSimple.mockResolvedValueOnce({
+      stopReason: "error",
+      errorMessage: '401: {"message":"Invalid API Key","code":"invalid_api_key"}',
+    } as never);
+
+    const failed = await postConnection(
+      requestWithCookie("/api/connection", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "groq",
+          model: "llama-3.3-70b-versatile",
+          apiKey: "Bearer gsk_test_invalid",
+        }),
+      }) as never,
+    );
+
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toEqual({
+      error: "Groq rejected this API key. Paste an active Groq key, usually beginning with gsk_.",
+    });
+    expect(completeSimple).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "groq", id: "llama-3.3-70b-versatile" }),
+      expect.anything(),
+      expect.objectContaining({ apiKey: "gsk_test_invalid" }),
+    );
+  });
+
   it("rejects unauthenticated chat and redacts provider errors", async () => {
     const unauthenticated = await postChat(
       requestWithCookie("/api/chat", { method: "POST", body: "{}" }) as never,

@@ -14,6 +14,40 @@ const connectionContext = (): Context => ({
 
 const jsonNoStore = (body: unknown, status = 200): Response => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
+type VerificationResult = { ok: true } | { ok: false; message: string };
+
+function normalizeApiKey(value: string): string {
+  // Users commonly paste the value from a curl example as "Bearer gsk_…".
+  // The SDK adds the Bearer scheme itself, so avoid sending it twice.
+  return value.trim().replace(/^Bearer\s+/i, "");
+}
+
+function safeProviderMessage(message: string, apiKey: string): string {
+  const redacted = message
+    .replaceAll(apiKey, "[redacted]")
+    .replace(/gsk_[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return redacted.slice(0, 240);
+}
+
+function verificationFailure(model: Model<Api>, apiKey: string, detail?: string): VerificationResult {
+  const normalized = detail?.toLocaleLowerCase() ?? "";
+  if (model.provider === "groq") {
+    if (/401|invalid_api_key|invalid api key|authentication/.test(normalized)) {
+      return { ok: false, message: "Groq rejected this API key. Paste an active Groq key, usually beginning with gsk_." };
+    }
+    if (/429|rate_limit|rate limit|too many requests/.test(normalized)) {
+      return { ok: false, message: "Groq rate-limited the connection check. Wait a moment and try again." };
+    }
+  }
+  const safeDetail = detail ? safeProviderMessage(detail, apiKey) : "";
+  return {
+    ok: false,
+    message: safeDetail ? `The provider could not verify this connection: ${safeDetail}` : "The provider could not verify this connection.",
+  };
+}
+
 export async function GET(request: NextRequest): Promise<Response> {
   const session = getSession(request.cookies.get(CONNECTION_COOKIE)?.value);
   return jsonNoStore(publicConnectionStatus(session));
@@ -25,15 +59,22 @@ function withConnectionCookie(response: Response, request: NextRequest, token: s
   return response;
 }
 
-export async function verifyModelConnection(model: Model<Api>, apiKey: string, signal: AbortSignal, models: Models = getPiModels()): Promise<boolean> {
-  const result = await models.completeSimple(model, connectionContext(), {
-    apiKey,
-    maxTokens: 16,
-    timeoutMs: 60_000,
-    maxRetries: 0,
-    signal,
-  });
-  return result.stopReason !== "error" && result.stopReason !== "aborted";
+export async function verifyModelConnection(model: Model<Api>, apiKey: string, signal: AbortSignal, models: Models = getPiModels()): Promise<VerificationResult> {
+  try {
+    const result = await models.completeSimple(model, connectionContext(), {
+      apiKey,
+      maxTokens: 16,
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      signal,
+    });
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      return verificationFailure(model, apiKey, result.errorMessage);
+    }
+    return { ok: true };
+  } catch (error) {
+    return verificationFailure(model, apiKey, error instanceof Error ? error.message : undefined);
+  }
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
@@ -45,12 +86,13 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
     const provider = body.provider.trim();
     const modelId = body.model.trim();
-    const apiKey = body.apiKey.trim();
+    const apiKey = normalizeApiKey(body.apiKey);
     if (!provider || !modelId || !apiKey || apiKey.length > MAX_API_KEY_CHARS) throw new RequestGuardError("Provider, model, and API key are invalid.", 400);
     const model = resolveSupportedModel(provider, modelId);
     const providerInfo = findRegistryProvider(provider);
     if (!model || !providerInfo) throw new RequestGuardError("Choose a supported provider and model.", 400);
-    if (!await verifyModelConnection(model, apiKey, request.signal)) return jsonNoStore({ error: "The provider could not verify this connection." }, 502);
+    const verification = await verifyModelConnection(model, apiKey, request.signal);
+    if (!verification.ok) return jsonNoStore({ error: verification.message }, 502);
     const previous = request.cookies.get(CONNECTION_COOKIE)?.value;
     if (previous) deleteSession(previous);
     const session = createSession(provider, modelId, apiKey);
@@ -73,7 +115,8 @@ export async function PATCH(request: NextRequest): Promise<Response> {
     if (!modelId) throw new RequestGuardError("A model is required.", 400);
     const model = resolveSupportedModel(current.provider, modelId);
     if (!model) throw new RequestGuardError("Choose a supported model for the connected provider.", 400);
-    if (!await verifyModelConnection(model, current.apiKey, request.signal)) return jsonNoStore({ error: "The provider could not verify this model." }, 502);
+    const verification = await verifyModelConnection(model, current.apiKey, request.signal);
+    if (!verification.ok) return jsonNoStore({ error: verification.message.replace("this connection", "this model") }, 502);
     deleteSession(current.token);
     const session = createSession(current.provider, modelId, current.apiKey);
     return withConnectionCookie(Response.json({ connected: true, provider: current.provider, model: modelId, expiresAt: session.expiresAt } satisfies ConnectionStatus), request, session.token, Math.floor(8 * 60 * 60));

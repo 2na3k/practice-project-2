@@ -2028,6 +2028,11 @@ img {
 .message-body a { color:#aa4f33; text-decoration:underline; text-underline-offset:3px; }
 .message-body pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#f0f2e8; border-radius:10px; padding:12px; }
 .message-body code { font-size:12px; }
+.markdown-table-wrap { max-width:100%; overflow-x:auto; margin-block:14px; border:1px solid #e2e8d9; border-radius:10px; }
+.message-body table { width:100%; min-width:520px; border-collapse:collapse; font-size:12px; line-height:1.5; }
+.message-body th,.message-body td { padding:9px 11px; text-align:left; vertical-align:top; border-bottom:1px solid #e6ebdf; }
+.message-body th { background:#f0f3e9; color:#344b36; font-weight:600; white-space:nowrap; }
+.message-body tr:last-child td { border-bottom:0; }
 .chat-meal-list { display:flex; flex-direction:column; gap:0; margin-top:17px; border:1px solid #e1e6d6; border-radius:15px; overflow:hidden; background:#fffefb; }
 .chat-meal-row { display:flex; align-items:center; gap:12px; padding:13px 15px; width:100%; border-bottom:1px solid #edf0e4; text-align:left; }
 .chat-meal-row:last-child { border-bottom:0; }
