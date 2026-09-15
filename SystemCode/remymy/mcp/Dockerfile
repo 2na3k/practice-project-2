@@ -18,7 +18,7 @@ RUN if [ -f requirements.txt ]; then \
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:' + __import__('os').environ.get('PORT', '8000') + '/', timeout=2)" || exit 1
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:' + __import__('os').environ.get('PORT', '8000') + '/health', timeout=2)" || exit 1
 
 # A future MCP implementation can use main.py, app.py, or an installed
 # package entrypoint. The fallback is a simple HTTP server for local wiring.

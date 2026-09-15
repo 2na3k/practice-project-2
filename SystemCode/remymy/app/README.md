@@ -4,7 +4,7 @@ Remymy is a small meal discovery app with a conversational Discover view. A user
 
 The app supports two chat modes. The explicitly labeled Demo mode uses the curated meal catalog and deterministic rules in `lib/meals.ts`, `lib/recommender.ts`, and `lib/demo-chat.ts`; it is useful without credentials. Connected mode uses the installed Pi catalog (`@earendil-works/pi-ai` and `@earendil-works/pi-agent-core`) through the app's server routes. The model can help interpret a request, while meal results still come from the app's catalog and constraints. This is a focused Pi Agent integration, not the full coding-agent CLI.
 
-There is no MCP connection in this app. The server does not persist conversations, preferences, saved meals, or API keys. A connected provider key is held in an in-memory session behind an HTTP-only cookie for eight hours. The session store is process-local, so a multi-instance deployment needs a shared session design before it can support reconnects across instances.
+The app includes a small MCP integration. The Pi agent exposes MCP tools as native agent tools, so connected chat requests can call the Python MCP service through Streamable HTTP. The server does not persist conversations, preferences, saved meals, or API keys. A connected provider key is held in an in-memory session behind an HTTP-only cookie for eight hours. The session store is process-local, so a multi-instance deployment needs a shared session design before it can support reconnects across instances.
 
 ## Run locally
 
@@ -39,11 +39,13 @@ docker build -t remymy-app:dev .
 docker run --rm -p 3000:3000 remymy-app:dev
 ```
 
-From `SystemCode/remymy`, the shared Compose file can build only the app while skipping its currently scaffolded service dependencies:
+From `SystemCode/remymy`, the shared Compose file runs the app and its Python MCP service together:
 
 ```bash
-docker compose --env-file .env.nonprod up --build --no-deps app
+docker compose up --build
 ```
+
+Open [http://localhost:3000](http://localhost:3000). The app container calls the MCP container at `http://mcp:8000/mcp`; the MCP service is also available from the host at [http://localhost:8000/health](http://localhost:8000/health).
 
 ## Product behavior
 
@@ -70,7 +72,7 @@ lib/demo-chat.ts  Deterministic local chat reply helper
 lib/server/      Pi catalog, request guards, and in-memory connection sessions
 ```
 
-The repository also contains separate `mcp`, `models`, and database service scaffolding under `SystemCode/remymy`. Those services are outside this app's focused Pi integration and are not required for local Demo mode. Connecting them later will require an explicit integration layer and a reviewed data contract; the UI currently does not assume they are available.
+The repository also contains the Python MCP service under `SystemCode/remymy/mcp`. It exposes a small `say_hello` tool over Streamable HTTP. The app calls it through its same-origin `/api/mcp` route and the Pi chat agent can call it directly. Set `MCP_URL` to the MCP endpoint when running the app outside Docker; it defaults to `http://localhost:8000/mcp`.
 
 ## Data and privacy boundary
 

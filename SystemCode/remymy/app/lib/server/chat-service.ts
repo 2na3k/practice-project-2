@@ -11,6 +11,7 @@ import type { ChatRequest, ChatResult } from "@/lib/chat-types";
 import type { Preferences } from "@/lib/meals";
 import { interpretRequest, recommendMeals, type MealRecommendation } from "@/lib/recommender";
 import { MAX_CHAT_TEXT_CHARS, MAX_CHAT_TURNS } from "./request-guards";
+import { callMcpTool } from "./mcp-client";
 
 export const CHAT_TIMEOUT_MS = 60_000;
 export const MAX_TOOL_TURNS = 4;
@@ -33,6 +34,10 @@ const recommendationParameters = Type.Object({
     cuisine: Type.String({ maxLength: 80 }),
   }),
   query: Type.Optional(Type.String({ maxLength: MAX_CHAT_TEXT_CHARS })),
+});
+
+const mcpHelloParameters = Type.Object({
+  name: Type.Optional(Type.String({ maxLength: 80 })),
 });
 
 const isPreferences = (value: unknown): value is Preferences => {
@@ -105,10 +110,28 @@ const mealTool = (baseline: Preferences, onResult: (preferences: Preferences, re
   },
 });
 
+const mcpHelloTool = (onUsed: () => void): AgentTool<typeof mcpHelloParameters, { source: "mcp"; tool: "say_hello" }> => ({
+  name: "say_hello",
+  label: "Say hello",
+  description: "Call the connected Remymy Python MCP service to say hello. Use this when the user asks to test MCP or asks you to say hello.",
+  parameters: mcpHelloParameters,
+  executionMode: "sequential",
+  execute: async (_toolCallId, params, signal) => {
+    const name = params.name?.trim() || "there";
+    const text = await callMcpTool("say_hello", { name }, signal);
+    onUsed();
+    return {
+      content: [{ type: "text", text }],
+      details: { source: "mcp", tool: "say_hello" },
+    };
+  },
+});
+
 export type MealAgent = {
   agent: Agent;
   getPreferences: () => Preferences;
   getRecommendations: () => MealRecommendation[];
+  getToolsUsed: () => string[];
 };
 
 export function createMealAgent(
@@ -120,6 +143,7 @@ export function createMealAgent(
 ): MealAgent {
   let latestPreferences = preferences;
   let latestRecommendations: MealRecommendation[] = [];
+  const toolsUsed = new Set<string>();
   let toolTurns = 0;
   const tool = mealTool(preferences, (nextPreferences, recommendations) => {
     toolTurns += 1;
@@ -130,6 +154,7 @@ export function createMealAgent(
     "You are Remymy, a warm and concise meal recommendation assistant.",
     "The only authoritative meals are the curated MEALS returned by the recommend_meals tool.",
     "Call recommend_meals whenever the user asks for meal ideas, changes preferences, or asks what to eat.",
+    "Call say_hello whenever the user asks to test MCP or asks you to say hello; it is backed by the Remymy Python MCP service.",
     `The authoritative starting preference state is ${JSON.stringify(preferences)}. Preserve its diet, time limit, and exclusions in every tool call.`,
     "Keep the final answer brief, human, and in simple markdown. Mention only meals returned by the tool.",
     "Do not provide medical or nutrition guarantees; the catalog contains demo estimates.",
@@ -139,7 +164,7 @@ export function createMealAgent(
       systemPrompt,
       model,
       thinkingLevel: model.reasoning ? "minimal" : "off",
-      tools: [tool],
+      tools: [tool, mcpHelloTool(() => toolsUsed.add("say_hello"))],
       messages: initialMessages,
     },
     streamFn: (activeModel, context, options) =>
@@ -161,6 +186,7 @@ export function createMealAgent(
     agent,
     getPreferences: () => latestPreferences,
     getRecommendations: () => latestRecommendations,
+    getToolsUsed: () => [...toolsUsed],
   };
 }
 
@@ -208,6 +234,7 @@ export async function runChat(
     text: text || (recommendations.length ? `I found ${recommendations.length} options in the Remymy catalog.` : "I couldn't find a match in the Remymy catalog with those preferences."),
     preferences: mealAgent.getPreferences(),
     recommendations,
+    toolsUsed: mealAgent.getToolsUsed(),
   };
 }
 

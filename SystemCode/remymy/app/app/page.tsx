@@ -86,7 +86,8 @@ function validRecommendations(value: unknown): value is MealRecommendation[] {
 function validChatResult(value: unknown): value is ChatResult {
   if (!value || typeof value !== "object") return false;
   const result = value as Partial<ChatResult>;
-  return typeof result.text === "string" && validPreferences(result.preferences) && validRecommendations(result.recommendations);
+  return typeof result.text === "string" && validPreferences(result.preferences) && validRecommendations(result.recommendations) &&
+    (result.toolsUsed === undefined || (Array.isArray(result.toolsUsed) && result.toolsUsed.every((tool) => typeof tool === "string")));
 }
 
 function validConnectionStatus(value: unknown): value is ConnectionStatus {
@@ -112,6 +113,12 @@ function errorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+function readMcpMessage(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !("message" in value)) return null;
+  const message = (value as { message?: unknown }).message;
+  return typeof message === "string" && message.trim() ? message : null;
+}
+
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -131,6 +138,8 @@ export default function HomePage() {
   const [mealShortlist, setMealShortlist] = useState<MealRecommendation[] | null>(null);
   const [activeMeal, setActiveMeal] = useState<Meal | null>(null);
   const [notice, setNotice] = useState("");
+  const [mcpMessage, setMcpMessage] = useState("");
+  const [mcpBusy, setMcpBusy] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [failedRequest, setFailedRequest] = useState<FailedRequest | null>(null);
@@ -261,7 +270,13 @@ export default function HomePage() {
       }
       if (controller.signal.aborted || !mountedRef.current) return;
       setPreferences(result.preferences);
-      setChat((current) => current.map((message) => message.id === assistantId ? { ...message, text: result.text, status: undefined, recommendations: result.recommendations } : message));
+      setChat((current) => current.map((message) => message.id === assistantId ? {
+        ...message,
+        text: result.text,
+        status: undefined,
+        source: result.toolsUsed?.length ? `${responseSource} · MCP` : responseSource,
+        recommendations: result.recommendations,
+      } : message));
     } catch (error) {
       if (controller.signal.aborted || !mountedRef.current) return;
       const message = error instanceof Error ? error.message : "The model could not answer.";
@@ -295,6 +310,24 @@ export default function HomePage() {
     setMealShortlist(recommendations.slice(0, 6));
     setView("meals");
   }, []);
+  const tryMcpHello = useCallback(async () => {
+    setMcpBusy(true);
+    setMcpMessage("");
+    try {
+      const response = await fetch("/api/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Remymy" }),
+      });
+      const data: unknown = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(errorMessage(data, "The MCP service could not be reached."));
+      setMcpMessage(readMcpMessage(data) ?? "Hello from the Python MCP service.");
+    } catch (error) {
+      setMcpMessage(error instanceof Error ? error.message : "The MCP service could not be reached.");
+    } finally {
+      setMcpBusy(false);
+    }
+  }, []);
   const modelLabel = connection.connected ? `${connection.provider ?? "AI"} · ${connection.model ?? "connected"}` : "Local demo";
   const hasChat = chat.length > 0;
   const savedRecommendations = useMemo(() => savedMeals.map((meal) => ({ meal, score: 1, reasons: ["Saved by you"] })), [savedMeals]);
@@ -315,6 +348,13 @@ export default function HomePage() {
                 <div className="hero-grid"><div className="hero-copy"><p className="eyebrow">THE KIND OF HELPFUL YOU CAN EAT</p><h2 className="hero-title">Less overthinking.<br /><em>More good food.</em></h2><p className="hero-description">A tiny nudge toward something delicious, tuned to your cravings, your time, and the ingredients you love.</p></div><div className="hero-art" aria-label="Illustration of a colorful bowl of food" role="img"><div className="hero-sun" /><div className="hero-plate"><span className="hero-food hero-food-one" /><span className="hero-food hero-food-two" /><span className="hero-food hero-food-three" /><span className="hero-food hero-food-four" /><span className="hero-leaf" /></div><span className="hero-art-label">GOOD THINGS<br /><strong>COMING UP</strong></span></div></div>
                 <Composer onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} welcome modelLabel={modelLabel} onConnection={() => setView("connection")} />
                 <p className="welcome-hint">Try a craving, a time limit, or an ingredient you want to use up.</p>
+                <div className="mcp-demo">
+                  <button className="mcp-demo-button" onClick={() => void tryMcpHello()} disabled={mcpBusy}>
+                    <MessageCircle size={14} aria-hidden="true" />
+                    {mcpBusy ? "Calling Python MCP…" : "Try MCP hello"}
+                  </button>
+                  {mcpMessage && <span className={`mcp-demo-result ${mcpMessage.startsWith("The Python MCP") ? "is-error" : ""}`} role="status">{mcpMessage}</span>}
+                </div>
               </section>
             )}
           </>
