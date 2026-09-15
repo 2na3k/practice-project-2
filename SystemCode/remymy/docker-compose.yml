@@ -14,12 +14,8 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
       MCP_URL: http://mcp:8000
-      MODEL_SERVICE_URL: http://models:8001
-      DATABASE_URL: postgresql://${POSTGRES_USER:-remymy}:${POSTGRES_PASSWORD:-remymy_dev_password}@database:5432/${POSTGRES_DB:-remymy}
     depends_on:
       mcp:
-        condition: service_healthy
-      database:
         condition: service_healthy
     networks:
       - remymy
