@@ -19,6 +19,8 @@ import { MealDetailModal } from "@/components/MealDetailModal";
 import { PreferencePanel } from "@/components/PreferencePanel";
 import { Sidebar, type AppView } from "@/components/Sidebar";
 import { ConnectionPanel } from "@/components/ConnectionPanel";
+import { RecipeCard } from "@/components/RecipeCard";
+import { RecipeDetailModal } from "@/components/RecipeDetailModal";
 import {
   DEFAULT_PREFERENCES,
   MEALS,
@@ -32,6 +34,7 @@ import type {
   ChatTurn,
   ConnectionStatus,
 } from "@/lib/chat-types";
+import { fetchRecipeDetail, fetchRecipePage, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
 
 const FILTERS = [
   { id: "all", label: "All cravings" },
@@ -137,6 +140,15 @@ export default function HomePage() {
   const [connectionLoadError, setConnectionLoadError] = useState("");
   const [mealShortlist, setMealShortlist] = useState<MealRecommendation[] | null>(null);
   const [activeMeal, setActiveMeal] = useState<Meal | null>(null);
+  const [recipePage, setRecipePage] = useState<RecipePage | null>(null);
+  const [recipeSearch, setRecipeSearch] = useState("");
+  const [recipePageNumber, setRecipePageNumber] = useState(0);
+  const [recipeRetryNonce, setRecipeRetryNonce] = useState(0);
+  const [recipeBusy, setRecipeBusy] = useState(false);
+  const [recipeLoadError, setRecipeLoadError] = useState("");
+  const [activeRecipe, setActiveRecipe] = useState<RecipeDetail | null>(null);
+  const [recipeDetailBusy, setRecipeDetailBusy] = useState(false);
+  const [recipeDetailError, setRecipeDetailError] = useState("");
   const [notice, setNotice] = useState("");
   const [mcpMessage, setMcpMessage] = useState("");
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -144,9 +156,45 @@ export default function HomePage() {
   const [isBusy, setIsBusy] = useState(false);
   const [failedRequest, setFailedRequest] = useState<FailedRequest | null>(null);
   const requestRef = useRef<AbortController | null>(null);
+  const recipeDetailRef = useRef<AbortController | null>(null);
   const pendingAssistantRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const closeMeal = useCallback(() => setActiveMeal(null), []);
+  const closeRecipe = useCallback(() => {
+    recipeDetailRef.current?.abort();
+    recipeDetailRef.current = null;
+    setActiveRecipe(null);
+    setRecipeDetailError("");
+    setRecipeDetailBusy(false);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "meals" || mealShortlist) return;
+    const controller = new AbortController();
+    void Promise.resolve().then(() => {
+      if (controller.signal.aborted) return null;
+      setRecipeBusy(true);
+      setRecipeLoadError("");
+      return fetchRecipePage({ q: recipeSearch.trim(), limit: 12, offset: recipePageNumber * 12 }, controller.signal);
+    })
+      .then((nextPage) => { if (nextPage && mountedRef.current) setRecipePage(nextPage); })
+      .catch((error) => { if (!controller.signal.aborted && mountedRef.current) setRecipeLoadError(error instanceof Error ? error.message : "Recipes could not be loaded."); })
+      .finally(() => { if (!controller.signal.aborted && mountedRef.current) setRecipeBusy(false); });
+    return () => controller.abort();
+  }, [mealShortlist, recipePageNumber, recipeRetryNonce, recipeSearch, view]);
+
+  const openRecipe = useCallback((summary: RecipeSummary) => {
+    recipeDetailRef.current?.abort();
+    const controller = new AbortController();
+    recipeDetailRef.current = controller;
+    setActiveRecipe(null);
+    setRecipeDetailError("");
+    setRecipeDetailBusy(true);
+    void fetchRecipeDetail(summary.id, controller.signal)
+      .then((detail) => { if (mountedRef.current) setActiveRecipe(detail); })
+      .catch((error) => { if (!controller.signal.aborted && mountedRef.current) setRecipeDetailError(error instanceof Error ? error.message : "This recipe could not be loaded."); })
+      .finally(() => { if (!controller.signal.aborted && mountedRef.current) { setRecipeDetailBusy(false); recipeDetailRef.current = null; } });
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -176,6 +224,7 @@ export default function HomePage() {
       mountedRef.current = false;
       window.cancelAnimationFrame(frame);
       requestRef.current?.abort();
+      recipeDetailRef.current?.abort();
     };
   }, []);
 
@@ -358,13 +407,14 @@ export default function HomePage() {
               </section>
             )}
           </>
-        ) : view === "meals" ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist={Boolean(mealShortlist)} filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} />
+        ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
           : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} onDiscover={() => navigate("discover")} />
             : view === "preferences" ? <PreferencePanel preferences={preferences} onSave={savePreferences} />
               : <ConnectionPanel connection={connection} onConnectionChange={setConnection} onBackToChat={() => setView("discover")} />}
       </main>
       {notice && <div className="notice" role="status"><Bookmark size={16} aria-hidden="true" />{notice}</div>}
       <MealDetailModal meal={activeMeal} saved={activeMeal ? savedIds.includes(activeMeal.id) : false} onClose={closeMeal} onSave={toggleSaved} />
+      <RecipeDetailModal recipe={activeRecipe} loading={recipeDetailBusy} error={recipeDetailError} onClose={closeRecipe} />
     </div>
   );
 }
@@ -375,6 +425,19 @@ function ChatWorkspace({ messages, failedAssistantId, onRetry, retryAvailable, o
 
 function MealsView({ recommendations, preferences, isShortlist, filter, onFilterChange, onSave, savedIds, onOpen, onPreferences, onBrowseAll }: { recommendations: MealRecommendation[]; preferences: Preferences; isShortlist: boolean; filter: (typeof FILTERS)[number]["id"]; onFilterChange: (filter: (typeof FILTERS)[number]["id"]) => void; onSave: (meal: Meal) => void; savedIds: string[]; onOpen: (meal: Meal) => void; onPreferences: () => void; onBrowseAll: () => void; }) {
   return <section className="browse-view"><div className="view-heading"><p className="eyebrow">A LITTLE INSPIRATION</p><h1>{isShortlist ? "Your shortlist." : "Meals for the mood."}</h1><p>{isShortlist ? "The ideas from your conversation, ready for a closer look." : "Browse the small, cheerful catalog and find something that fits today."}</p></div><div className="content-toolbar"><div><p className="eyebrow">TUNED TO YOUR DEFAULTS</p><h2>{recommendations.length ? `${recommendations.length} good ideas` : "Nothing matches yet"}</h2><div className="constraint-summary" aria-label="Active meal preferences"><span>Up to {preferences.maxMinutes} min</span>{preferences.diet !== "any" && <span>{preferences.diet}</span>}{preferences.goal !== "balanced" && <span>{preferences.goal} goal</span>}{preferences.cuisine !== "any" && <span>{preferences.cuisine}</span>}{preferences.exclude.map((item) => <span key={item}>No {item}</span>)}<button className="constraint-edit" onClick={onPreferences}>Edit preferences</button></div></div><div className="filter-chips" role="group" aria-label="Filter meals">{FILTERS.map((item) => <button key={item.id} className={`filter-chip ${filter === item.id && !isShortlist ? "is-active" : ""}`} onClick={() => onFilterChange(item.id)} aria-pressed={filter === item.id && !isShortlist}>{item.label}</button>)}</div></div>{isShortlist && <button className="text-button" onClick={onBrowseAll}>Browse all meals <ArrowRight size={14} /></button>}{recommendations.length ? <div className="shortlist-grid">{recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved={savedIds.includes(recommendation.meal.id)} onSave={onSave} onOpen={onOpen} />)}</div> : <div className="empty-state"><div className="empty-state-icon"><Utensils size={22} /></div><h3>Let&apos;s widen the plate.</h3><p>No meals in this demo match all your preferences. Adjust the time or ingredients to see more ideas.</p><div className="empty-actions"><button className="detail-action" onClick={onPreferences}>Edit preferences <ArrowRight size={17} /></button></div></div>}</section>;
+}
+
+function RecipesView({ page, search, busy, error, pageNumber, onSearch, onRetry, onPageChange, onOpen }: { page: RecipePage | null; search: string; busy: boolean; error: string; pageNumber: number; onSearch: (value: string) => void; onRetry: () => void; onPageChange: (value: number) => void; onOpen: (recipe: RecipeSummary) => void; }) {
+  const pageSize = page?.limit ?? 12;
+  const totalPages = page ? Math.max(1, Math.ceil(page.total / pageSize)) : 1;
+  return <section className="browse-view">
+    <div className="view-heading"><p className="eyebrow">SOURCE-BACKED CATALOG</p><h1>Recipes for the mood.</h1><p>Browse the imported Open Recipes records. Only fields available in the source are shown.</p></div>
+    <div className="recipe-search-row"><label htmlFor="recipe-search">Search recipes</label><input id="recipe-search" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Try soup, pasta, chicken…" /><span>{page ? `${page.total.toLocaleString()} recipes` : ""}</span></div>
+    {error ? <div className="empty-state recipe-state" role="alert"><h3>Recipes unavailable.</h3><p>{error}</p><button className="detail-action" onClick={onRetry}>Try again <ArrowRight size={17} /></button></div> : busy && !page ? <div className="empty-state recipe-state" role="status"><LoaderCircle className="spin" size={22} /><h3>Loading recipes…</h3><p>Fetching source-backed records.</p></div> : page && page.items.length > 0 ? <>
+      <div className="shortlist-grid">{page.items.map((recipe) => <RecipeCard key={recipe.id} recipe={recipe} onOpen={onOpen} />)}</div>
+      <nav className="recipe-pagination" aria-label="Recipe pagination"><button onClick={() => onPageChange(Math.max(0, pageNumber - 1))} disabled={pageNumber === 0 || busy}>Previous</button><span>Page {pageNumber + 1} of {totalPages}</span><button onClick={() => onPageChange(Math.min(totalPages - 1, pageNumber + 1))} disabled={pageNumber >= totalPages - 1 || busy}>Next</button></nav>
+    </> : <div className="empty-state recipe-state"><div className="empty-state-icon"><Utensils size={22} /></div><h3>No recipes found.</h3><p>Try a different title or ingredient search.</p></div>}
+  </section>;
 }
 
 function SavedView({ recommendations, onSave, onOpen, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; onDiscover: () => void; }) {
