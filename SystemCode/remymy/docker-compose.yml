@@ -14,9 +14,58 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
       MCP_URL: http://mcp:8000/mcp
+      DATA_API_URL: http://api:8002
     depends_on:
       mcp:
         condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - remymy
+
+  api-migrate:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: remymy-api:dev
+    restart: "no"
+    environment:
+      ENV: ${ENV:-nonprod}
+      DATABASE_PATH: /data/remymy-food.db
+      PYTHONPATH: /opt/remymy-api/migrations:/opt/remymy-api/src
+      RECIPES_SOURCE: ${RECIPES_SOURCE:-}
+      FDC_SOURCE_DIR: ${FDC_SOURCE_DIR:-}
+      FDC_RELEASE: ${FDC_RELEASE:-unspecified}
+    volumes:
+      - "${DATA_DIR:-./data}:/data"
+    command: ["python", "-m", "migrations.bootstrap"]
+    networks:
+      - remymy
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: remymy-api:dev
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8002}:8002"
+    environment:
+      ENV: ${ENV:-nonprod}
+      HOST: 0.0.0.0
+      PORT: 8002
+      DATABASE_PATH: /data/remymy-food.db
+    depends_on:
+      api-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - "${DATA_DIR:-./data}:/data:ro"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
     networks:
       - remymy
 

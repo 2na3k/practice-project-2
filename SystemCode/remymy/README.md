@@ -9,6 +9,12 @@ Use `.env.nonprod` for the non-production environment. It should contain at leas
 ```env
 ENV=nonprod
 APP_PORT=3000
+API_PORT=8002
+DATA_DIR=./data
+# Optional: set both to enable one-shot source ingestion into DATA_DIR.
+RECIPES_SOURCE=
+FDC_SOURCE_DIR=
+FDC_RELEASE=unspecified
 MCP_PORT=8000
 MODEL_PORT=8001
 POSTGRES_PORT=5432
@@ -39,13 +45,20 @@ Check the resolved environment and Compose configuration without starting contai
 docker compose --env-file .env.nonprod config
 ```
 
+On startup, `api-migrate` runs once before the API. It validates an existing
+`remymy-food.db` and leaves it unchanged. If the database is missing, it
+requires both `RECIPES_SOURCE` and `FDC_SOURCE_DIR` to be explicitly set to
+source paths visible inside the writable `/data` mount; only then does it run
+ingestion. The API itself mounts the data directory read-only.
+
 Published local ports:
 
 | Service | URL |
 | --- | --- |
 | App | http://localhost:3000 |
+| Data API | http://localhost:8002 |
 | MCP | http://localhost:8000 |
 | Models | http://localhost:8001 |
 | PostgreSQL | localhost:5432 |
 
-Inside the Compose network, services should use `mcp`, `models`, and `database` as hostnames instead of `localhost`.
+Inside the Compose network, services should use `api`, `mcp`, `models`, and `database` as hostnames instead of `localhost`. The API reads the normalized SQLite database at `${DATA_DIR:-./data}/remymy-food.db` through a read-only mount; only its documented REST responses are exposed.
