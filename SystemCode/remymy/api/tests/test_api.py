@@ -63,6 +63,12 @@ def test_health_is_process_health(client):
     assert response.json() == {"status": "ok"}
 
 
+def test_ready_requires_a_usable_recipe_database(client):
+    response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_list_returns_only_the_narrow_summary_contract(client):
     response = client.get("/api/recipes", params={"q": "tomato"})
     assert response.status_code == 200
@@ -120,10 +126,25 @@ def test_pagination_bounds_are_validated(client, params, message):
 
 def test_missing_database_is_non_leaky_503(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "missing.db"))
-    response = TestClient(app).get("/api/recipes")
+    client = TestClient(app)
+    response = client.get("/api/recipes")
     assert response.status_code == 503
     assert response.json() == {"detail": "Recipe data is unavailable."}
     assert str(tmp_path) not in response.text
+
+    ready_response = client.get("/ready")
+    assert ready_response.status_code == 503
+    assert ready_response.json() == {"detail": "Recipe data is unavailable."}
+
+
+def test_zero_byte_database_is_not_ready(monkeypatch, tmp_path):
+    database = tmp_path / "empty.db"
+    database.touch()
+    monkeypatch.setenv("DATABASE_PATH", str(database))
+
+    response = TestClient(app).get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Recipe data is unavailable."}
 
 
 def test_unknown_recipe_is_404(client):

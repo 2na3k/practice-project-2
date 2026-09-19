@@ -61,7 +61,7 @@ services:
     volumes:
       - "${DATA_DIR:-./data}:/data:ro"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
       start_period: 10s
@@ -81,9 +81,64 @@ services:
       ENV: ${ENV:-nonprod}
       HOST: 0.0.0.0
       PORT: 8000
+      MODEL_URL: http://models:8001
+    depends_on:
+      models:
+        condition: service_healthy
     networks:
       - remymy
+
+  models:
+    build:
+      context: ./models
+      dockerfile: Dockerfile
+    image: remymy-models:dev
+    restart: unless-stopped
+    ports:
+      - "${MODEL_PORT:-8001}:8001"
+    environment:
+      ENV: ${ENV:-nonprod}
+      HOST: 0.0.0.0
+      PORT: 8001
+      MODEL_ARTIFACT_PATH: /data/models/${MODEL_FILE:-hybrid-foodcom-bpr.npz}
+      TOKEN_VOCAB_PATH: /data/raw/food-com/openai-gpt-vocab.json
+    volumes:
+      - "${DATA_DIR:-./data}:/data:ro"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+    networks:
+      - remymy
+
+  langflow:
+    image: langflowai/langflow:1.12.0
+    profiles: ["langflow"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${LANGFLOW_PORT:-7860}:7860"
+    environment:
+      LANGFLOW_AUTO_LOGIN: "true"
+      LANGFLOW_SKIP_AUTH_AUTO_LOGIN: "true"
+      LANGFLOW_CONFIG_DIR: /var/lib/langflow
+      LANGFLOW_NATIVE_TRACING: "true"
+    volumes:
+      - langflow-data:/var/lib/langflow
+      - ./scripts:/scripts:ro
+    networks:
+      - remymy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/health_check', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      start_period: 90s
+      retries: 10
 
 networks:
   remymy:
     driver: bridge
+
+volumes:
+  langflow-data:

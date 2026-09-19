@@ -584,6 +584,12 @@ img {
   align-items: center;
   gap: 5px;
 }
+.meal-card-disclaimer {
+  color: #9da48e;
+  font-size: 9px;
+  line-height: 1.4;
+  margin-top: 4px;
+}
 .meal-card-title {
   font-family: "Outfit", sans-serif;
   text-align: left;

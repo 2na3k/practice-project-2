@@ -119,6 +119,7 @@ temp/
 *.sqlite
 *.sqlite3
 *.mdb
+SystemCode/remymy/data/
 
 # --- Certificates and credentials ---
 *.p12
