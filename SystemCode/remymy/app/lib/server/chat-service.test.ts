@@ -33,6 +33,7 @@ vi.mock("@/lib/recommender", () => ({
       reasons: ["Fits the mock constraint."],
     },
   ],
+  alignRecommendations: (recommendations: unknown[]) => recommendations,
 }),
 // @ts-expect-error Vitest supports this virtual-module option at runtime.
 { virtual: true });

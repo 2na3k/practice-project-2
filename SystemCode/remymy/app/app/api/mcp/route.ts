@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { errorResponse, isRecord, isSameOriginMutation, readJsonBody, RequestGuardError } from "@/lib/server/request-guards";
 import { callMcpTool } from "@/lib/server/mcp-client";
+import { flushLangfuse, withLangfuseSpan } from "@/lib/server/langfuse";
 
 export const dynamic = "force-dynamic";
 
@@ -20,10 +21,17 @@ export async function POST(request: NextRequest): Promise<Response> {
     const name = typeof body.name === "string" ? body.name.trim() : "Remymy";
     if (name.length > 80) throw new RequestGuardError("The name is too long.", 400);
 
-    const message = await callMcpTool("say_hello", { name: name || "Remymy" }, request.signal);
+    const message = await withLangfuseSpan("mcp.say_hello", async (span) => {
+      span.update({ input: { name: name || "Remymy" }, metadata: { source: "python-mcp" } });
+      const text = await callMcpTool("say_hello", { name: name || "Remymy" }, request.signal);
+      span.update({ output: { message: text } });
+      return text;
+    }, { asType: "tool" });
     return jsonNoStore({ message });
   } catch (error) {
     if (error instanceof RequestGuardError) return errorResponse(error);
     return jsonNoStore({ error: "The Python MCP service is unavailable. Start it and try again." }, 502);
+  } finally {
+    await flushLangfuse();
   }
 }

@@ -44,6 +44,10 @@ vi.mock("@/lib/server/chat-service", () => ({
   })),
 // @ts-expect-error Vitest supports the virtual-module option at runtime.
 }), { virtual: true });
+// @ts-expect-error Vitest supports the virtual-module option at runtime.
+vi.mock("@/lib/server/langfuse", async () => import("./langfuse"), {
+  virtual: true,
+});
 
 import {
   DELETE as deleteConnection,

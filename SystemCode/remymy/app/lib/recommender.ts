@@ -87,6 +87,7 @@ const DIETARY_EXCLUSIONS: Record<string, string[]> = {
     "gochujang",
     "pepper flakes",
   ],
+  meat: ["meat", "meats", "red meat"],
 };
 
 const CUISINE_ALIASES: Record<string, string> = {
@@ -172,7 +173,7 @@ export function interpretRequest(
     /\bvegan\b|\bplant[- ]based\b|\bplant[- ]powered\b/.test(normalized) &&
     !/\b(?:not|no longer)\s+vegan\b/.test(normalized);
   const saysVegetarian =
-    /\bvegetarian\b|\bveggie\b|\bno\s+meat\b|\bmeat[- ]free\b/.test(
+    /\bvegetarian\b|\bveggie\b|\bveggies\b|\bno\s+meats?\b|\bmeat[\s\-\u2013\u2014]*free\b|\bmeatfree\b|\bwithout\s+(?:any\s+)?meats?\b|\b(?:avoid|avoiding|exclude|excluding|skip|skipping)\s+(?:any\s+)?meats?\b|\bdon(?:t|'t)\s+(?:eat|want|like)\s+meats?\b|\bno\s+animal(?:s|\s+protein|\s+products?)?\b/.test(
       normalized,
     ) && !/\b(?:not|no longer)\s+vegetarian\b/.test(normalized);
   if (saysVegan) source.diet = "vegan";
@@ -262,6 +263,13 @@ export function interpretRequest(
       source.cuisine = cuisine;
       break;
     }
+  }
+
+  if (
+    source.diet === "any" &&
+    source.exclude.some((exclusion) => canonicalExclude(exclusion) === "meat")
+  ) {
+    source.diet = "vegetarian";
   }
 
   return source;
@@ -401,4 +409,22 @@ export function recommendMeals(
   );
   const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.min(MEALS.length, Math.floor(limit))) : 6;
   return ranked.slice(0, boundedLimit);
+}
+
+/** Drop meals that miss the current constraints, then backfill from the ranked catalog. */
+export function alignRecommendations(
+  recommendations: MealRecommendation[],
+  preferences: Preferences,
+  query?: string,
+  limit = 6,
+): MealRecommendation[] {
+  const ranked = recommendMeals(preferences, query, MEALS.length);
+  const allowed = new Set(ranked.map((item) => item.meal.id));
+  const kept = recommendations.filter((item) => allowed.has(item.meal.id));
+  const seen = new Set(kept.map((item) => item.meal.id));
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.min(MEALS.length, Math.floor(limit))) : 6;
+  return [
+    ...kept,
+    ...ranked.filter((item) => !seen.has(item.meal.id)),
+  ].slice(0, boundedLimit);
 }

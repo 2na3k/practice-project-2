@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_PREFERENCES, MEALS, type Preferences } from "./meals";
-import { interpretRequest, recommendMeals } from "./recommender";
+import { alignRecommendations, interpretRequest, recommendMeals } from "./recommender";
 
 const ids = (preferences: Preferences, query?: string): string[] =>
   recommendMeals(preferences, query).map(({ meal }) => meal.id);
@@ -219,5 +219,55 @@ describe("recommendMeals", () => {
   it("never returns more than the intended shortlist size", () => {
     expect(recommendMeals(DEFAULT_PREFERENCES).length).toBeLessThanOrEqual(6);
     expect(MEALS.length).toBeGreaterThan(6);
+  });
+
+  it("treats meat-free phrasing as vegetarian and keeps meat out of the cards", () => {
+    const prompts = [
+      "Better meat-free picks",
+      "without meat",
+      "I don't eat meat",
+      "exclude meat",
+      "meatfree dinners under 30 minutes",
+    ];
+
+    for (const prompt of prompts) {
+      const preferences = interpretRequest(prompt, DEFAULT_PREFERENCES);
+      expect(preferences.diet).toBe("vegetarian");
+      const recommendations = recommendMeals(preferences, prompt);
+      expect(recommendations.length).toBeGreaterThan(0);
+      expect(
+        recommendations.every(
+          ({ meal }) =>
+            meal.tags.includes("vegetarian") || meal.tags.includes("vegan"),
+        ),
+      ).toBe(true);
+      expect(
+        recommendations.every(
+          ({ meal }) =>
+            !/turkey|chicken|salmon|beef|tuna/i.test(meal.title),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("drops meat meals from a mixed shortlist when the request is meat-free", () => {
+    const mixed = recommendMeals(DEFAULT_PREFERENCES);
+    expect(mixed.some(({ meal }) => /turkey|chicken|salmon/i.test(meal.title))).toBe(
+      true,
+    );
+
+    const preferences = interpretRequest("meat-free picks", DEFAULT_PREFERENCES);
+    const aligned = alignRecommendations(mixed, preferences, "meat-free picks");
+
+    expect(aligned.length).toBeGreaterThan(0);
+    expect(
+      aligned.every(
+        ({ meal }) =>
+          meal.tags.includes("vegetarian") || meal.tags.includes("vegan"),
+      ),
+    ).toBe(true);
+    expect(aligned.some(({ meal }) => meal.id === "sesame-tofu-rice-bowl")).toBe(
+      true,
+    );
   });
 });

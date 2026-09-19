@@ -3,7 +3,7 @@
 import Image from "next/image";
 
 import { Bookmark, Clock3, Flame, Leaf, Sparkles } from "lucide-react";
-import type { Meal } from "@/lib/meals";
+import { MEAL_DATA_NOTE, type Meal } from "@/lib/meals";
 
 export type MealRecommendation = {
   meal: Meal;
@@ -62,6 +62,9 @@ export function MealCard({
             <Flame size={14} aria-hidden="true" /> {meal.calories} kcal
           </span>
         </div>
+        <p className="meal-card-disclaimer" title={MEAL_DATA_NOTE}>
+          Nutrition and timing are demo estimates.
+        </p>
         <button className="meal-card-title" onClick={() => onOpen(meal)}>
           {meal.title}
         </button>

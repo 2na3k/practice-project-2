@@ -19,6 +19,15 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
+@router.get("/ready", response_model=HealthResponse)
+def ready() -> HealthResponse:
+    """Report readiness only after the normalized recipe database is usable."""
+
+    connection = open_database()
+    close_database(connection)
+    return HealthResponse(status="ok")
+
+
 @router.get("/api/recipes", response_model=RecipeListResponse)
 def list_recipes(
     q: Annotated[str | None, Query(max_length=200)] = None,

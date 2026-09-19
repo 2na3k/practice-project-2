@@ -3,6 +3,7 @@ import { errorResponse, isSameOriginMutation, readJsonBody } from "@/lib/server/
 import { CONNECTION_COOKIE, getSession } from "@/lib/server/session-store";
 import { getPiModels, resolveSupportedModel } from "@/lib/server/model-registry";
 import { ChatServiceError, runChat, validateChatRequest } from "@/lib/server/chat-service";
+import { flushLangfuse } from "@/lib/server/langfuse";
 
 export const dynamic = "force-dynamic";
 
@@ -23,5 +24,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   } catch (error) {
     if (error instanceof ChatServiceError) return jsonNoStore({ error: error.message }, error.status);
     return errorResponse(error, 502);
+  } finally {
+    await flushLangfuse();
   }
 }

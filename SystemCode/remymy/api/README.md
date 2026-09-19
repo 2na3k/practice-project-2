@@ -17,7 +17,9 @@ and parameterized SQLite queries.
 
 ## Public contract
 
-- `GET /health` returns `{ "status": "ok" }`.
+- `GET /health` returns `{ "status": "ok" }` while the API process is running.
+- `GET /ready` returns `{ "status": "ok" }` only when the normalized recipe
+  database exists and has the required recipe tables.
 - `GET /api/recipes?q=&limit=&offset=` returns `{ items, total, limit, offset }`.
   Each item contains only `id`, `title`, `ingredient_count`,
   `ingredient_preview`, and `quality_status`.
@@ -37,7 +39,8 @@ records, quarantine rows, nutrition, or arbitrary SQL.
 
 Set `DATABASE_PATH` to the ingested SQLite file. The container listens on port
 `8002`, with a default database path of `/data/remymy-food.db`. `/health`
-reports process health only; recipe routes return a generic `503 Recipe data is
+reports process liveness, while `/ready` validates database availability for
+container readiness. Recipe routes return a generic `503 Recipe data is
 unavailable.` when the file is missing, invalid, or missing required recipe
 tables. No local path or SQLite error is returned to callers.
 
