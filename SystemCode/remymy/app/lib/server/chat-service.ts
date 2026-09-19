@@ -12,6 +12,7 @@ import type { Preferences } from "@/lib/meals";
 import { interpretRequest, recommendMeals, type MealRecommendation } from "@/lib/recommender";
 import { MAX_CHAT_TEXT_CHARS, MAX_CHAT_TURNS } from "./request-guards";
 import { callMcpTool } from "./mcp-client";
+import { withLangfuseSpan } from "./langfuse";
 
 export const CHAT_TIMEOUT_MS = 60_000;
 export const MAX_TOOL_TURNS = 4;
@@ -96,18 +97,20 @@ const mealTool = (baseline: Preferences, onResult: (preferences: Preferences, re
   description: "Search the curated Remymy MEALS catalog. Use this for every meal recommendation and never invent meals outside its results.",
   parameters: recommendationParameters,
   executionMode: "sequential",
-  execute: async (_toolCallId, params) => {
+  execute: async (_toolCallId, params) => withLangfuseSpan("recommend_meals", async (span) => {
+    span.update({ input: params, metadata: { tool: "recommend_meals" } });
     const requestedPreferences = isPreferences(params.preferences) ? params.preferences : baseline;
     const preferences = preserveHardPreferences(requestedPreferences, baseline);
     const query = typeof params.query === "string" ? params.query.slice(0, MAX_CHAT_TEXT_CHARS) : undefined;
     const interpreted = preserveHardPreferences(query ? interpretRequest(query, preferences) : preferences, baseline);
     const recommendations = recommendMeals(interpreted);
     onResult(interpreted, recommendations);
+    span.update({ output: { preferences: interpreted, recommendationCount: recommendations.length, titles: recommendations.slice(0, 8).map((item) => item.meal.title) } });
     return {
       content: [{ type: "text", text: JSON.stringify({ preferences: interpreted, recommendations }) }],
       details: { preferences: interpreted, recommendations },
     };
-  },
+  }, { asType: "tool" }),
 });
 
 const mcpHelloTool = (onUsed: () => void): AgentTool<typeof mcpHelloParameters, { source: "mcp"; tool: "say_hello" }> => ({
@@ -116,15 +119,17 @@ const mcpHelloTool = (onUsed: () => void): AgentTool<typeof mcpHelloParameters, 
   description: "Call the connected Remymy Python MCP service to say hello. Use this when the user asks to test MCP or asks you to say hello.",
   parameters: mcpHelloParameters,
   executionMode: "sequential",
-  execute: async (_toolCallId, params, signal) => {
+  execute: async (_toolCallId, params, signal) => withLangfuseSpan("say_hello", async (span) => {
     const name = params.name?.trim() || "there";
+    span.update({ input: { name }, metadata: { tool: "say_hello", source: "mcp" } });
     const text = await callMcpTool("say_hello", { name }, signal);
     onUsed();
+    span.update({ output: { text } });
     return {
       content: [{ type: "text", text }],
       details: { source: "mcp", tool: "say_hello" },
     };
-  },
+  }, { asType: "tool" }),
 });
 
 export type MealAgent = {
@@ -204,38 +209,53 @@ export async function runChat(
   models: Models,
   signal?: AbortSignal,
 ): Promise<ChatResult> {
-  const latest = request.messages[request.messages.length - 1];
-  if (!latest || latest.role !== "user") throw new ChatServiceError(400, "The last chat message must be from the user.");
-  const effectivePreferences = interpretRequest(latest.text, request.preferences);
-  const initialMessages = toAgentMessages(model, request.messages).slice(0, -1);
-  const mealAgent = createMealAgent(model, apiKey, effectivePreferences, models, initialMessages);
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    mealAgent.agent.abort();
-  }, CHAT_TIMEOUT_MS);
-  const abort = () => mealAgent.agent.abort();
-  signal?.addEventListener("abort", abort, { once: true });
-  try {
+  return withLangfuseSpan("pi-agent-chat", async (span) => {
+    span.update({
+      input: { messages: request.messages, preferences: request.preferences },
+      metadata: { provider: model.provider, model: model.id, runtime: "pi-agent-core" },
+    });
+    const latest = request.messages[request.messages.length - 1];
+    if (!latest || latest.role !== "user") throw new ChatServiceError(400, "The last chat message must be from the user.");
+    const effectivePreferences = interpretRequest(latest.text, request.preferences);
+    const initialMessages = toAgentMessages(model, request.messages).slice(0, -1);
+    const mealAgent = createMealAgent(model, apiKey, effectivePreferences, models, initialMessages);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      mealAgent.agent.abort();
+    }, CHAT_TIMEOUT_MS);
+    const abort = () => mealAgent.agent.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      if (signal?.aborted) throw new ChatServiceError(499, "The request was cancelled.");
+      await mealAgent.agent.prompt(latest.text);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    }
+    if (timedOut) throw new ChatServiceError(504, "The model request timed out. Try again.");
     if (signal?.aborted) throw new ChatServiceError(499, "The request was cancelled.");
-    await mealAgent.agent.prompt(latest.text);
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener("abort", abort);
-  }
-  if (timedOut) throw new ChatServiceError(504, "The model request timed out. Try again.");
-  if (signal?.aborted) throw new ChatServiceError(499, "The request was cancelled.");
-  const finalMessage = [...mealAgent.agent.state.messages].reverse().find((message): message is AssistantMessage => message.role === "assistant");
-  if (!finalMessage || finalMessage.stopReason === "error") throw new ChatServiceError(502, "The model could not complete this request.");
-  if (finalMessage.stopReason === "aborted") throw new ChatServiceError(504, "The model request was interrupted. Try again.");
-  const text = textFromAssistant(finalMessage);
-  const recommendations = mealAgent.getRecommendations();
-  return {
-    text: text || (recommendations.length ? `I found ${recommendations.length} options in the Remymy catalog.` : "I couldn't find a match in the Remymy catalog with those preferences."),
-    preferences: mealAgent.getPreferences(),
-    recommendations,
-    toolsUsed: mealAgent.getToolsUsed(),
-  };
+    const finalMessage = [...mealAgent.agent.state.messages].reverse().find((message): message is AssistantMessage => message.role === "assistant");
+    if (!finalMessage || finalMessage.stopReason === "error") throw new ChatServiceError(502, "The model could not complete this request.");
+    if (finalMessage.stopReason === "aborted") throw new ChatServiceError(504, "The model request was interrupted. Try again.");
+    const text = textFromAssistant(finalMessage);
+    const recommendations = mealAgent.getRecommendations();
+    const result = {
+      text: text || (recommendations.length ? `I found ${recommendations.length} options in the Remymy catalog.` : "I couldn't find a match in the Remymy catalog with those preferences."),
+      preferences: mealAgent.getPreferences(),
+      recommendations,
+      toolsUsed: mealAgent.getToolsUsed(),
+    };
+    span.update({
+      output: {
+        text: result.text,
+        toolsUsed: result.toolsUsed,
+        recommendationCount: result.recommendations.length,
+        titles: result.recommendations.slice(0, 8).map((item) => item.meal.title),
+      },
+    });
+    return result;
+  }, { asType: "agent" });
 }
 
 export function validateChatRequest(value: unknown): ChatRequest | undefined {

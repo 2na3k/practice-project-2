@@ -57,9 +57,11 @@ Published local ports:
 | Service | URL |
 | --- | --- |
 | App | http://localhost:3000 |
+| Langfuse | http://localhost:3030 |
 | Data API | http://localhost:8002 |
 | MCP | http://localhost:8000 |
 | Models | http://localhost:8001 |
-| PostgreSQL | localhost:5432 |
 
-Inside the Compose network, services should use `api`, `mcp`, `models`, and `database` as hostnames instead of `localhost`. The API reads the normalized SQLite database at `${DATA_DIR:-./data}/remymy-food.db` through a read-only mount; only its documented REST responses are exposed.
+Langfuse is the tracing UI for connected Pi agent chat (`/api/chat`) and the MCP hello probe. Sign in with `remymy@example.com` / `remymylocal` on the local stack. Demo-mode Discover replies stay in the browser and do not create traces.
+
+Inside the Compose network, services should use `api`, `mcp`, `models`, and `langfuse-web` as hostnames instead of `localhost`. The API reads the normalized SQLite database at `${DATA_DIR:-./data}/remymy-food.db` through a read-only mount; only its documented REST responses are exposed.

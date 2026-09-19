@@ -15,6 +15,9 @@ services:
       PORT: 3000
       MCP_URL: http://mcp:8000/mcp
       DATA_API_URL: http://api:8002
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
     depends_on:
       mcp:
         condition: service_healthy
@@ -113,32 +116,158 @@ services:
     networks:
       - remymy
 
-  langflow:
-    image: langflowai/langflow:1.12.0
-    profiles: ["langflow"]
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:3
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:${LANGFLOW_PORT:-7860}:7860"
-    environment:
-      LANGFLOW_AUTO_LOGIN: "true"
-      LANGFLOW_SKIP_AUTH_AUTO_LOGIN: "true"
-      LANGFLOW_CONFIG_DIR: /var/lib/langflow
-      LANGFLOW_NATIVE_TRACING: "true"
-    volumes:
-      - langflow-data:/var/lib/langflow
-      - ./scripts:/scripts:ro
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3030}
+      DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-postgres}@langfuse-postgres:5432/postgres
+      SALT: ${LANGFUSE_SALT:-remymy-nonprod-salt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-bc154720b48e07c4e33dfc5d4e65c93ef7a63cd1a947094b0e95be0f043af4ef}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-myredissecret}
     networks:
       - remymy
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - "127.0.0.1:${LANGFUSE_PORT:-3030}:3000"
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-remymy-nonprod-nextauth-secret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://127.0.0.1:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_INIT_ORG_ID: remymy
+      LANGFUSE_INIT_ORG_NAME: Remymy
+      LANGFUSE_INIT_PROJECT_ID: remymy-pi
+      LANGFUSE_INIT_PROJECT_NAME: Remymy Pi Agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-remymy@example.com}
+      LANGFUSE_INIT_USER_NAME: remymy
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-remymylocal}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/health_check', timeout=5)"]
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3000/api/public/health"]
       interval: 15s
-      timeout: 6s
+      timeout: 5s
       start_period: 90s
+      retries: 12
+    networks:
+      - remymy
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
       retries: 10
+      start_period: 10s
+    networks:
+      - remymy
+
+  langfuse-minio:
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+    ports:
+      - "127.0.0.1:9090:9000"
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    networks:
+      - remymy
+
+  langfuse-redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_AUTH:-myredissecret}", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - langfuse-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "myredissecret", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - remymy
+
+  langfuse-postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - remymy
 
 networks:
   remymy:
     driver: bridge
 
 volumes:
-  langflow-data:
+  langfuse-postgres-data:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:
+  langfuse-redis-data:
