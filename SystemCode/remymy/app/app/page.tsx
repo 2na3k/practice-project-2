@@ -28,7 +28,7 @@ import {
   type Preferences,
 } from "@/lib/meals";
 import { demoReply } from "@/lib/demo-chat";
-import { recommendMeals } from "@/lib/recommender";
+import { alignRecommendations, interpretRequest, recommendMeals } from "@/lib/recommender";
 import type {
   ChatResult,
   ChatTurn,
@@ -318,13 +318,17 @@ export default function HomePage() {
         result = await Promise.resolve(demoReply(text, requestPreferences, chat.length));
       }
       if (controller.signal.aborted || !mountedRef.current) return;
-      setPreferences(result.preferences);
+      const alignedPreferences = interpretRequest(text, result.preferences);
+      const alignedRecommendations = result.recommendations.length
+        ? alignRecommendations(result.recommendations, alignedPreferences, text)
+        : result.recommendations;
+      setPreferences(alignedPreferences);
       setChat((current) => current.map((message) => message.id === assistantId ? {
         ...message,
         text: result.text,
         status: undefined,
         source: result.toolsUsed?.length ? `${responseSource} · MCP` : responseSource,
-        recommendations: result.recommendations,
+        recommendations: alignedRecommendations,
       } : message));
     } catch (error) {
       if (controller.signal.aborted || !mountedRef.current) return;

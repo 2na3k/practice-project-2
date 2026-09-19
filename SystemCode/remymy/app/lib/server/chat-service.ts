@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ChatRequest, ChatResult } from "@/lib/chat-types";
 import type { Preferences } from "@/lib/meals";
-import { interpretRequest, recommendMeals, type MealRecommendation } from "@/lib/recommender";
+import { alignRecommendations, interpretRequest, recommendMeals, type MealRecommendation } from "@/lib/recommender";
 import { MAX_CHAT_TEXT_CHARS, MAX_CHAT_TURNS } from "./request-guards";
 import { callMcpTool } from "./mcp-client";
 import { withLangfuseSpan } from "./langfuse";
@@ -94,7 +94,7 @@ const toAgentMessages = (model: Model<Api>, messages: ChatRequest["messages"]): 
 const mealTool = (baseline: Preferences, onResult: (preferences: Preferences, recommendations: MealRecommendation[]) => void): AgentTool<typeof recommendationParameters, { preferences: Preferences; recommendations: MealRecommendation[] }> => ({
   name: "recommend_meals",
   label: "Recommend meals",
-  description: "Search the curated Remymy MEALS catalog. Use this for every meal recommendation and never invent meals outside its results.",
+  description: "Search the curated Remymy MEALS catalog. Use this for every meal recommendation and never invent meals outside its results. If the user asks for meat-free, vegetarian, or vegan food, pass that diet in preferences.",
   parameters: recommendationParameters,
   executionMode: "sequential",
   execute: async (_toolCallId, params) => withLangfuseSpan("recommend_meals", async (span) => {
@@ -102,8 +102,8 @@ const mealTool = (baseline: Preferences, onResult: (preferences: Preferences, re
     const requestedPreferences = isPreferences(params.preferences) ? params.preferences : baseline;
     const preferences = preserveHardPreferences(requestedPreferences, baseline);
     const query = typeof params.query === "string" ? params.query.slice(0, MAX_CHAT_TEXT_CHARS) : undefined;
-    const interpreted = preserveHardPreferences(query ? interpretRequest(query, preferences) : preferences, baseline);
-    const recommendations = recommendMeals(interpreted);
+    const interpreted = preserveHardPreferences(interpretRequest(query ?? "", preferences), baseline);
+    const recommendations = recommendMeals(interpreted, query);
     onResult(interpreted, recommendations);
     span.update({ output: { preferences: interpreted, recommendationCount: recommendations.length, titles: recommendations.slice(0, 8).map((item) => item.meal.title) } });
     return {
@@ -161,6 +161,7 @@ export function createMealAgent(
     "Call recommend_meals whenever the user asks for meal ideas, changes preferences, or asks what to eat.",
     "Call say_hello whenever the user asks to test MCP or asks you to say hello; it is backed by the Remymy Python MCP service.",
     `The authoritative starting preference state is ${JSON.stringify(preferences)}. Preserve its diet, time limit, and exclusions in every tool call.`,
+    "If the user wants meat-free meals, pass diet vegetarian or vegan into recommend_meals. Never list meat, poultry, or fish when that constraint is active.",
     "Keep the final answer brief, human, and in simple markdown. Mention only meals returned by the tool.",
     "Do not provide medical or nutrition guarantees; the catalog contains demo estimates.",
   ].join(" ");
@@ -239,10 +240,14 @@ export async function runChat(
     if (!finalMessage || finalMessage.stopReason === "error") throw new ChatServiceError(502, "The model could not complete this request.");
     if (finalMessage.stopReason === "aborted") throw new ChatServiceError(504, "The model request was interrupted. Try again.");
     const text = textFromAssistant(finalMessage);
-    const recommendations = mealAgent.getRecommendations();
+    const preferences = preserveHardPreferences(mealAgent.getPreferences(), effectivePreferences);
+    const toolRecommendations = mealAgent.getRecommendations();
+    const recommendations = toolRecommendations.length
+      ? alignRecommendations(toolRecommendations, preferences, latest.text)
+      : toolRecommendations;
     const result = {
       text: text || (recommendations.length ? `I found ${recommendations.length} options in the Remymy catalog.` : "I couldn't find a match in the Remymy catalog with those preferences."),
-      preferences: mealAgent.getPreferences(),
+      preferences,
       recommendations,
       toolsUsed: mealAgent.getToolsUsed(),
     };
