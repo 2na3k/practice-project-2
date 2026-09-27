@@ -133,4 +133,5 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
 
 @router.get("/api/recommend/{user_id}", response_model=RecommendedRecipe)
 def get_recommendation(user_id: str) -> RecommendedRecipe:
+    # assume user_id is correct for now
     pass
