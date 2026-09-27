@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query
 
 from .db import close_database, open_database, split_preview
-from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary
+from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendedRecipe
 
 
 router = APIRouter()
@@ -130,3 +130,7 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     finally:
         close_database(connection)
+
+@router.get("/api/recommend/{user_id}", response_model=RecommendedRecipe)
+def get_recommendation(user_id: str) -> RecommendedRecipe:
+    pass

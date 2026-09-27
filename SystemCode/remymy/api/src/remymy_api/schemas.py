@@ -67,3 +67,10 @@ class UserHistory(BaseModel):
     timestamp: datetime
     rating: int | None = Field(default=None, ge=0, le=5)
     recipe_id: str
+
+class RecommendedRecipe(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    score: float
