@@ -5,11 +5,9 @@ import sqlite3
 from datetime import datetime, timezone
 
 import pytest
-import redis
 from fastapi.testclient import TestClient
 
-from remymy_api import main, recommend
-from remymy_api.bloom import BloomFilter
+from remymy_api import recommend
 from remymy_api.main import app
 from remymy_api.users import add_history, create_user, init_user_database, open_user_database
 
@@ -40,27 +38,6 @@ class FakeModels:
             for entry in payload["history"]
         ]
         return {"ingredients": matched, "items": RECOMMENDED if any(matched) else []}
-
-
-class FakeCache:
-    def __init__(self, down: bool = False) -> None:
-        self.down = down
-        self.store: dict[str, bytes] = {}
-        self.ttls: dict[str, int] = {}
-
-    def get(self, key: str) -> bytes | None:
-        if self.down:
-            raise redis.ConnectionError("down")
-        return self.store.get(key)
-
-    def set(self, key: str, value: str, ex: int) -> None:
-        if self.down:
-            raise redis.ConnectionError("down")
-        self.store[key] = value.encode()
-        self.ttls[key] = ex
-
-    def close(self) -> None:
-        pass
 
 
 @pytest.fixture
@@ -104,22 +81,15 @@ def models(monkeypatch):
     return fake
 
 
-@pytest.fixture
-def cache(monkeypatch):
-    fake = FakeCache()
-    monkeypatch.setattr(main, "connect_cache", lambda: fake)
-    return fake
-
-
-def seed_alice(stores) -> int:
-    alice = create_user(stores, BloomFilter(capacity=1_000), "alice")
+def seed_alice(stores, cache) -> int:
+    alice = create_user(stores, cache, "alice")
     add_history(stores, alice.id, "openrecipes:1", rating=4)
     add_history(stores, alice.id, "openrecipes:2")
     return alice.id
 
 
 def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models, cache):
-    alice = seed_alice(stores)
+    alice = seed_alice(stores, cache)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice", params={"top_k": 2})
@@ -155,7 +125,7 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
 
 
 def test_later_requests_are_served_from_the_cache(stores, models, cache):
-    seed_alice(stores)
+    seed_alice(stores, cache)
 
     with TestClient(app) as client:
         first = client.get("/api/recommend/alice", params={"top_k": 1}).json()
@@ -165,6 +135,19 @@ def test_later_requests_are_served_from_the_cache(stores, models, cache):
     assert [item["id"] for item in first["items"]] == ["167516"]
     assert [item["id"] for item in second["items"]] == ["167516", "175237", "168516"]
     assert second["profile"] == first["profile"]
+
+
+def test_user_lookup_goes_to_redis_before_the_database(stores, models, cache):
+    alice = seed_alice(stores, cache)
+    cache.store.clear()
+
+    with TestClient(app) as client:
+        client.get("/api/recommend/alice")
+        client.get("/api/recommend/alice")
+
+    assert cache.reads[0] == "user:alice"
+    assert cache.store["user:alice"] == str(alice).encode()
+    assert len(models.calls) == 1
 
 
 def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
@@ -177,7 +160,7 @@ def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
 
 
 def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache):
-    bob = create_user(stores, BloomFilter(capacity=1_000), "bob")
+    bob = create_user(stores, cache, "bob")
     add_history(stores, bob.id, "openrecipes:3", rating=5)
 
     with TestClient(app) as client:
@@ -188,9 +171,9 @@ def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache)
     assert f"recommendations:{bob.id}" in cache.store
 
 
-def test_redis_down_still_answers_from_the_model(stores, models, monkeypatch):
-    monkeypatch.setattr(main, "connect_cache", lambda: FakeCache(down=True))
-    seed_alice(stores)
+def test_redis_down_still_answers_from_the_model(stores, models, cache):
+    seed_alice(stores, cache)
+    cache.down = True
 
     with TestClient(app) as client:
         first = client.get("/api/recommend/alice")
@@ -203,11 +186,11 @@ def test_redis_down_still_answers_from_the_model(stores, models, monkeypatch):
 
 def test_unreachable_model_service_is_503_and_not_cached(stores, cache, monkeypatch):
     monkeypatch.setenv("ML_MODELS_URL", "http://127.0.0.1:9")
-    seed_alice(stores)
+    alice = seed_alice(stores, cache)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice")
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Recommendations are unavailable."}
-    assert cache.store == {}
+    assert f"recommendations:{alice}" not in cache.store

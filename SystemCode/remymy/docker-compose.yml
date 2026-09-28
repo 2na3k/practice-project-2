@@ -61,6 +61,7 @@ services:
       USER_DATABASE_PATH: /state/remymy-users.db
       ML_MODELS_URL: http://ml-models:8003
       REDIS_URL: redis://redis:6379/0
+      SEED_DEMO_USER: ${SEED_DEMO_USER:-true}
     depends_on:
       api-migrate:
         condition: service_completed_successfully

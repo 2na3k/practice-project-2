@@ -96,10 +96,11 @@ def recommend(history: list[UserHistory]) -> RecommendationResponse:
         },
     )
     matched = [[Ingredient(**ingredient) for ingredient in entry] for entry in result["ingredients"]]
+    recommended_items = sorted(result["items"], key=lambda x: x["p_like"], reverse=True)
     return RecommendationResponse(
         profile=buying_profile(history, matched),
-        items=[
+        ressult=[
             RecommendedRecipe(id=str(item["fdc_id"]), title=item["name"], score=item["p_like"])
-            for item in result["items"]
+            for item in recommended_items
         ],
     )

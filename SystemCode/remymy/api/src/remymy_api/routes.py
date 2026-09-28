@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from .db import close_database, open_database, split_preview
 from .cache import read_recommendations, write_recommendations
@@ -14,14 +14,14 @@ from .users import fetch_user_history, open_user_database
 router = APIRouter()
 
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse, tags=["health"])
 def health() -> HealthResponse:
     """Report process health; recipe routes report data availability."""
 
     return HealthResponse(status="ok")
 
 
-@router.get("/ready", response_model=HealthResponse)
+@router.get("/ready", response_model=HealthResponse, tags=["health"])
 def ready() -> HealthResponse:
     """Report readiness only after the normalized recipe database is usable."""
 
@@ -30,7 +30,7 @@ def ready() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-@router.get("/api/recipes", response_model=RecipeListResponse)
+@router.get("/api/recipes", response_model=RecipeListResponse, tags=["recipes"])
 def list_recipes(
     q: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -94,7 +94,7 @@ def list_recipes(
         close_database(connection)
 
 
-@router.get("/api/recipes/{recipe_id}", response_model=RecipeDetail)
+@router.get("/api/recipes/{recipe_id}", response_model=RecipeDetail, tags=["recipes"])
 def get_recipe(recipe_id: str) -> RecipeDetail:
     connection = open_database()
     try:
@@ -133,21 +133,24 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     finally:
         close_database(connection)
 
-@router.get("/api/recommend/{username}", response_model=RecommendationResponse)
+@router.get("/api/recommend/{username}", response_model=RecommendationResponse, tags=["recommendations"])
 def get_recommendation(
-    username: str,
+    username: Annotated[
+        str,
+        Path(openapi_examples={"demo": {"summary": "Seeded demo user", "value": "demo"}}),
+    ],
     request: Request,
     top_k: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> RecommendationResponse:
+    cache = request.app.state.cache
     connection = open_user_database()
     try:
-        user_history = fetch_user_history(connection, request.app.state.usernames, username)
+        user_history = fetch_user_history(connection, cache, username)
     finally:
         connection.close()
     if len(user_history) == 0:
         return RecommendationResponse(profile=None, items=[])
 
-    cache = request.app.state.cache
     if cache is None:
         recommendations = recommend(user_history)
         write_recommendations(cache, user_id, recommendations)

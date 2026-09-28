@@ -20,6 +20,25 @@ def connect_cache() -> redis.Redis:
     )
 
 
+def user_key(username: str) -> str:
+    return f"user:{username}"
+
+
+def read_user_id(cache: redis.Redis, username: str) -> int | None:
+    try:
+        raw = cache.get(user_key(username))
+        return None if raw is None else int(raw)
+    except (redis.RedisError, ValueError):
+        return None
+
+
+def write_user_id(cache: redis.Redis, username: str, user_id: int) -> None:
+    try:
+        cache.set(user_key(username), user_id)
+    except redis.RedisError:
+        pass
+
+
 def recommendations_key(user_id: int) -> str:
     return f"recommendations:{user_id}"
 

@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pandas as pd
 from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "inference"))
 
 from model_inference_reranker_avgemb import normalize_price_text
 from model_inference_score_recommend import RetrievalPipeline
 
 
-HERE = Path(__file__).resolve().parent
-CATALOG_PATH = Path(os.getenv("CATALOG_PATH", "/catalog/price_mapped_nutrients.csv"))
+CATALOG_PATH = Path(
+    os.getenv("CATALOG_PATH", str(HERE.parent / "data" / "price_mapped_nutrients.csv"))
+)
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", str(HERE / "weights" / "gru_xattn_reranker")))
 INDEX_DIR = Path(os.getenv("INDEX_DIR", str(Path(tempfile.gettempdir()) / "remymy-retrieval-index")))
 NUTRIENT_COLUMNS = (
@@ -39,7 +45,24 @@ class HistoryEntry(BaseModel):
 
 
 class RecommendRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "history": [
+                        {
+                            "rating": 5,
+                            "date": "2026-09-01",
+                            "ingredients": ["chicken breast", "tomatoes", "salt", "butter"],
+                        },
+                        {"rating": 2, "date": "2026-09-10", "ingredients": ["apples", "butter"]},
+                    ],
+                    "top_k": 5,
+                }
+            ]
+        },
+    )
 
     history: list[HistoryEntry] = Field(min_length=1, max_length=500)
     top_k: int = Field(default=10, ge=1, le=50)
@@ -83,7 +106,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Remymy ML models", version="1.0.0", lifespan=lifespan)
 
 
-@app.get("/health")
+@app.get("/", include_in_schema=False)
+def docs_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/health", tags=["health"])
 def health(request: Request) -> dict[str, object]:
     return {
         "status": "ok",
@@ -92,7 +120,7 @@ def health(request: Request) -> dict[str, object]:
     }
 
 
-@app.post("/v1/recommend")
+@app.post("/v1/recommend", tags=["recommendations"])
 def recommend(body: RecommendRequest, request: Request) -> dict[str, object]:
     matched = [match_entry(request.app.state.ingredients, entry.ingredients) for entry in body.history]
     history = [
