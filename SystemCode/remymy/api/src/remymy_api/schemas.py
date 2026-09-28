@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RecipeSummary(BaseModel):
@@ -36,3 +39,31 @@ class HealthResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: str
+
+
+Diet = Literal["vegetarian", "halal", "Hinduism"]
+
+
+class Preferences(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    special_diet: Diet | None = None
+    cuisines: list[str] = Field(default_factory=list, max_length=40)
+    preferred_nutrient: str | None = Field(default=None, max_length=64)
+
+
+class User(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    username: str = Field(min_length=1)
+    preferences: Preferences = Field(default_factory=Preferences)
+
+
+class UserHistory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    timestamp: datetime
+    rating: int | None = Field(default=None, ge=0, le=5)
+    recipe_id: str

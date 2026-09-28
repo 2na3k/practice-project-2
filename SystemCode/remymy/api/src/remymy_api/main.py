@@ -1,7 +1,21 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from .routes import router
+from .users import init_user_database, load_username_filter, open_user_database
 
 
-app = FastAPI(title="Remymy Recipe API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_user_database()
+    connection = open_user_database()
+    try:
+        app.state.usernames = load_username_filter(connection)
+    finally:
+        connection.close()
+    yield
+
+
+app = FastAPI(title="Remymy Recipe API", version="1.0.0", lifespan=lifespan)
 app.include_router(router)

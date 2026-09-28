@@ -7,7 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/opt/remymy-api/src \
     HOST=0.0.0.0 \
     PORT=8002 \
-    DATABASE_PATH=/data/remymy-food.db
+    DATABASE_PATH=/data/remymy-food.db \
+    USER_DATABASE_PATH=/state/remymy-users.db
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -58,11 +58,13 @@ services:
       HOST: 0.0.0.0
       PORT: 8002
       DATABASE_PATH: /data/remymy-food.db
+      USER_DATABASE_PATH: /state/remymy-users.db
     depends_on:
       api-migrate:
         condition: service_completed_successfully
     volumes:
       - "${DATA_DIR:-./data}:/data:ro"
+      - remymy-user-data:/state
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready', timeout=2)"]
       interval: 10s
@@ -266,6 +268,7 @@ networks:
     driver: bridge
 
 volumes:
+  remymy-user-data:
   langfuse-postgres-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
