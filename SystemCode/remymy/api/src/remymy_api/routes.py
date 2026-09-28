@@ -6,7 +6,8 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from .db import close_database, open_database, split_preview
-from .recommend import bought_ingredients, buying_profile, match_ingredients, recipe_ingredients, recommend
+from .cache import read_recommendations, write_recommendations
+from .recommend import recommend
 from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendationResponse
 from .users import fetch_user_history, open_user_database
 
@@ -146,10 +147,15 @@ def get_recommendation(
     if len(user_history) == 0:
         return RecommendationResponse(profile=None, items=[])
 
-    ingredients_by_recipe = recipe_ingredients({entry.recipe_id for entry in user_history})
-    texts = {text for texts in ingredients_by_recipe.values() for text in texts}
-    bought = bought_ingredients(user_history, ingredients_by_recipe, match_ingredients(texts))
-    if not bought:
-        return RecommendationResponse(profile=None, items=[])
+    cache = request.app.state.cache
+    if cache is None:
+        recommendations = recommend(user_history)
+        write_recommendations(cache, user_id, recommendations)
+    else:
+        user_id = user_history[0].user_id
+        recommendations = read_recommendations(cache, user_id)
+        if recommendations is None:
+            recommendations = recommend(user_history)
+            write_recommendations(cache, user_id, recommendations)
 
-    return RecommendationResponse(profile=buying_profile(bought), items=recommend(bought, top_k))
+    return recommendations.model_copy(update={"items": recommendations.items[:top_k]})

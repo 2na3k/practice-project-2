@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import os
 import tempfile
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from model_inference_reranker_avgemb import normalize_price_text
@@ -31,26 +30,20 @@ NUTRIENT_COLUMNS = (
 )
 
 
-class HistoryItem(BaseModel):
+class HistoryEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    fdc_id: int
     rating: float | None = None
     date: str
+    ingredients: list[str] = Field(max_length=500)
 
 
 class RecommendRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    history: list[HistoryItem] = Field(min_length=1)
+    history: list[HistoryEntry] = Field(min_length=1, max_length=500)
     top_k: int = Field(default=10, ge=1, le=50)
     candidates: int = Field(default=100, ge=1, le=1000)
-
-
-class MatchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ingredients: list[str] = Field(max_length=5000)
 
 
 def build_ingredient_index(catalog_path: Path) -> dict[str, dict[str, object]]:
@@ -75,11 +68,15 @@ def build_ingredient_index(catalog_path: Path) -> dict[str, dict[str, object]]:
     return index
 
 
+def match_entry(index: dict[str, dict[str, object]], texts: list[str]) -> list[dict[str, object]]:
+    keys = dict.fromkeys(normalize_price_text(text) for text in texts)
+    return [index[key] for key in keys if key in index]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pipeline = RetrievalPipeline.from_paths(CATALOG_PATH, ARTIFACT_DIR, INDEX_DIR)
     app.state.ingredients = build_ingredient_index(CATALOG_PATH)
-    app.state.lock = threading.Lock()
     yield
 
 
@@ -95,22 +92,21 @@ def health(request: Request) -> dict[str, object]:
     }
 
 
-@app.post("/v1/ingredients/match")
-def match_ingredients(body: MatchRequest, request: Request) -> dict[str, object]:
-    index = request.app.state.ingredients
-    return {"matches": [index.get(normalize_price_text(text)) for text in body.ingredients]}
-
-
 @app.post("/v1/recommend")
 def recommend(body: RecommendRequest, request: Request) -> dict[str, object]:
-    pipeline = request.app.state.pipeline
-    unknown = sorted({item.fdc_id for item in body.history if item.fdc_id not in pipeline.row_of})
-    if unknown:
-        raise HTTPException(status_code=422, detail=f"Unknown fdc_id: {unknown[:10]}")
-    history = [item.model_dump() for item in body.history]
-    with request.app.state.lock:
-        results = pipeline.recommend({"history": history}, n_candidates=body.candidates, top_k=body.top_k)
+    matched = [match_entry(request.app.state.ingredients, entry.ingredients) for entry in body.history]
+    history = [
+        {"fdc_id": ingredient["fdc_id"], "rating": entry.rating, "date": entry.date}
+        for entry, ingredients in zip(body.history, matched)
+        for ingredient in ingredients
+    ]
+    results = []
+    if history:
+        results = request.app.state.pipeline.recommend(
+            {"history": history}, n_candidates=body.candidates, top_k=body.top_k
+        )
     return {
+        "ingredients": matched,
         "items": [
             {
                 "fdc_id": result["fdc_id"],
@@ -120,7 +116,7 @@ def recommend(body: RecommendRequest, request: Request) -> dict[str, object]:
                 "similarity": result["similarity"],
             }
             for result in results
-        ]
+        ],
     }
 
 

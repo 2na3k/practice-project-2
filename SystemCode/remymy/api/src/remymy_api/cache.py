@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+import os
+
+import redis
+from pydantic import ValidationError
+
+from .schemas import RecommendationResponse
+
+
+DEFAULT_REDIS_URL = "redis://redis:6379/0"
+DEFAULT_TTL_SECONDS = 3600
+
+
+def connect_cache() -> redis.Redis:
+    return redis.Redis.from_url(
+        os.getenv("REDIS_URL", DEFAULT_REDIS_URL),
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+
+
+def recommendations_key(user_id: int) -> str:
+    return f"recommendations:{user_id}"
+
+
+def read_recommendations(cache: redis.Redis, user_id: int) -> RecommendationResponse | None:
+    try:
+        raw = cache.get(recommendations_key(user_id))
+        return None if raw is None else RecommendationResponse.model_validate_json(raw)
+    except (redis.RedisError, ValidationError):
+        return None
+
+
+def write_recommendations(
+    cache: redis.Redis, user_id: int, recommendations: RecommendationResponse
+) -> None:
+    ttl = int(os.getenv("RECOMMENDATION_CACHE_TTL_SECONDS", DEFAULT_TTL_SECONDS))
+    try:
+        cache.set(recommendations_key(user_id), recommendations.model_dump_json(), ex=ttl)
+    except redis.RedisError:
+        pass

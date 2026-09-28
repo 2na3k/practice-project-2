@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import urllib.error
 import urllib.request
 from collections import defaultdict
 from statistics import fmean
@@ -11,10 +10,17 @@ from statistics import fmean
 from fastapi import HTTPException
 
 from .db import close_database, open_database
-from .schemas import Ingredient, RecommendedRecipe, UserBuyingProfile, UserHistory
+from .schemas import (
+    Ingredient,
+    RecommendationResponse,
+    RecommendedRecipe,
+    UserBuyingProfile,
+    UserHistory,
+)
 
 
 DEFAULT_ML_MODELS_URL = "http://ml-models:8003"
+MAX_TOP_K = 50
 
 
 def ml_models_url() -> str:
@@ -54,47 +60,46 @@ def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
     return ingredients
 
 
-def match_ingredients(texts: list[str]) -> dict[str, Ingredient]:
-    if not texts:
-        return {}
-    matches = call_ml_models("/v1/ingredients/match", {"ingredients": texts})["matches"]
-    return {text: Ingredient(**match) for text, match in zip(texts, matches) if match is not None}
-
-
-def bought_ingredients(
-    history: list[UserHistory],
-    ingredients_by_recipe: dict[str, list[str]],
-    matches: dict[str, Ingredient],
-) -> list[tuple[UserHistory, Ingredient]]:
-    bought = []
-    for entry in history:
-        for text in set(ingredients_by_recipe.get(entry.recipe_id, [])):
-            ingredient = matches.get(text)
-            if ingredient is None:
-                continue
-            bought.append((entry, ingredient))
-    return bought
-
-
-def buying_profile(bought: list[tuple[UserHistory, Ingredient]]) -> UserBuyingProfile:
+def buying_profile(
+    history: list[UserHistory], matched: list[list[Ingredient]]
+) -> UserBuyingProfile | None:
+    prices: list[float] = []
     nutrients: dict[str, list[float]] = defaultdict(list)
-    for _, ingredient in bought:
-        for name, value in ingredient.nutrient_values.items():
-            nutrients[name].append(value)
+    for ingredients in matched:
+        for ingredient in ingredients:
+            prices.append(ingredient.price)
+            for name, value in ingredient.nutrient_values.items():
+                nutrients[name].append(value)
+    if not prices:
+        return None
     return UserBuyingProfile(
-        user_id=bought[0][0].user_id,
-        avg_price=fmean(ingredient.price for _, ingredient in bought),
+        user_id=history[0].user_id,
+        avg_price=fmean(prices),
         avg_nutrient_values={name: fmean(values) for name, values in sorted(nutrients.items())},
     )
 
 
-def recommend(bought: list[tuple[UserHistory, Ingredient]], top_k: int) -> list[RecommendedRecipe]:
-    history = [
-        {"fdc_id": ingredient.fdc_id, "rating": entry.rating, "date": entry.timestamp.date().isoformat()}
-        for entry, ingredient in bought
-    ]
-    items = call_ml_models("/v1/recommend", {"history": history, "top_k": top_k})["items"]
-    return [
-        RecommendedRecipe(id=str(item["fdc_id"]), title=item["name"], score=item["p_like"])
-        for item in items
-    ]
+def recommend(history: list[UserHistory]) -> RecommendationResponse:
+    ingredients_by_recipe = recipe_ingredients({entry.recipe_id for entry in history})
+    result = call_ml_models(
+        "/v1/recommend",
+        {
+            "history": [
+                {
+                    "rating": entry.rating,
+                    "date": entry.timestamp.date().isoformat(),
+                    "ingredients": ingredients_by_recipe.get(entry.recipe_id, []),
+                }
+                for entry in history
+            ],
+            "top_k": MAX_TOP_K,
+        },
+    )
+    matched = [[Ingredient(**ingredient) for ingredient in entry] for entry in result["ingredients"]]
+    return RecommendationResponse(
+        profile=buying_profile(history, matched),
+        items=[
+            RecommendedRecipe(id=str(item["fdc_id"]), title=item["name"], score=item["p_like"])
+            for item in result["items"]
+        ],
+    )
