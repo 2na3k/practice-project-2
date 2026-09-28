@@ -59,7 +59,6 @@ class User(BaseModel):
     username: str = Field(min_length=1)
     preferences: Preferences = Field(default_factory=Preferences)
 
-
 class UserHistory(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -68,9 +67,32 @@ class UserHistory(BaseModel):
     rating: int | None = Field(default=None, ge=0, le=5)
     recipe_id: str
 
+class Ingredient(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fdc_id: int
+    name: str
+    price: float
+    nutrient_values: dict[str, float]
+
+
+class UserBuyingProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    avg_price: float
+    avg_nutrient_values: dict[str, float]
+
 class RecommendedRecipe(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
     title: str
     score: float
+
+
+class RecommendationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: UserBuyingProfile | None
+    items: list[RecommendedRecipe]

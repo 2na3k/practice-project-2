@@ -59,7 +59,7 @@ def store(connection, document: object) -> None:
     )
 
 
-VALID = {"special_diet": "vegan", "cuisines": ["Thai"], "preferred_nutrient": "fibre"}
+VALID = {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": "fibre"}
 
 
 @pytest.mark.parametrize(
@@ -67,7 +67,7 @@ VALID = {"special_diet": "vegan", "cuisines": ["Thai"], "preferred_nutrient": "f
     [
         {k: v for k, v in VALID.items() if k != "cuisines"},
         {**VALID, "allergies": []},
-        {**VALID, "special_diet": "halal"},
+        {**VALID, "special_diet": "vegan"},
         {**VALID, "special_diet": 1},
         {**VALID, "cuisines": "Thai"},
         {**VALID, "cuisines": [f"c{i}" for i in range(41)]},
@@ -172,8 +172,8 @@ def test_history_rejects_unknown_recipe(users):
         add_history(users, alice.id, "openrecipes:999")
 
 
-@pytest.mark.parametrize("rating", [0, 6])
-def test_history_rejects_rating_outside_one_to_five(users, rating):
+@pytest.mark.parametrize("rating", [-1, 6])
+def test_history_rejects_rating_outside_zero_to_five(users, rating):
     alice = create_user(users, BloomFilter(capacity=1_000), "alice")
     with pytest.raises(sqlite3.IntegrityError):
         add_history(users, alice.id, "openrecipes:1", rating=rating)
@@ -184,7 +184,7 @@ def test_history_rejects_unknown_user(users):
         add_history(users, 999, "openrecipes:1")
 
 
-def test_history_model_rejects_rating_outside_one_to_five():
+def test_history_model_rejects_rating_outside_zero_to_five():
     with pytest.raises(ValidationError):
         UserHistory(user_id=1, timestamp="2026-09-28T00:00:00Z", rating=6, recipe_id="x")
 

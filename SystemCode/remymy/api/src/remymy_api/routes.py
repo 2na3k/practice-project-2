@@ -3,11 +3,12 @@ from __future__ import annotations
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from .db import close_database, open_database, split_preview
-from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendedRecipe
-
+from .recommend import bought_ingredients, buying_profile, match_ingredients, recipe_ingredients, recommend
+from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendationResponse
+from .users import fetch_user_history, open_user_database
 
 router = APIRouter()
 
@@ -131,7 +132,24 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     finally:
         close_database(connection)
 
-@router.get("/api/recommend/{user_id}", response_model=RecommendedRecipe)
-def get_recommendation(user_id: str) -> RecommendedRecipe:
-    # assume user_id is correct for now
-    pass
+@router.get("/api/recommend/{username}", response_model=RecommendationResponse)
+def get_recommendation(
+    username: str,
+    request: Request,
+    top_k: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> RecommendationResponse:
+    connection = open_user_database()
+    try:
+        user_history = fetch_user_history(connection, request.app.state.usernames, username)
+    finally:
+        connection.close()
+    if len(user_history) == 0:
+        return RecommendationResponse(profile=None, items=[])
+
+    ingredients_by_recipe = recipe_ingredients({entry.recipe_id for entry in user_history})
+    texts = {text for texts in ingredients_by_recipe.values() for text in texts}
+    bought = bought_ingredients(user_history, ingredients_by_recipe, match_ingredients(texts))
+    if not bought:
+        return RecommendationResponse(profile=None, items=[])
+
+    return RecommendationResponse(profile=buying_profile(bought), items=recommend(bought, top_k))

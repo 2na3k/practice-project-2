@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS app_user (
   ),
   CHECK (
     json_type(preferences, '$.special_diet') = 'null'
-    OR json_extract(preferences, '$.special_diet') IN ('vegetarian', 'vegan')
+    OR json_extract(preferences, '$.special_diet') IN ('vegetarian', 'halal', 'Hinduism')
   ),
   CHECK (
     json_type(preferences, '$.cuisines') = 'array'
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS user_history (
   history_id INTEGER PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES app_user (user_id) ON DELETE CASCADE,
   timestamp  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  rating     INTEGER CHECK (rating IS NULL OR rating IN (1, 2, 3, 4, 5)),
+  rating     INTEGER CHECK (rating IS NULL OR rating IN (0, 1, 2, 3, 4, 5)),
   recipe_id  TEXT NOT NULL
 );
 
@@ -145,15 +145,10 @@ def create_user(
     with connection:
         (row,) = connection.execute(
             "INSERT INTO app_user (username, preferences) VALUES (?, jsonb(?)) "
-            "RETURNING user_id, created_at",
+            "RETURNING user_id",
             (username, preferences.model_dump_json()),
         ).fetchall()
-    return User(
-        id=row["user_id"],
-        username=username,
-        preferences=preferences,
-        created_at=row["created_at"],
-    )
+    return User(id=row["user_id"], username=username, preferences=preferences)
 
 
 def add_history(
