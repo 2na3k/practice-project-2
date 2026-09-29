@@ -5,3 +5,4 @@ weights/*/item_cache.pt
 weights/*/training_history.csv
 **/__pycache__
 **/model_artifacts
+tests

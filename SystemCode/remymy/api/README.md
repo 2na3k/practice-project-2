@@ -77,9 +77,9 @@ python3 serve.py
 
 `serve.py` fills in local defaults for anything you have not set:
 `DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./remymy-users.db`,
-`REDIS_URL=redis://localhost:6379/0`, `ML_MODELS_URL=http://localhost:8003`
-and `SEED_DEMO_USER=true`. Start the model service first with
-`python3 serve.py` in `../ml_models`.
+`REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis must be
+running, since the API sends model jobs through it. Start the model service
+with `python3 serve.py` in `../ml_models`; it takes jobs from the same Redis.
 
 ## Bootstrap and ingestion
 

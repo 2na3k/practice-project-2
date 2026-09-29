@@ -9,7 +9,6 @@ LOCAL_DEFAULTS = {
     "DATABASE_PATH": str(HERE.parent / "data" / "remymy-food.db"),
     "USER_DATABASE_PATH": str(HERE / "remymy-users.db"),
     "REDIS_URL": "redis://localhost:6379/0",
-    "ML_MODELS_URL": "http://localhost:8003",
     "SEED_DEMO_USER": "true",
 }
 

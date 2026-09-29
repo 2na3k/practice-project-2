@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
-import urllib.request
 from collections import defaultdict
 from statistics import fmean
 
+import redis
 from fastapi import HTTPException
 
 from .db import close_database, open_database
+from .jobs import submit_with_retries
 from .schemas import (
     Ingredient,
     RecommendationResponse,
@@ -19,26 +18,7 @@ from .schemas import (
 )
 
 
-DEFAULT_ML_MODELS_URL = "http://ml-models:8003"
 MAX_TOP_K = 50
-
-
-def ml_models_url() -> str:
-    return os.getenv("ML_MODELS_URL", DEFAULT_ML_MODELS_URL).rstrip("/")
-
-
-def call_ml_models(path: str, payload: dict) -> dict:
-    request = urllib.request.Request(
-        ml_models_url() + path,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except (OSError, ValueError):
-        raise HTTPException(status_code=503, detail="Recommendations are unavailable.")
 
 
 def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
@@ -79,11 +59,12 @@ def buying_profile(
     )
 
 
-def recommend(history: list[UserHistory]) -> RecommendationResponse:
+def recommend(queue: redis.Redis, history: list[UserHistory], user_id: str) -> RecommendationResponse:
     ingredients_by_recipe = recipe_ingredients({entry.recipe_id for entry in history})
-    result = call_ml_models(
-        "/v1/recommend",
+    result = submit_with_retries(
+        queue,
         {
+            "user_id": user_id,
             "history": [
                 {
                     "rating": entry.rating,
@@ -99,7 +80,7 @@ def recommend(history: list[UserHistory]) -> RecommendationResponse:
     recommended_items = sorted(result["items"], key=lambda x: x["p_like"], reverse=True)
     return RecommendationResponse(
         profile=buying_profile(history, matched),
-        ressult=[
+        items=[
             RecommendedRecipe(id=str(item["fdc_id"]), title=item["name"], score=item["p_like"])
             for item in recommended_items
         ],

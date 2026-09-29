@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from .db import close_database, open_database, split_preview
 from .cache import read_recommendations, write_recommendations
+from .jobs import JobFailed, JobRejected
 from .recommend import recommend
 from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendationResponse
 from .users import fetch_user_history, open_user_database
@@ -151,14 +152,26 @@ def get_recommendation(
     if len(user_history) == 0:
         return RecommendationResponse(profile=None, items=[])
 
-    if cache is None:
-        recommendations = recommend(user_history)
+    user_id = user_history[0].user_id
+    recommendations = read_recommendations(cache, user_id)
+    if recommendations is None:
+        queue = request.app.state.queue
+        retries = request.app.state.retries
+        try:
+            recommendations = recommend(queue, user_history, user_id)
+        except JobRejected:
+            raise HTTPException(status_code=502, detail="The recommendation model rejected the request.")
+        except JobFailed:
+            def retry_and_cache() -> None:
+                if not write_recommendations(cache, user_id, recommend(queue, user_history, user_id)):
+                    raise RuntimeError("could not cache recommendations")
+
+            retries.schedule(user_id, retry_and_cache)
+            raise HTTPException(
+                status_code=503,
+                detail="Recommendations are unavailable right now; they will be retried in the background.",
+                headers={"Retry-After": str(int(retries.interval))},
+            )
         write_recommendations(cache, user_id, recommendations)
-    else:
-        user_id = user_history[0].user_id
-        recommendations = read_recommendations(cache, user_id)
-        if recommendations is None:
-            recommendations = recommend(user_history)
-            write_recommendations(cache, user_id, recommendations)
 
     return recommendations.model_copy(update={"items": recommendations.items[:top_k]})

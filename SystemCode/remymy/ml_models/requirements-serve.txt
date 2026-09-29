@@ -5,5 +5,6 @@ nltk==3.10.3
 numpy==2.5.3
 pandas==3.0.6
 pydantic==2.13.5
+redis==8.1.0
 torch==2.14.0
 uvicorn[standard]==0.53.0

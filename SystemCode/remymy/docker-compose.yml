@@ -59,7 +59,6 @@ services:
       PORT: 8002
       DATABASE_PATH: /data/remymy-food.db
       USER_DATABASE_PATH: /state/remymy-users.db
-      ML_MODELS_URL: http://ml-models:8003
       REDIS_URL: redis://redis:6379/0
       SEED_DEMO_USER: ${SEED_DEMO_USER:-true}
     depends_on:
@@ -136,6 +135,10 @@ services:
       HOST: 0.0.0.0
       PORT: 8003
       CATALOG_PATH: /catalog/price_mapped_nutrients.csv
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       - "${DATA_DIR:-./data}/price_mapped_nutrients.csv:/catalog/price_mapped_nutrients.csv:ro"
     healthcheck:

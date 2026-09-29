@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 
 from .cache import connect_cache
 from .demo import demo_enabled, seed_demo_user
+from .jobs import RetryScheduler, connect_queue
 from .routes import router
 from .users import init_user_database, open_user_database
 
@@ -12,6 +13,8 @@ from .users import init_user_database, open_user_database
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.cache = connect_cache()
+    app.state.queue = connect_queue()
+    app.state.retries = RetryScheduler()
     init_user_database()
     if demo_enabled():
         connection = open_user_database()
@@ -22,6 +25,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        app.state.retries.stop()
+        app.state.queue.close()
         app.state.cache.close()
 
 

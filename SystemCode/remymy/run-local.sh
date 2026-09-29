@@ -49,6 +49,12 @@ if [ ! -e "$RECIPE_DB" ]; then
   echo "warning: $RECIPE_DB not found; recipe routes return 503 and no demo user is created" >&2
 fi
 
+REDIS="${REDIS_URL:-redis://localhost:6379/0}"
+if ! "$PYTHON" -c "import redis, sys; redis.Redis.from_url(sys.argv[1], socket_connect_timeout=2).ping()" "$REDIS" 2>/dev/null; then
+  echo "error: Redis is not reachable at $REDIS; start it first (e.g. redis-server)" >&2
+  exit 1
+fi
+
 cd "$ROOT/ml_models"
 "$PYTHON" serve.py > >(prefix ml-models) 2>&1 &
 ML_PID=$!
