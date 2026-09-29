@@ -44,6 +44,17 @@ container readiness. Recipe routes return a generic `503 Recipe data is
 unavailable.` when the file is missing, invalid, or missing required recipe
 tables. No local path or SQLite error is returned to callers.
 
+## Users database
+
+Users and their recipe history live in a second SQLite file,
+`USER_DATABASE_PATH` (default `/state/remymy-users.db`, on the
+`remymy-user-data` volume in compose). It is kept apart from the recipe
+database because that one is read-only and replaced on every rebuild. The API
+creates the schema on startup if it is missing, which needs SQLite 3.45 or
+newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
+recipe database; SQLite cannot enforce that across files, so `add_history`
+checks it in code.
+
 ## Run locally
 
 From this directory:
@@ -51,6 +62,7 @@ From this directory:
 ```bash
 python -m pip install -r requirements.txt
 PYTHONPATH=src DATABASE_PATH=/path/to/remymy-food.db \
+  USER_DATABASE_PATH=./remymy-users.db \
   uvicorn remymy_api.main:app --reload --port 8002
 ```
 
