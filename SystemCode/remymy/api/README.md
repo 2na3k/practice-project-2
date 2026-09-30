@@ -55,16 +55,31 @@ newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
 recipe database; SQLite cannot enforce that across files, so `add_history`
 checks it in code.
 
+## Try it in Swagger
+
+Open http://localhost:8002/docs (or just http://localhost:8002/). With
+`SEED_DEMO_USER=true`, which compose sets by default, the API creates a `demo`
+user on startup if it does not exist yet. Its history is the first recipe whose
+title matches each of chicken, tomato, salad, soup and chocolate.
+`GET /api/recommend/{username}` comes pre-filled with `demo`, so "Try it out",
+then "Execute" returns its buying profile and recommendations. The model
+service has its own Swagger at http://localhost:8003/docs, with an example
+request body for `POST /v1/recommend`.
+
 ## Run locally
 
 From this directory:
 
 ```bash
 python -m pip install -r requirements.txt
-PYTHONPATH=src DATABASE_PATH=/path/to/remymy-food.db \
-  USER_DATABASE_PATH=./remymy-users.db \
-  uvicorn remymy_api.main:app --reload --port 8002
+python3 serve.py
 ```
+
+`serve.py` fills in local defaults for anything you have not set:
+`DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./remymy-users.db`,
+`REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis must be
+running, since the API sends model jobs through it. Start the model service
+with `python3 serve.py` in `../ml_models`; it takes jobs from the same Redis.
 
 ## Bootstrap and ingestion
 

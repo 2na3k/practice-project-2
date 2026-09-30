@@ -59,9 +59,13 @@ services:
       PORT: 8002
       DATABASE_PATH: /data/remymy-food.db
       USER_DATABASE_PATH: /state/remymy-users.db
+      REDIS_URL: redis://redis:6379/0
+      SEED_DEMO_USER: ${SEED_DEMO_USER:-true}
     depends_on:
       api-migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
     volumes:
       - "${DATA_DIR:-./data}:/data:ro"
       - remymy-user-data:/state
@@ -115,6 +119,46 @@ services:
       timeout: 3s
       start_period: 20s
       retries: 5
+    networks:
+      - remymy
+
+  ml-models:
+    build:
+      context: ./ml_models
+      dockerfile: Dockerfile
+    image: remymy-ml-models:dev
+    restart: unless-stopped
+    ports:
+      - "${ML_MODELS_PORT:-8003}:8003"
+    environment:
+      ENV: ${ENV:-nonprod}
+      HOST: 0.0.0.0
+      PORT: 8003
+      CATALOG_PATH: /catalog/price_mapped_nutrients.csv
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - "${DATA_DIR:-./data}/price_mapped_nutrients.csv:/catalog/price_mapped_nutrients.csv:ro"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 120s
+      retries: 5
+    networks:
+      - remymy
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - remymy
 

@@ -4,7 +4,9 @@ import os
 import sqlite3
 from pathlib import Path
 
-from .bloom import BloomFilter
+from redis import Redis
+
+from .cache import read_user_id, write_user_id
 from .db import close_database, open_database
 from .schemas import Preferences, User, UserHistory
 
@@ -30,7 +32,7 @@ CREATE TABLE IF NOT EXISTS app_user (
   ),
   CHECK (
     json_type(preferences, '$.special_diet') = 'null'
-    OR json_extract(preferences, '$.special_diet') IN ('vegetarian', 'vegan')
+    OR json_extract(preferences, '$.special_diet') IN ('vegetarian', 'halal', 'Hinduism')
   ),
   CHECK (
     json_type(preferences, '$.cuisines') = 'array'
@@ -63,7 +65,7 @@ CREATE TABLE IF NOT EXISTS user_history (
   history_id INTEGER PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES app_user (user_id) ON DELETE CASCADE,
   timestamp  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  rating     INTEGER CHECK (rating IS NULL OR rating IN (1, 2, 3, 4, 5)),
+  rating     INTEGER CHECK (rating IS NULL OR rating IN (0, 1, 2, 3, 4, 5)),
   recipe_id  TEXT NOT NULL
 );
 
@@ -92,68 +94,60 @@ def init_user_database() -> None:
         connection.close()
 
 
-def load_username_filter(
-    connection: sqlite3.Connection, capacity: int = 100_000, error_rate: float = 0.01
-) -> BloomFilter:
-    usernames = BloomFilter(capacity=capacity, error_rate=error_rate)
-    for (username,) in connection.execute("SELECT username FROM app_user"):
-        usernames.add(username)
-    return usernames
-
-
-def username_exists(
-    connection: sqlite3.Connection, usernames: BloomFilter, username: str
-) -> bool:
-    if username not in usernames:
-        return False
+def find_user_id(connection: sqlite3.Connection, cache: Redis, username: str) -> int | None:
+    user_id = read_user_id(cache, username)
+    if user_id is not None:
+        return user_id
     row = connection.execute(
-        "SELECT 1 FROM app_user WHERE username = ?", (username,)
+        "SELECT user_id FROM app_user WHERE username = ?", (username,)
     ).fetchone()
-    return row is not None
+    if row is None:
+        return None
+    write_user_id(cache, username, row["user_id"])
+    return row["user_id"]
+
+
+def username_exists(connection: sqlite3.Connection, cache: Redis, username: str) -> bool:
+    return find_user_id(connection, cache, username) is not None
 
 
 def fetch_user_history(
     connection: sqlite3.Connection,
-    usernames: BloomFilter,
+    cache: Redis,
     username: str,
     limit: int = 50,
 ) -> list[UserHistory]:
-    if username not in usernames:
+    user_id = find_user_id(connection, cache, username)
+    if user_id is None:
         return []
     rows = connection.execute(
         """
-        SELECT h.user_id, h.timestamp, h.rating, h.recipe_id
-        FROM user_history h
-        JOIN app_user u ON u.user_id = h.user_id
-        WHERE u.username = ?
-        ORDER BY h.timestamp DESC, h.history_id DESC
+        SELECT user_id, timestamp, rating, recipe_id
+        FROM user_history
+        WHERE user_id = ?
+        ORDER BY timestamp DESC, history_id DESC
         LIMIT ?
         """,
-        (username, limit),
+        (user_id, limit),
     ).fetchall()
     return [UserHistory(**dict(row)) for row in rows]
 
 
 def create_user(
     connection: sqlite3.Connection,
-    usernames: BloomFilter,
+    cache: Redis,
     username: str,
     preferences: Preferences | None = None,
 ) -> User:
     preferences = preferences or Preferences()
-    usernames.add(username)
     with connection:
         (row,) = connection.execute(
             "INSERT INTO app_user (username, preferences) VALUES (?, jsonb(?)) "
-            "RETURNING user_id, created_at",
+            "RETURNING user_id",
             (username, preferences.model_dump_json()),
         ).fetchall()
-    return User(
-        id=row["user_id"],
-        username=username,
-        preferences=preferences,
-        created_at=row["created_at"],
-    )
+    write_user_id(cache, username, row["user_id"])
+    return User(id=row["user_id"], username=username, preferences=preferences)
 
 
 def add_history(
