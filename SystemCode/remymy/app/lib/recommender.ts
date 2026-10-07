@@ -169,7 +169,9 @@ export function interpretRequest(
     cuisine: current.cuisine || DEFAULT_PREFERENCES.cuisine,
   };
   const normalized = normalizeText(text);
+  if (/\bhalal\b/.test(normalized)) addExclusion(source.exclude, "halal");
 
+  const saysHalal = /\bhalal\b/.test(normalized);
   const saysVegan =
     /\bvegan\b|\bplant[- ]based\b|\bplant[- ]powered\b/.test(normalized) &&
     !/\b(?:not|no longer)\s+vegan\b/.test(normalized);
@@ -181,12 +183,17 @@ export function interpretRequest(
     /\b(?:not|no longer)\s+(?:vegan|vegetarian)\b|\b(?:lots? of|a lot of|more|extra)\s+(?:meat|beef|chicken|turkey|pork)\b|\b(?:want|craving|give me|get me|with)\s+(?:some\s+|a\s+)?(?:meat|beef|chicken|turkey|pork)\b/.test(
       normalized,
     );
-  if (explicitlyAllowsMeat) {
+  if (explicitlyAllowsMeat && current.diet !== "halal") {
     source.diet = "any";
     source.exclude = source.exclude.filter(
       (exclusion) => canonicalExclude(exclusion) !== "meat",
     );
-  } else if (saysVegan) source.diet = "vegan";
+  } else if (saysVegan) {
+    source.diet = "vegan";
+    if (saysHalal || current.diet === "halal") addExclusion(source.exclude, "halal");
+  } else if (saysHalal && current.diet === "vegan") {
+    addExclusion(source.exclude, "halal");
+  } else if (saysHalal) source.diet = "halal";
   else if (saysVegetarian && source.diet === "any") source.diet = "vegetarian";
 
   const timePatterns = [
@@ -370,6 +377,7 @@ export function recommendMeals(
     if (meal.minutes > effective.maxMinutes) return false;
     if (effective.diet === "vegan" && !isVegan(meal)) return false;
     if (effective.diet === "vegetarian" && !isVegetarian(meal)) return false;
+    if (effective.diet === "halal" && !isVegan(meal)) return false;
     return !effective.exclude.some((exclusion) =>
       containsExcluded(meal, exclusion),
     );
@@ -382,6 +390,8 @@ export function recommendMeals(
     if (effective.diet === "vegan") reasons.push("Fits your vegan preference.");
     else if (effective.diet === "vegetarian")
       reasons.push("Fits your vegetarian preference.");
+    else if (effective.diet === "halal")
+      reasons.push("Vegan-tagged demo candidate; halal ingredients and certification are not verified.");
     reasons.push(
       `${meal.minutes} min, within your ${effective.maxMinutes}-minute limit.`,
     );

@@ -28,7 +28,7 @@ const emptyUsage = {
 
 const recommendationParameters = Type.Object({
   preferences: Type.Object({
-    diet: Type.Union([Type.Literal("any"), Type.Literal("vegetarian"), Type.Literal("vegan")]),
+    diet: Type.Union([Type.Literal("any"), Type.Literal("vegetarian"), Type.Literal("vegan"), Type.Literal("halal")]),
     maxMinutes: Type.Number({ minimum: 1, maximum: 90 }),
     exclude: Type.Array(Type.String({ maxLength: 80 }), { maxItems: 24 }),
     goal: Type.Union([Type.Literal("balanced"), Type.Literal("protein"), Type.Literal("light")]),
@@ -45,7 +45,7 @@ const isPreferences = (value: unknown): value is Preferences => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Partial<Preferences>;
   return (
-    (candidate.diet === "any" || candidate.diet === "vegetarian" || candidate.diet === "vegan") &&
+    (candidate.diet === "any" || candidate.diet === "vegetarian" || candidate.diet === "vegan" || candidate.diet === "halal") &&
     typeof candidate.maxMinutes === "number" && Number.isFinite(candidate.maxMinutes) &&
     candidate.maxMinutes >= 1 && candidate.maxMinutes <= 90 &&
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string" && item.length <= 80) &&
@@ -57,11 +57,16 @@ const isPreferences = (value: unknown): value is Preferences => {
 /** Keep restrictions established by the user outside the model's control. */
 const preserveHardPreferences = (candidate: Preferences, baseline: Preferences): Preferences => ({
   diet:
-    baseline.diet === "vegan" || (baseline.diet === "vegetarian" && candidate.diet === "any")
+    baseline.diet === "vegan" || (baseline.diet === "vegetarian" && candidate.diet === "any") || (baseline.diet === "halal" && candidate.diet !== "vegan" && candidate.diet !== "halal")
       ? baseline.diet
       : candidate.diet,
   maxMinutes: Math.min(candidate.maxMinutes, baseline.maxMinutes),
-  exclude: Array.from(new Set([...baseline.exclude, ...candidate.exclude])),
+  exclude: Array.from(new Set([
+    ...baseline.exclude,
+    ...candidate.exclude,
+    ...(baseline.diet === "halal" && candidate.diet === "vegan" ? ["halal"] : []),
+  ])),
+
   goal: candidate.goal,
   cuisine: candidate.cuisine,
 });
@@ -74,7 +79,7 @@ const textFromAssistant = (message: AssistantMessage | undefined): string =>
     .trim() ?? "";
 
 const isMealRecommendationRequest = (text: string): boolean =>
-  /\b(?:meal|food|eat|dinner|lunch|breakfast|dish|recipe|crav\w*|hungry|cook\w*|meat|beef|chicken|turkey|pork|fish)\b/i.test(text);
+  /\b(?:meal|food|eat|dinner|lunch|breakfast|dish|recipe|halal|crav\w*|hungry|cook\w*|meat|beef|chicken|turkey|pork|fish)\b/i.test(text);
 
 const toAssistantHistory = (model: Model<Api>, text: string): AssistantMessage => ({
   role: "assistant",
@@ -188,6 +193,8 @@ export function createMealAgent(
     "Call say_hello whenever the user asks to test MCP or asks you to say hello; it is backed by the Remymy Python MCP service.",
     `The authoritative starting preference state is ${JSON.stringify(preferences)}. Preserve its diet, time limit, and exclusions in every tool call.`,
     "If the user wants meat-free meals, pass diet vegetarian or vegan into recommend_meals. Never list meat, poultry, or fish when that constraint is active.",
+    "For halal requests, pass diet halal. The MCP returns vegan-tagged recipes that pass listed-ingredient screens; they are not halal-certified, so state that users must verify the source and cross-contamination.",
+    "For halal requests, preserve the halal exclusion and say results are screened against listed ingredients only, not halal-certified; meat dishes are excluded because the source has no halal certification data.",
     "Keep the final answer brief, human, and in simple markdown. Mention only meals returned by the tool.",
     "Do not make medical or nutrition guarantees; recipe times and nutrition values are estimates from the source data.",
   ].join(" ");

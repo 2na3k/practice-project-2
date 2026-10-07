@@ -68,7 +68,7 @@ function validPreferences(value: unknown): value is Preferences {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<Preferences>;
   return (
-    (candidate.diet === "any" || candidate.diet === "vegetarian" || candidate.diet === "vegan") &&
+    (candidate.diet === "any" || candidate.diet === "vegetarian" || candidate.diet === "vegan" || candidate.diet === "halal") &&
     typeof candidate.maxMinutes === "number" && Number.isFinite(candidate.maxMinutes) &&
     candidate.maxMinutes >= 1 && candidate.maxMinutes <= 90 &&
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string") &&

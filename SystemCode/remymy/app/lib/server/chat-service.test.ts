@@ -161,6 +161,20 @@ describe("chat service", () => {
     expect(models.streamSimple).not.toHaveBeenCalled();
   });
 
+  it("preserves halal preferences in the MCP request", async () => {
+    const halalRequest = {
+      ...validRequest,
+      preferences: { ...testPreferences, diet: "halal" as const },
+    };
+    await runChat(halalRequest, model!, "test-provider-key", models as never);
+
+    expect(mcpHarness.callTool).toHaveBeenCalledWith(
+      "recommend_meals",
+      expect.objectContaining({ preferences: expect.objectContaining({ diet: "halal" }) }),
+      undefined,
+    );
+  });
+
   it("reports the agent lifecycle as user-safe stages", async () => {
     expect(model).toBeDefined();
     const stages: Array<{ id: string; status: string }> = [];

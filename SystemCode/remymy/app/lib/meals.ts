@@ -21,7 +21,7 @@ export type Meal = {
 };
 
 export type Preferences = {
-  diet: "any" | "vegetarian" | "vegan";
+  diet: "any" | "vegetarian" | "vegan" | "halal";
   maxMinutes: number;
   exclude: string[];
   goal: "balanced" | "protein" | "light";

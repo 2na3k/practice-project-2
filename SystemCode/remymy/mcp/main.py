@@ -17,6 +17,15 @@ from starlette.responses import JSONResponse
 
 mcp = MCPServer("Remymy MCP")
 
+MEAT_TERMS = ("beef", "bison", "veal", "pork", "bacon", "ham", "prosciutto", "lard", "tallow", "chicken", "turkey", "duck", "lamb", "mutton", "venison", "sausage", "meat")
+SEAFOOD_TERMS = ("fish", "salmon", "tuna", "anchovy", "sardine", "cod", "shrimp", "prawn", "shellfish", "crab", "lobster", "oyster", "mussel", "clam", "scallop", "squid", "octopus", "fish sauce", "oyster sauce")
+DAIRY_TERMS = ("milk", "cheese", "whey", "casein", "butter", "ghee", "cream", "yogurt", "yoghurt", "parmesan", "mozzarella", "feta", "cheddar", "rennet")
+EGG_TERMS = ("egg", "eggs", "albumin", "mayonnaise")
+VEGAN_EXTRA_TERMS = ("honey", "gelatin", "collagen", "bone broth", "chicken broth", "beef broth", "fish broth")
+HALAL_BLOCKED_TERMS = ("pork", "bacon", "ham", "prosciutto", "lard", "wine", "beer", "rum", "brandy", "cognac", "bourbon", "whiskey", "vodka", "gin", "tequila", "sherry", "port", "vermouth", "liqueur", "sake", "mirin", "alcohol", "gelatin", "collagen", "blood", "animal rennet")
+PLANT_ALTERNATIVE = re.compile(r"\b(?:vegan|plant based|non dairy|dairy free)\b")
+PLANT_MILK = re.compile(r"\b(?:coconut|almond|oat|soy|rice|cashew|hemp|pea|hazelnut|macadamia) milk\b")
+
 
 @mcp.tool()
 def say_hello(name: str = "there") -> str:
@@ -36,7 +45,7 @@ def recommend_meals(preferences: dict, query: str = "", limit: int = 6) -> str:
     goal = preferences.get("goal", "balanced")
     exclusions = preferences.get("exclude", [])
     requested_cuisine_raw = str(preferences.get("cuisine", "any"))
-    if diet not in {"any", "vegetarian", "vegan"}:
+    if diet not in {"any", "vegetarian", "vegan", "halal"}:
         raise ValueError("invalid diet preference")
     if not isinstance(max_minutes, (int, float)) or not 1 <= max_minutes <= 90:
         raise ValueError("invalid time preference")
@@ -55,13 +64,28 @@ def recommend_meals(preferences: dict, query: str = "", limit: int = 6) -> str:
     requested_cuisine = normalize(requested_cuisine_raw)
     if not isinstance(limit, int) or not 1 <= limit <= 12:
         raise ValueError("limit must be between 1 and 12")
-    stop_words = {"the", "and", "with", "for", "something", "meal", "meals", "food", "please", "suggest", "recommend", "ideas", "some", "under", "within", "minutes", "minute"}
+    stop_words = {"the", "and", "with", "for", "something", "meal", "meals", "food", "please", "suggest", "recommend", "ideas", "some", "under", "within", "minutes", "minute", "vegan", "vegetarian", "halal", "recipe", "recipes"}
     tokens = [word for word in normalize(query).split() if len(word) > 2 and word not in stop_words]
     exclusion_terms = set()
-    aliases = {"meat": {"beef", "chicken", "pork", "turkey", "lamb", "bacon", "ham", "sausage"}, "dairy": {"milk", "cheese", "butter", "cream", "yogurt"}, "seafood": {"fish", "salmon", "tuna", "shrimp", "prawn", "shellfish"}}
+    aliases = {"meat": set(MEAT_TERMS), "dairy": set(DAIRY_TERMS), "seafood": set(SEAFOOD_TERMS)}
     for exclusion in exclusions:
         normalized = normalize(exclusion)
         exclusion_terms.update(aliases.get(normalized, {normalized}))
+    halal_requested = diet == "halal" or "halal" in {normalize(item) for item in exclusions} or "halal" in normalize(query).split()
+    exclusion_terms.discard("halal")
+
+    def has_any_term(ingredients: list[str], terms: tuple[str, ...]) -> bool:
+        for ingredient in ingredients:
+            text = normalize(ingredient)
+            if PLANT_ALTERNATIVE.search(text):
+                continue
+            for term in terms:
+                normalized_term = normalize(term)
+                if normalized_term == "milk" and PLANT_MILK.search(text):
+                    continue
+                if re.search(rf"\b{re.escape(normalized_term)}\b", text):
+                    return True
+        return False
 
     candidates = []
     meal_courses = {"main dish", "lunch", "dinner"}
@@ -80,9 +104,16 @@ def recommend_meals(preferences: dict, query: str = "", limit: int = 6) -> str:
                 continue
             if minutes < 1 or minutes > max_minutes:
                 continue
-            if diet == "vegetarian" and not {"vegetarian", "vegan"}.intersection(tags):
+            tagged_vegetarian = bool({"vegetarian", "vegan"}.intersection(tags))
+            if diet == "vegetarian" and not tagged_vegetarian:
                 continue
-            if diet == "vegan" and "vegan" not in tags:
+            if (diet == "vegan" or halal_requested) and "vegan" not in tags:
+                continue
+            if (diet == "vegan" or halal_requested) and has_any_term(ingredients, (*MEAT_TERMS, *SEAFOOD_TERMS, *DAIRY_TERMS, *EGG_TERMS, *VEGAN_EXTRA_TERMS)):
+                continue
+            if (diet == "vegetarian" or halal_requested) and has_any_term(ingredients, (*MEAT_TERMS, *SEAFOOD_TERMS)):
+                continue
+            if halal_requested and has_any_term(ingredients, HALAL_BLOCKED_TERMS):
                 continue
             if not meal_courses.intersection(tags):
                 continue
@@ -144,8 +175,12 @@ def recommend_meals(preferences: dict, query: str = "", limit: int = 6) -> str:
         if meal is None:
             continue
         reasons = ["Returned by Remymy's Food.com MCP recommender.", f"{meal['minutes']} min, within your {max_minutes}-minute limit."]
-        if diet != "any":
-            reasons.append(f"Tagged {diet} by the source catalog.")
+        if diet == "vegan":
+            reasons.append("Passed the source vegan tag and ingredient screen; verify the source recipe for omissions.")
+        elif diet == "vegetarian":
+            reasons.append("Tagged vegetarian by the source catalog and screened for meat and seafood ingredients.")
+        if halal_requested:
+            reasons.append("Passed vegan-tag and listed-ingredient screens; not halal-certified. Verify source ingredients and cross-contamination.")
         recommendations.append({"meal": meal, "score": item["score"], "reasons": reasons})
     return json.dumps(recommendations)
 

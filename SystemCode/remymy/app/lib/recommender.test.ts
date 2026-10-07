@@ -20,6 +20,17 @@ describe("interpretRequest", () => {
     });
   });
 
+  it("carries halal and combined vegan-halal constraints into MCP preferences", () => {
+    const halal = interpretRequest("halal dinner");
+    const later = interpretRequest("make it quick", halal);
+    const veganHalal = interpretRequest("vegan halal dinner");
+
+    expect(halal.diet).toBe("halal");
+    expect(later.diet).toBe("halal");
+    expect(veganHalal.diet).toBe("vegan");
+    expect(veganHalal.exclude).toContain("halal");
+  });
+
   it("carries restrictive choices into a later conversational turn", () => {
     const firstTurn = interpretRequest("vegetarian meals under 25 minutes");
     const secondTurn = interpretRequest(
