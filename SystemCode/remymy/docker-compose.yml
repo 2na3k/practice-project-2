@@ -91,9 +91,12 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       MODEL_URL: http://models:8001
+      RECIPE_CATALOG_PATH: /data/RAW_recipes.csv
     depends_on:
       models:
         condition: service_healthy
+    volumes:
+      - "${DATA_DIR:-./data}/raw/food-com/RAW_recipes.csv:/data/RAW_recipes.csv:ro"
     networks:
       - remymy
 
@@ -209,8 +212,6 @@ services:
     image: docker.langfuse.com/langfuse/langfuse:3
     restart: unless-stopped
     depends_on: *langfuse-depends-on
-    ports:
-      - "127.0.0.1:${LANGFUSE_PORT:-3030}:3000"
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-remymy-nonprod-nextauth-secret}
@@ -226,11 +227,37 @@ services:
       LANGFUSE_INIT_USER_NAME: remymy
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-remymylocal}
     healthcheck:
-      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3000/api/public/health"]
+      test: ["CMD-SHELL", "wget --spider --quiet http://$$(hostname):3000/api/public/health"]
       interval: 15s
       timeout: 5s
       start_period: 90s
       retries: 12
+    networks:
+      - remymy
+
+  langfuse-gateway:
+    build:
+      context: ./langfuse-gateway
+      dockerfile: Dockerfile
+    image: remymy-langfuse-gateway:dev
+    restart: unless-stopped
+    depends_on:
+      langfuse-web:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${LANGFUSE_PORT:-3030}:3030"
+    environment:
+      PORT: 3030
+      LANGFUSE_UPSTREAM: http://langfuse-web:3000
+      LANGFUSE_PUBLIC_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3030}
+      LANGFUSE_LOCAL_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-remymy@example.com}
+      LANGFUSE_LOCAL_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-remymylocal}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:3030/api/public/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
     networks:
       - remymy
 

@@ -22,11 +22,14 @@ export async function POST(request: NextRequest): Promise<Response> {
     if (name.length > 80) throw new RequestGuardError("The name is too long.", 400);
 
     const message = await withLangfuseSpan("mcp.say_hello", async (span) => {
-      span.update({ input: { name: name || "Remymy" }, metadata: { source: "python-mcp" } });
+      const input = { name: name || "Remymy" };
+      span.update({ input, metadata: { source: "python-mcp" } });
+      span.setTraceIO?.({ input });
       const text = await callMcpTool("say_hello", { name: name || "Remymy" }, request.signal);
       span.update({ output: { message: text } });
+      span.setTraceIO?.({ output: { message: text } });
       return text;
-    }, { asType: "tool" });
+    }, { asType: "tool", traceName: "remymy-mcp-probe" });
     return jsonNoStore({ message });
   } catch (error) {
     if (error instanceof RequestGuardError) return errorResponse(error);

@@ -1,9 +1,12 @@
 # Remymy MCP gateway
 
-This is the small Python MCP service used by the Remymy web app. It exposes two
-tools over stateless Streamable HTTP:
+This is the small Python MCP service used by the Remymy web app. It exposes
+three tools over stateless Streamable HTTP:
 
 - `say_hello(name: str = "there")` — returns a friendly greeting.
+- `recommend_meals(preferences, query, limit)` — filters the mounted Food.com
+  recipe dataset, then ranks matches with the model service. The chat app uses
+  this MCP tool for every connected meal recommendation.
 - `rank_foodcom_meals(candidate_recipe_ids, user_id, content_scores, limit)` —
   calls the model service for a hybrid collaborative/content ranking. Callers
   must apply hard dietary and time constraints before invoking this tool.

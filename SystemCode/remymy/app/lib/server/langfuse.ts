@@ -1,11 +1,12 @@
 type LangfuseSpan = {
   update: (attributes: Record<string, unknown>) => void;
+  setTraceIO?: (attributes: { input?: unknown; output?: unknown }) => void;
 };
 
 type TraceFn = <T>(
   name: string,
   run: (span: LangfuseSpan) => Promise<T>,
-  options?: { asType?: "agent" | "generation" | "tool" | "span" },
+  options?: { asType?: "agent" | "generation" | "tool" | "span"; traceName?: string },
 ) => Promise<T>;
 
 function isLangfuseEnabled(): boolean {
@@ -17,16 +18,26 @@ const passthroughSpan: LangfuseSpan = { update: () => undefined };
 export async function withLangfuseSpan<T>(
   name: string,
   run: (span: LangfuseSpan) => Promise<T>,
-  options?: { asType?: "agent" | "generation" | "tool" | "span" },
+  options?: { asType?: "agent" | "generation" | "tool" | "span"; traceName?: string },
 ): Promise<T> {
   if (!isLangfuseEnabled()) return run(passthroughSpan);
+  let tracing: {
+    startActiveObservation?: TraceFn;
+    propagateAttributes?: <R>(attributes: { traceName?: string }, run: () => R) => R;
+  };
   try {
-    const tracing = (await import("@langfuse/tracing")) as { startActiveObservation?: TraceFn };
-    if (!tracing.startActiveObservation) return run(passthroughSpan);
-    return tracing.startActiveObservation(name, run, options?.asType ? { asType: options.asType } : undefined);
+    tracing = (await import("@langfuse/tracing")) as {
+      startActiveObservation?: TraceFn;
+      propagateAttributes?: <R>(attributes: { traceName?: string }, run: () => R) => R;
+    };
   } catch {
     return run(passthroughSpan);
   }
+  if (!tracing.startActiveObservation) return run(passthroughSpan);
+  const start = () => tracing.startActiveObservation!(name, run, options?.asType ? { asType: options.asType } : undefined);
+  return options?.traceName && tracing.propagateAttributes
+    ? tracing.propagateAttributes({ traceName: options.traceName }, start)
+    : start();
 }
 
 export async function flushLangfuse(): Promise<void> {

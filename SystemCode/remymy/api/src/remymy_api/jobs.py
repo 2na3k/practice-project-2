@@ -47,7 +47,7 @@ def submit(queue: redis.Redis, payload: dict) -> dict:
     user_id = payload.get("user_id", "")
     if user_id == "":
         raise JobFailed("unreadable reply")
-    job_id = f"job:{user_id}:{uuid.uuid7().hex}"
+    job_id = f"job:{user_id}:{uuid.uuid4().hex}"
     timeout = result_timeout()
     job = {"id": job_id, "deadline": time.time() + timeout, "payload": payload}
     try:

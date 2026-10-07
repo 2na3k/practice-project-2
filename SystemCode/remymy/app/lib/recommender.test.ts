@@ -50,6 +50,17 @@ describe("interpretRequest", () => {
     expect(interpretRequest("Protein please").goal).toBe("protein");
     expect(interpretRequest("Make it quicker").maxMinutes).toBe(20);
   });
+
+  it("lets an explicit meat request override a persisted plant-only diet", () => {
+    const vegan: Preferences = { ...DEFAULT_PREFERENCES, diet: "vegan", exclude: ["meat"] };
+    const preferences = interpretRequest("get me a good meal with a lot of meat", vegan);
+    const recommendations = recommendMeals(preferences, "a lot of meat");
+
+    expect(preferences).toMatchObject({ diet: "any", goal: "protein" });
+    expect(preferences.exclude).not.toContain("meat");
+    expect(recommendations.length).toBeGreaterThan(0);
+    expect(recommendations[0]?.meal.tags).not.toEqual(expect.arrayContaining(["vegan"]));
+  });
 });
 
 describe("recommendMeals", () => {

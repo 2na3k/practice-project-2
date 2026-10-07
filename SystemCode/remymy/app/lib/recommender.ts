@@ -153,6 +153,7 @@ const exclusionVariants = (value: string): string[] => {
 /**
  * Interpret a natural language turn into an evolving preference state.
  * Restrictive diet, time, and exclusion constraints accumulate by design.
+ * A clear request to eat meat explicitly relaxes a prior vegan/vegetarian diet.
  */
 export function interpretRequest(
   text: string,
@@ -176,7 +177,16 @@ export function interpretRequest(
     /\bvegetarian\b|\bveggie\b|\bveggies\b|\bno\s+meats?\b|\bmeat[\s\-\u2013\u2014]*free\b|\bmeatfree\b|\bwithout\s+(?:any\s+)?meats?\b|\b(?:avoid|avoiding|exclude|excluding|skip|skipping)\s+(?:any\s+)?meats?\b|\bdon(?:t|'t)\s+(?:eat|want|like)\s+meats?\b|\bno\s+animal(?:s|\s+protein|\s+products?)?\b/.test(
       normalized,
     ) && !/\b(?:not|no longer)\s+vegetarian\b/.test(normalized);
-  if (saysVegan) source.diet = "vegan";
+  const explicitlyAllowsMeat =
+    /\b(?:not|no longer)\s+(?:vegan|vegetarian)\b|\b(?:lots? of|a lot of|more|extra)\s+(?:meat|beef|chicken|turkey|pork)\b|\b(?:want|craving|give me|get me|with)\s+(?:some\s+|a\s+)?(?:meat|beef|chicken|turkey|pork)\b/.test(
+      normalized,
+    );
+  if (explicitlyAllowsMeat) {
+    source.diet = "any";
+    source.exclude = source.exclude.filter(
+      (exclusion) => canonicalExclude(exclusion) !== "meat",
+    );
+  } else if (saysVegan) source.diet = "vegan";
   else if (saysVegetarian && source.diet === "any") source.diet = "vegetarian";
 
   const timePatterns = [
@@ -201,7 +211,9 @@ export function interpretRequest(
     source.maxMinutes = Math.min(source.maxMinutes, 20);
   }
 
-  if (
+  if (/\b(?:lots? of|a lot of|more|extra)\s+(?:meat|beef|chicken|turkey|pork)\b/.test(normalized))
+    source.goal = "protein";
+  else if (
     /\b(?:high|higher|more|lots of|protein[- ]rich)\s+protein\b|\bprotein[- ]packed\b|\bprotein\b/.test(
       normalized,
     )

@@ -126,6 +126,7 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
     today = datetime.now(timezone.utc).date().isoformat()
     assert models.payloads == [
         {
+            "user_id": alice,
             "history": [
                 {"rating": None, "date": today, "ingredients": ["apple"]},
                 {"rating": 4, "date": today, "ingredients": ["tomatoes", "salt", "salt", "water"]},
