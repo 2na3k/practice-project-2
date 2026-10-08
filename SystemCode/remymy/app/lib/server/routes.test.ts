@@ -194,4 +194,41 @@ describe("connection and chat routes", () => {
     expect(payload).toEqual({ error: "The request could not be completed." });
     expect(JSON.stringify(payload)).not.toContain("mock-secret-key");
   });
+
+  it("streams agent stages before the final chat result when requested", async () => {
+    const session = createSession("anthropic", "claude-sonnet-4-6", "mock-secret-key");
+    routeMocks.runChat.mockImplementationOnce(async (...args: unknown[]) => {
+      const onStage = args[5] as ((stage: unknown) => void) | undefined;
+      onStage?.({
+        id: "understand",
+        label: "Understanding your request",
+        detail: "Preferences and constraints are ready",
+        status: "complete",
+      });
+      return {
+        text: "Mocked streamed response",
+        preferences: {
+          diet: "any",
+          maxMinutes: 30,
+          exclude: [],
+          goal: "balanced",
+          cuisine: "any",
+        },
+        recommendations: [],
+      };
+    });
+
+    const response = await postChat(
+      requestWithCookie("/api/chat", {
+        method: "POST",
+        headers: { accept: "application/x-ndjson" },
+        body: "{}",
+      }, session.token) as never,
+    );
+
+    expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+    const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line));
+    expect(events[0]).toMatchObject({ type: "stage", stage: { id: "understand", status: "complete" } });
+    expect(events[1]).toMatchObject({ type: "result", result: { text: "Mocked streamed response" } });
+  });
 });

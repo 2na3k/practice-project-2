@@ -7,7 +7,7 @@ import {
 } from "./chat-service";
 
 const agentHarness = vi.hoisted(() => ({
-  mode: "success" as "success" | "error" | "aborted",
+  mode: "success" as "success" | "success-no-tool" | "error" | "aborted",
 }));
 
 const testPreferences = vi.hoisted(() => ({
@@ -17,6 +17,18 @@ const testPreferences = vi.hoisted(() => ({
   goal: "balanced" as const,
   cuisine: "any",
 }));
+const mcpHarness = vi.hoisted(() => {
+  const meal = {
+    id: "mock-lentil-bowl", title: "Mock Lentil Bowl", description: "A quick lentil bowl.",
+    cuisine: "Any", minutes: 12, calories: 400, protein: 20, tags: ["vegan", "vegetarian"],
+    ingredients: ["lentils"], steps: ["Cook lentils."], image: "", color: "#fff",
+  };
+  return {
+    callTool: vi.fn(),
+    meal,
+    recommendation: { meal, score: 80, reasons: ["Fits the mock constraint."] },
+  };
+});
 
 // Vitest supports the virtual-module option at runtime; its bundled typings lag
 // this API, so keep the test explicit about the intentional type mismatch.
@@ -38,8 +50,11 @@ vi.mock("@/lib/recommender", () => ({
 // @ts-expect-error Vitest supports this virtual-module option at runtime.
 { virtual: true });
 
+vi.mock("./mcp-client", () => ({ callMcpTool: mcpHarness.callTool }));
+
 vi.mock("@earendil-works/pi-agent-core", () => ({
   Agent: class MockAgent {
+    private listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
     state: {
       tools?: Array<{ execute: (toolCallId: string, params: unknown) => Promise<unknown> }>;
       messages: unknown[];
@@ -49,7 +64,13 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
       this.state = options.initialState;
     }
 
+    subscribe(listener: (event: { type: string; [key: string]: unknown }) => void): () => void {
+      this.listeners.push(listener);
+      return () => { this.listeners = this.listeners.filter((candidate) => candidate !== listener); };
+    }
+
     async prompt(text: string): Promise<void> {
+      this.listeners.forEach((listener) => listener({ type: "turn_start" }));
       if (agentHarness.mode === "success") {
         const tool = this.state.tools?.[0];
         await tool?.execute("mock-tool-call", {
@@ -60,16 +81,20 @@ vi.mock("@earendil-works/pi-agent-core", () => ({
       this.state.messages.push({
         role: "assistant",
         content:
-          agentHarness.mode === "success"
-            ? [{ type: "text", text: "Mocked catalog answer" }]
+          agentHarness.mode === "success" || agentHarness.mode === "success-no-tool"
+            ? [{ type: "text", text: agentHarness.mode === "success" ? "Mocked catalog answer" : "Please clarify your preferences" }]
             : [],
         stopReason:
-          agentHarness.mode === "success"
+          agentHarness.mode === "success" || agentHarness.mode === "success-no-tool"
             ? "stop"
             : agentHarness.mode === "error"
               ? "error"
               : "aborted",
       });
+      this.listeners.forEach((listener) => listener({
+        type: "message_end",
+        message: this.state.messages[this.state.messages.length - 1],
+      }));
     }
 
     abort(): void {}
@@ -88,6 +113,7 @@ describe("chat service", () => {
   beforeEach(() => {
     agentHarness.mode = "success";
     vi.clearAllMocks();
+    mcpHarness.callTool.mockResolvedValue(JSON.stringify([mcpHarness.recommendation]));
   });
 
   it("validates bounded messages and preference shapes before creating an agent", () => {
@@ -113,7 +139,7 @@ describe("chat service", () => {
     ).toBeUndefined();
   });
 
-  it("returns the mocked agent answer and catalog tool recommendations", async () => {
+  it("returns the mocked agent answer and MCP meal recommendations", async () => {
     expect(model).toBeDefined();
     const result = await runChat(
       validRequest,
@@ -123,9 +149,64 @@ describe("chat service", () => {
     );
 
     expect(result.text).toBe("Mocked catalog answer");
+    expect(mcpHarness.callTool.mock.calls[0][1]).not.toHaveProperty("meals");
+    expect(mcpHarness.callTool).toHaveBeenCalledWith(
+      "recommend_meals",
+      expect.objectContaining({ preferences: testPreferences, query: "something quick" }),
+      undefined,
+    );
     expect(result.recommendations.length).toBeGreaterThan(0);
     expect(result.recommendations.every(({ meal }) => meal.minutes <= 30)).toBe(true);
+    expect(result.toolsUsed).toContain("recommend_meals");
     expect(models.streamSimple).not.toHaveBeenCalled();
+  });
+
+  it("preserves halal preferences in the MCP request", async () => {
+    const halalRequest = {
+      ...validRequest,
+      preferences: { ...testPreferences, diet: "halal" as const },
+    };
+    await runChat(halalRequest, model!, "test-provider-key", models as never);
+
+    expect(mcpHarness.callTool).toHaveBeenCalledWith(
+      "recommend_meals",
+      expect.objectContaining({ preferences: expect.objectContaining({ diet: "halal" }) }),
+      undefined,
+    );
+  });
+
+  it("reports the agent lifecycle as user-safe stages", async () => {
+    expect(model).toBeDefined();
+    const stages: Array<{ id: string; status: string }> = [];
+    await runChat(validRequest, model!, "test-provider-key", models as never, undefined, (stage) => {
+      stages.push({ id: stage.id, status: stage.status });
+    });
+
+    expect(stages).toEqual(expect.arrayContaining([
+      { id: "understand", status: "active" },
+      { id: "understand", status: "complete" },
+      { id: "turn-1", status: "active" },
+      { id: "turn-1", status: "complete" },
+    ]));
+  });
+
+  it("calls MCP when a model skips the recommendation tool", async () => {
+    agentHarness.mode = "success-no-tool";
+    expect(model).toBeDefined();
+    const stages: string[] = [];
+    const result = await runChat({ ...validRequest, messages: [{ role: "user", text: "recommend a quick meal" }] }, model!, "test-provider-key", models as never, undefined, (stage) => {
+      stages.push(`${stage.id}:${stage.status}`);
+    });
+
+    expect(result.toolsUsed).toContain("recommend_meals");
+    expect(mcpHarness.callTool).toHaveBeenCalledWith(
+      "recommend_meals",
+      expect.objectContaining({ query: "recommend a quick meal" }),
+      undefined,
+    );
+    expect(result.recommendations.length).toBeGreaterThan(0);
+    expect(result.text).not.toContain("clarify");
+    expect(stages).toContain("tool-catalog-fallback:complete");
   });
 
   it("maps provider agent errors and interrupted turns to safe service errors", async () => {

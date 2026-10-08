@@ -6,6 +6,8 @@ import remarkGfm from "remark-gfm";
 import {
   ArrowRight,
   Bookmark,
+  Check,
+  Circle,
   LoaderCircle,
   MessageCircle,
   Plus,
@@ -30,7 +32,9 @@ import {
 import { demoReply } from "@/lib/demo-chat";
 import { alignRecommendations, interpretRequest, recommendMeals } from "@/lib/recommender";
 import type {
+  AgentStage,
   ChatResult,
+  ChatStreamEvent,
   ChatTurn,
   ConnectionStatus,
 } from "@/lib/chat-types";
@@ -50,6 +54,7 @@ type ChatMessage = {
   recommendations?: MealRecommendation[];
   status?: "pending" | "error";
   source?: string;
+  stages?: AgentStage[];
 };
 
 type FailedRequest = {
@@ -63,7 +68,7 @@ function validPreferences(value: unknown): value is Preferences {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<Preferences>;
   return (
-    (candidate.diet === "any" || candidate.diet === "vegetarian" || candidate.diet === "vegan") &&
+    (candidate.diet === "any" || candidate.diet === "vegetarian" || candidate.diet === "vegan" || candidate.diet === "halal") &&
     typeof candidate.maxMinutes === "number" && Number.isFinite(candidate.maxMinutes) &&
     candidate.maxMinutes >= 1 && candidate.maxMinutes <= 90 &&
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string") &&
@@ -79,7 +84,13 @@ function validRecommendations(value: unknown): value is MealRecommendation[] {
     const meal = recommendation.meal;
     return Boolean(
       meal && typeof meal === "object" && typeof meal.id === "string" &&
-      MEALS.some((candidate) => candidate.id === meal.id) &&
+      typeof meal.title === "string" && typeof meal.description === "string" &&
+      typeof meal.cuisine === "string" && typeof meal.minutes === "number" &&
+      typeof meal.calories === "number" && typeof meal.protein === "number" &&
+      Array.isArray(meal.tags) && meal.tags.every((tag) => typeof tag === "string") &&
+      Array.isArray(meal.ingredients) && meal.ingredients.every((ingredient) => typeof ingredient === "string") &&
+      Array.isArray(meal.steps) && meal.steps.every((step) => typeof step === "string") &&
+      typeof meal.image === "string" && typeof meal.color === "string" &&
       typeof recommendation.score === "number" && Array.isArray(recommendation.reasons) &&
       recommendation.reasons.every((reason) => typeof reason === "string"),
     );
@@ -120,6 +131,48 @@ function readMcpMessage(value: unknown): string | null {
   if (!value || typeof value !== "object" || !("message" in value)) return null;
   const message = (value as { message?: unknown }).message;
   return typeof message === "string" && message.trim() ? message : null;
+}
+
+function validAgentStage(value: unknown): value is AgentStage {
+  if (!value || typeof value !== "object") return false;
+  const stage = value as Partial<AgentStage>;
+  return typeof stage.id === "string" && typeof stage.label === "string" && typeof stage.detail === "string" &&
+    (stage.status === "active" || stage.status === "complete" || stage.status === "error");
+}
+
+function upsertStage(stages: AgentStage[] | undefined, stage: AgentStage): AgentStage[] {
+  const current = stages ?? [];
+  const index = current.findIndex((item) => item.id === stage.id);
+  if (index < 0) return [...current, stage];
+  return current.map((item, itemIndex) => itemIndex === index ? stage : item);
+}
+
+async function readChatStream(response: Response, onStage: (stage: AgentStage) => void): Promise<ChatResult> {
+  if (!response.body) throw new Error("The agent stream could not be opened.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let result: ChatResult | null = null;
+  const readLine = (line: string) => {
+    if (!line.trim()) return;
+    const event: unknown = JSON.parse(line);
+    if (!event || typeof event !== "object" || !("type" in event)) return;
+    const candidate = event as Partial<ChatStreamEvent>;
+    if (candidate.type === "stage" && "stage" in candidate && validAgentStage(candidate.stage)) onStage(candidate.stage);
+    if (candidate.type === "result" && "result" in candidate && validChatResult(candidate.result)) result = candidate.result;
+    if (candidate.type === "error" && "error" in candidate && typeof candidate.error === "string") throw new Error(candidate.error);
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    buffered += decoder.decode(value, { stream: !done });
+    const lines = buffered.split("\n");
+    buffered = lines.pop() ?? "";
+    lines.forEach(readLine);
+    if (done) break;
+  }
+  readLine(buffered);
+  if (!result) throw new Error("The agent finished without a result.");
+  return result;
 }
 
 function makeId(prefix: string): string {
@@ -306,20 +359,26 @@ export default function HomePage() {
       if (connection.connected) {
         const response = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
           body: JSON.stringify({ messages: currentHistory, preferences: requestPreferences }),
           signal: controller.signal,
         });
-        const data: unknown = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(errorMessage(data, "Your connected model could not answer."));
-        if (!validChatResult(data)) throw new Error("The connected model returned an unexpected response.");
-        result = data;
+        if (!response.ok) {
+          const data: unknown = await response.json().catch(() => null);
+          throw new Error(errorMessage(data, "Your connected model could not answer."));
+        }
+        result = await readChatStream(response, (stage) => {
+          if (!mountedRef.current) return;
+          setChat((current) => current.map((message) => message.id === assistantId
+            ? { ...message, stages: upsertStage(message.stages, stage) }
+            : message));
+        });
       } else {
         result = await Promise.resolve(demoReply(text, requestPreferences, chat.length));
       }
       if (controller.signal.aborted || !mountedRef.current) return;
       const alignedPreferences = interpretRequest(text, result.preferences);
-      const alignedRecommendations = result.recommendations.length
+      const alignedRecommendations = !connection.connected && result.recommendations.length
         ? alignRecommendations(result.recommendations, alignedPreferences, text)
         : result.recommendations;
       setPreferences(alignedPreferences);
@@ -327,7 +386,9 @@ export default function HomePage() {
         ...message,
         text: result.text,
         status: undefined,
-        source: result.toolsUsed?.length ? `${responseSource} · MCP` : responseSource,
+        source: result.toolsUsed?.includes("say_hello")
+          ? `${responseSource} · MCP`
+          : result.toolsUsed?.includes("recommend_meals") ? `${responseSource} · MCP` : responseSource,
         recommendations: alignedRecommendations,
       } : message));
     } catch (error) {
@@ -424,7 +485,17 @@ export default function HomePage() {
 }
 
 function ChatWorkspace({ messages, failedAssistantId, onRetry, retryAvailable, onOpenMeal, onViewShortlist, onSubmit, onStop, busy, modelLabel, onConnection }: { messages: ChatMessage[]; failedAssistantId?: string; onRetry: () => void; retryAvailable: boolean; onOpenMeal: (meal: Meal) => void; onViewShortlist: (recommendations: MealRecommendation[]) => void; onSubmit: (text: string) => void; onStop: () => void; busy: boolean; modelLabel: string; onConnection: () => void; }) {
-  return <section className="chat-workspace" aria-label="Your meal conversation"><div className="chat-scroll"><div className="chat-messages">{messages.map((message) => <article className={`chat-message ${message.role === "user" ? "is-user" : "is-assistant"}`} key={message.id}>{message.role === "assistant" && <div className="assistant-avatar" aria-hidden="true"><MessageCircle size={16} /></div>}<div className="message-body">{message.role === "assistant" && <span className="message-author">Remymy · {message.source ?? "Demo"}</span>}{message.status === "pending" ? <span className="chat-pending" aria-label="Remymy is thinking"><LoaderCircle className="spin" size={16} /> Thinking…</span> : <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ table: ({ children }) => <div className="markdown-table-wrap"><table>{children}</table></div> }}>{message.text}</ReactMarkdown>}{message.status === "error" && message.id === failedAssistantId && retryAvailable && <button className="chat-retry" onClick={onRetry}><RotateCcw size={14} /> Try again</button>}{message.recommendations && message.recommendations.length > 0 && <div className="chat-meal-list" aria-label="Meal suggestions">{message.recommendations.slice(0, 6).map((recommendation) => <button className="chat-meal-row" key={recommendation.meal.id} onClick={() => onOpenMeal(recommendation.meal)}><span className="chat-meal-thumb" style={{ background: recommendation.meal.color }} aria-hidden="true"><Utensils size={15} /></span><span className="chat-meal-info"><strong>{recommendation.meal.title}</strong><small>{recommendation.meal.minutes} min · {recommendation.meal.cuisine}</small></span><ArrowRight size={15} aria-hidden="true" /></button>)}<button className="shortlist-link" onClick={() => onViewShortlist(message.recommendations ?? [])}>View shortlist <ArrowRight size={14} /></button></div>}</div></article>)}</div></div><div className="chat-composer-dock"><Composer onSubmit={onSubmit} onStop={onStop} busy={busy} welcome={false} modelLabel={modelLabel} onConnection={onConnection} /></div></section>;
+  return <section className="chat-workspace" aria-label="Your meal conversation"><div className="chat-scroll"><div className="chat-messages">{messages.map((message) => <article className={`chat-message ${message.role === "user" ? "is-user" : "is-assistant"}`} key={message.id}>{message.role === "assistant" && <div className="assistant-avatar" aria-hidden="true"><MessageCircle size={16} /></div>}<div className="message-body">{message.role === "assistant" && <span className="message-author">Remymy · {message.source ?? "Demo"}</span>}{message.role === "assistant" && message.stages && message.stages.length > 0 && <AgentStages stages={message.stages} pending={message.status === "pending"} />}{message.status === "pending" ? !message.stages?.length && <span className="chat-pending" aria-label="Remymy is thinking"><LoaderCircle className="spin" size={16} /> Starting the agent…</span> : <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ table: ({ children }) => <div className="markdown-table-wrap"><table>{children}</table></div> }}>{message.text}</ReactMarkdown>}{message.status === "error" && message.id === failedAssistantId && retryAvailable && <button className="chat-retry" onClick={onRetry}><RotateCcw size={14} /> Try again</button>}{message.recommendations && message.recommendations.length > 0 && <div className="chat-meal-list" aria-label="Meal suggestions">{message.recommendations.slice(0, 6).map((recommendation) => <button className="chat-meal-row" key={recommendation.meal.id} onClick={() => onOpenMeal(recommendation.meal)}><span className="chat-meal-thumb" style={{ background: recommendation.meal.color }} aria-hidden="true"><Utensils size={15} /></span><span className="chat-meal-info"><strong>{recommendation.meal.title}</strong><small>{recommendation.meal.minutes} min · {recommendation.meal.cuisine}</small></span><ArrowRight size={15} aria-hidden="true" /></button>)}<button className="shortlist-link" onClick={() => onViewShortlist(message.recommendations ?? [])}>View shortlist <ArrowRight size={14} /></button></div>}</div></article>)}</div></div><div className="chat-composer-dock"><Composer onSubmit={onSubmit} onStop={onStop} busy={busy} welcome={false} modelLabel={modelLabel} onConnection={onConnection} /></div></section>;
+}
+
+function AgentStages({ stages, pending }: { stages: AgentStage[]; pending: boolean }) {
+  return <div className={`agent-stages ${pending ? "is-running" : ""}`} aria-label="Agent progress" aria-live="polite">
+    <div className="agent-stages-heading"><span>Agent flow</span>{pending && <span className="agent-live"><span /> Live</span>}</div>
+    <ol>{stages.map((stage) => <li key={stage.id} className={`agent-stage is-${stage.status}`}>
+      <span className="agent-stage-marker" aria-hidden="true">{stage.status === "complete" ? <Check size={12} /> : stage.status === "active" ? <LoaderCircle className="spin" size={13} /> : <Circle size={10} />}</span>
+      <span><strong>{stage.label}</strong><small>{stage.detail}</small></span>
+    </li>)}</ol>
+  </div>;
 }
 
 function MealsView({ recommendations, preferences, isShortlist, filter, onFilterChange, onSave, savedIds, onOpen, onPreferences, onBrowseAll }: { recommendations: MealRecommendation[]; preferences: Preferences; isShortlist: boolean; filter: (typeof FILTERS)[number]["id"]; onFilterChange: (filter: (typeof FILTERS)[number]["id"]) => void; onSave: (meal: Meal) => void; savedIds: string[]; onOpen: (meal: Meal) => void; onPreferences: () => void; onBrowseAll: () => void; }) {

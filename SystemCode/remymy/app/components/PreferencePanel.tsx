@@ -46,6 +46,7 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
             <option value="any">Anything</option>
             <option value="vegetarian">Vegetarian</option>
             <option value="vegan">Vegan</option>
+            <option value="halal">Halal (vegan-tagged screen; not certified)</option>
           </select>
         </label>
         <label className="field-label">

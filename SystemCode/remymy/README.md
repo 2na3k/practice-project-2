@@ -62,6 +62,18 @@ Published local ports:
 | MCP | http://localhost:8000 |
 | Models | http://localhost:8001 |
 
-Langfuse is the tracing UI for connected Pi agent chat (`/api/chat`) and the MCP hello probe. Sign in with `remymy@example.com` / `remymylocal` on the local stack. Demo-mode Discover replies stay in the browser and do not create traces.
+Langfuse is the tracing UI for connected Pi agent chat (`/api/chat`) and MCP calls. Connected chat meal recommendations go through the Python MCP service, which filters the mounted Food.com recipe dataset and ranks candidates with the model service; it does not use the app's demo meal list. The local-only gateway on port 3030 automatically establishes the pre-seeded development session, so the dashboard opens without an email/password screen. The port remains bound to `127.0.0.1`; do not expose this passwordless gateway outside a development machine. Demo-mode Discover replies stay in the browser and do not create traces.
+
+Each MCP invocation creates a nested `mcp.client.call` tool observation. It
+records the MCP tool name and arguments, transport endpoint and duration, plus
+the exact returned MCP `content`, optional `structuredContent`, and `isError`
+flag. Standalone `/api/mcp` checks use the trace name `remymy-mcp-probe`; agent
+calls keep the MCP observation under their `remymy-agent-chat` trace.
+
+Connected chat requests stream newline-delimited JSON when the browser sends
+`Accept: application/x-ndjson`. The stream reports the real Pi agent lifecycle
+(request interpretation, model turns, catalog/MCP tool calls, and answer
+composition) before the final result, which powers the stage-by-stage flow in
+the chat UI. Plain JSON remains available for clients that omit that header.
 
 Inside the Compose network, services should use `api`, `mcp`, `models`, and `langfuse-web` as hostnames instead of `localhost`. The API reads the normalized SQLite database at `${DATA_DIR:-./data}/remymy-food.db` through a read-only mount; only its documented REST responses are exposed.
