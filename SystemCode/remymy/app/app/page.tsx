@@ -21,6 +21,7 @@ import { Sidebar, type AppView } from "@/components/Sidebar";
 import { ConnectionPanel } from "@/components/ConnectionPanel";
 import { RecipeCard } from "@/components/RecipeCard";
 import { RecipeDetailModal } from "@/components/RecipeDetailModal";
+import { RecommendationPanel } from "@/components/RecommendationPanel";
 import {
   DEFAULT_PREFERENCES,
   MEALS,
@@ -398,6 +399,7 @@ export default function HomePage() {
             </header>
             {hasChat ? <ChatWorkspace messages={chat} failedAssistantId={failedRequest?.assistantId} onRetry={() => void submitMessage(failedRequest?.text ?? "", true)} retryAvailable={Boolean(failedRequest) && !isBusy} onOpenMeal={setActiveMeal} onViewShortlist={showShortlist} onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} modelLabel={modelLabel} onConnection={() => setView("connection")} /> : (
               <section className="welcome-screen">
+                <RecommendationPanel />
                 <div className="hero-grid"><div className="hero-copy"><p className="eyebrow">THE KIND OF HELPFUL YOU CAN EAT</p><h2 className="hero-title">Less overthinking.<br /><em>More good food.</em></h2><p className="hero-description">A tiny nudge toward something delicious, tuned to your cravings, your time, and the ingredients you love.</p></div><div className="hero-art" aria-label="Illustration of a colorful bowl of food" role="img"><div className="hero-sun" /><div className="hero-plate"><span className="hero-food hero-food-one" /><span className="hero-food hero-food-two" /><span className="hero-food hero-food-three" /><span className="hero-food hero-food-four" /><span className="hero-leaf" /></div><span className="hero-art-label">GOOD THINGS<br /><strong>COMING UP</strong></span></div></div>
                 <Composer onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} welcome modelLabel={modelLabel} onConnection={() => setView("connection")} />
                 <p className="welcome-hint">Try a craving, a time limit, or an ingredient you want to use up.</p>
