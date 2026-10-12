@@ -6,10 +6,9 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 from .cache import connect_cache
-from .demo import demo_enabled, seed_demo_user
 from .repository.recipe_repository import recipe_repository
 from .routes import router
-from .users import init_user_database, open_user_database
+from .users import init_user_database
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +32,9 @@ def load_recommender():
 async def lifespan(app: FastAPI):
     logger.info("Starting the API.")
     app.state.cache = connect_cache()
+    # with SEED_DEMO_USER, this also injects the demo user
     init_user_database()
     app.state.recommender = load_recommender()
-    if demo_enabled():
-        connection = open_user_database()
-        try:
-            seed_demo_user(connection, app.state.cache)
-        finally:
-            connection.close()
     logger.info("API ready; recommendations %s.", "on" if app.state.recommender else "off (no catalog)")
     try:
         yield

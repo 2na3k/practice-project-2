@@ -234,9 +234,10 @@ For each recommendation (one at a time) it:
 - **Near-chance on liked vs disliked** (AUC 0.514 against rated negatives).
 - **Low ingredient match coverage.** Matching is exact, and the recipe ingester
   leaves quantity fragments in ingredient names (for example ". kosher salt").
-  On the local recipe database, 6 of the demo user's 82 ingredient lines match a
-  priced food, and more than half of 500 random recipes match none. A user with
-  no matched food gets no profile and no recommendations.
+  On the local recipe database, 7,269 of the 13,489 recipes with ingredient
+  lines match no priced food, and the best match about half of their lines. The
+  demo user's recipes are picked from those that match best (21 of their 50
+  lines). A user with no matched food gets no profile and no recommendations.
 - **Arbitrary stand-in foods.** The median-price food stands for its whole key,
   so "tomatoes" maps to "Tomatoes, sun-dried" (258 kcal per 100 g), which skews
   the nutrient averages.
@@ -257,9 +258,15 @@ For each recommendation (one at a time) it:
   the API runs the model on every request.
 - **Swagger:** http://localhost:8002/docs. `/` redirects to `/docs`.
 - **Demo user:** with `SEED_DEMO_USER=true` (the default in compose and in
-  `serve.py`), the API creates a `demo` user at startup if it does not exist.
-  Its history is the first recipe whose title contains each of chicken, tomato,
-  salad, soup and chocolate, rated 5, 4, 5, 3 and 2. In Swagger,
+  `serve.py`), creating the users database's schema also injects a `demo`
+  user and its ratings with SQL (`DEMO_SEED` in
+  [`api/src/remymy_api/users.py`](api/src/remymy_api/users.py)). Its history
+  is five real recipes of the 13k recipes CSV, by `recipe_id`: Roast Chicken
+  with Carrots (5), Baked Eggs with Tomato (4), Avocado and Watercress Salad
+  (5), Meatballs and Noodle Soup (Almondigas) (3) and Citrus Cookies (2). Each
+  is the recipe of its kind whose ingredient lines match the priced catalog
+  best. Nothing is written once the demo user has a history, so an existing
+  users database keeps its old one. In Swagger,
   `GET /api/recommend/{username}` comes pre-filled with `demo`.
 
 ### Data API endpoints (port 8002)
@@ -284,28 +291,28 @@ For the demo user on the local recipe database, rounded:
 {
   "profile": {
     "user_id": 1,
-    "avg_price": 7.66,
+    "avg_price": 6.53,
     "avg_nutrient_values": {
-      "carb_g": 18.83,
-      "cholesterol_mg": 0.0,
-      "energy_kcal": 224.17,
-      "fat_g": 16.72,
-      "fiber_g": 0.53,
-      "protein_g": 0.31,
-      "satfat_g": 2.6,
-      "sodium_mg": 13.33,
-      "sugars_g": 17.29
+      "carb_g": 12.08,
+      "cholesterol_mg": 41.76,
+      "energy_kcal": 268.71,
+      "fat_g": 24.33,
+      "fiber_g": 1.49,
+      "protein_g": 2.44,
+      "satfat_g": 11.16,
+      "sodium_mg": 2506.43,
+      "sugars_g": 9.4
     }
   },
   "items": [
-    {"id": "169287", "title": "Spinach, frozen, chopped or leaf, unprepared (Includes foods for USDA's Food Distribution Program)", "score": 0.644},
-    {"id": "170007", "title": "Onions, welsh, raw", "score": 0.626},
-    {"id": "175206", "title": "Chickpeas (garbanzo beans, bengal gram), mature seeds, canned, solids and liquids", "score": 0.621}
+    {"id": "169286", "title": "Spinach, canned, regular pack, drained solids", "score": 0.795},
+    {"id": "168916", "title": "Pasta, whole grain, 51% whole wheat, remaining unenriched semolina, cooked", "score": 0.784},
+    {"id": "2709617", "title": "Spinach, canned, cooked, no added fat", "score": 0.782}
   ]
 }
 ```
 
-That profile rests on the 6 foods matched from the demo user's 82 ingredient
+That profile rests on the 21 foods matched from the demo user's 50 ingredient
 lines (see [Limitations](#limitations)).
 
 - **`profile`:** averages over every catalog food matched from the user's
@@ -435,14 +442,14 @@ Data API:
 | Variable | Docker default | `api/serve.py` default | Purpose |
 | --- | --- | --- | --- |
 | `DATABASE_PATH` | `/data/remymy-food.db` | `../data/remymy-food.db` | Recipe database |
-| `USER_DATABASE_PATH` | `/state/remymy-users.db` | `./remymy-users.db` | Users database, created on startup |
+| `USER_DATABASE_PATH` | `/state/remymy-users.db` | `./data/remymy-users.db` | Users database, created on startup |
 | `CATALOG_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog database is built from |
-| `CATALOG_DATABASE_PATH` | `/state/remymy-catalog.db` | `./remymy-catalog.db` | Catalog database, created and updated on startup |
+| `CATALOG_DATABASE_PATH` | `/state/remymy-catalog.db` | `./data/remymy-catalog.db` | Catalog database, created and updated on startup |
 | `ARTIFACT_DIR` | `weights/gru_xattn_reranker` | same | Model weights and config |
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
 | `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Cache |
 | `CACHE_TTL_SECONDS` | `86400` | `86400` | Lifetime of cached user ids and recommendations (one day) |
-| `SEED_DEMO_USER` | `true` in compose | `true` | Create the `demo` user at startup |
+| `SEED_DEMO_USER` | `true` in compose | `true` | Inject the `demo` user and its ratings into the users database at startup |
 | `LOG_LEVEL` | `INFO` | `INFO` | Level of the API's own log (`DEBUG` adds cache hits, ingredient matching and each pipeline step); compose passes it to `api-migrate`, `mcp` and `models` too |
 | `HOST`, `PORT` | `0.0.0.0`, `8002` | `127.0.0.1`, `8002` | Listen address |
 

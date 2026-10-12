@@ -45,11 +45,11 @@ wait_for() {
 
 RECIPE_DB="${DATABASE_PATH:-$ROOT/data/remymy-food.db}"
 if [ ! -e "$RECIPE_DB" ]; then
-  echo "warning: $RECIPE_DB not found; recipe routes return 503 and no demo user is created" >&2
+  echo "warning: $RECIPE_DB not found; recipe routes and recommendations return 503" >&2
 fi
 
 CATALOG_CSV="${CATALOG_PATH:-$ROOT/data/price_mapped_nutrients.csv}"
-CATALOG_DB="${CATALOG_DATABASE_PATH:-$ROOT/api/remymy-catalog.db}"
+CATALOG_DB="${CATALOG_DATABASE_PATH:-$ROOT/api/data/remymy-catalog.db}"
 if [ ! -e "$CATALOG_CSV" ] && [ ! -e "$CATALOG_DB" ]; then
   echo "warning: neither $CATALOG_CSV nor $CATALOG_DB found; recommendations return 503" >&2
 fi

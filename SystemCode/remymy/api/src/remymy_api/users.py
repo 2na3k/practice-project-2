@@ -75,6 +75,39 @@ CREATE INDEX IF NOT EXISTS user_history_by_user
   ON user_history (user_id, timestamp DESC);
 """
 
+DEMO_USERNAME = "demo"
+
+# The demo user and its ratings, injected with the schema when SEED_DEMO_USER is set. Its recipes are real ones of
+# the 13k recipes CSV the recipe database is built from: of each kind, the one whose ingredient lines match the priced
+# catalog best (lines matched / lines in the comments). Once the demo user has a history nothing is written, so a
+# restart keeps it as it is.
+DEMO_SEED = """
+BEGIN;
+
+INSERT INTO app_user (username, preferences)
+VALUES ('demo', jsonb('{"special_diet": null, "cuisines": ["Italian", "Mexican"], "preferred_nutrient": "protein"}'))
+ON CONFLICT (username) DO NOTHING;
+
+WITH demo_history (recipe_id, rating) AS (VALUES
+  ('openrecipes:5210', 5),  -- Roast Chicken with Carrots: 5 / 9
+  ('openrecipes:8236', 4),  -- Baked Eggs with Tomato: 5 / 11
+  ('openrecipes:9906', 5),  -- Avocado and Watercress Salad: 3 / 8
+  ('openrecipes:1052', 3),  -- Meatballs and Noodle Soup (Almondigas): 4 / 11
+  ('openrecipes:3911', 2)   -- Citrus Cookies: 4 / 11
+)
+INSERT INTO user_history (user_id, recipe_id, rating)
+SELECT app_user.user_id, demo_history.recipe_id, demo_history.rating
+FROM app_user, demo_history
+WHERE app_user.username = 'demo'
+  AND NOT EXISTS (SELECT 1 FROM user_history WHERE user_history.user_id = app_user.user_id);
+
+COMMIT;
+"""
+
+
+def demo_enabled() -> bool:
+    return os.getenv("SEED_DEMO_USER", "false").strip().lower() in {"1", "true", "yes"}
+
 
 def user_database_path() -> Path:
     return Path(os.getenv("USER_DATABASE_PATH", DEFAULT_USER_DATABASE_PATH))
@@ -92,6 +125,11 @@ def init_user_database() -> None:
     connection = open_user_database()
     try:
         connection.executescript(SCHEMA)
+        if demo_enabled():
+            changes = connection.total_changes
+            connection.executescript(DEMO_SEED)
+            if connection.total_changes > changes:
+                logger.info("Injected the demo user %r and its rated recipes.", DEMO_USERNAME)
     finally:
         connection.close()
     logger.info("Users database ready at %s.", user_database_path())

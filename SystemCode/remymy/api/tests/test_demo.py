@@ -1,42 +1,27 @@
 from __future__ import annotations
 
-import sqlite3
+import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-from remymy_api.demo import DEMO_USERNAME
 from remymy_api.main import app
-from remymy_api.users import open_user_database
+from remymy_api.users import DEMO_USERNAME, init_user_database, open_user_database
+
+DEMO_RATINGS = [
+    ("openrecipes:5210", 5),
+    ("openrecipes:8236", 4),
+    ("openrecipes:9906", 5),
+    ("openrecipes:1052", 3),
+    ("openrecipes:3911", 2),
+]
 
 
 @pytest.fixture
-def recipes(tmp_path, monkeypatch):
-    path = tmp_path / "recipes.db"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE recipe (recipe_id TEXT PRIMARY KEY, title TEXT, quality_status TEXT NOT NULL);
-            CREATE TABLE recipe_ingredient (
-              ingredient_id TEXT PRIMARY KEY, recipe_id TEXT NOT NULL, position INTEGER NOT NULL,
-              raw_text TEXT NOT NULL, ingredient_text TEXT
-            );
-            CREATE TABLE recipe_instruction (recipe_id TEXT, position INTEGER, text TEXT);
-            INSERT INTO recipe VALUES
-              ('openrecipes:1', 'Roast Chicken', 'accepted'),
-              ('openrecipes:2', 'Tomato Soup', 'accepted'),
-              ('openrecipes:3', 'Greek Salad', 'accepted'),
-              ('openrecipes:4', 'Chicken Salad Without Ingredients', 'accepted');
-            INSERT INTO recipe_ingredient VALUES
-              ('1:1', 'openrecipes:1', 1, '1 chicken', 'chicken'),
-              ('2:1', 'openrecipes:2', 1, '3 tomatoes', 'tomatoes'),
-              ('3:1', 'openrecipes:3', 1, '1 cucumber', 'cucumber');
-            """
-        )
-    connection.close()
-    monkeypatch.setenv("DATABASE_PATH", str(path))
+def users(tmp_path, monkeypatch):
+    # no recipe database: the demo user is injected without one
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "missing-recipes.db"))
     monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
-    return path
 
 
 def demo_history() -> list[tuple[str, int]]:
@@ -54,23 +39,43 @@ def demo_history() -> list[tuple[str, int]]:
         connection.close()
 
 
-def test_demo_user_is_seeded_once_from_matching_recipes(recipes, cache, monkeypatch):
+def test_demo_user_is_injected_once_with_the_schema(users, cache, monkeypatch, caplog):
     monkeypatch.setenv("SEED_DEMO_USER", "true")
 
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
     with TestClient(app):
         pass
-    with TestClient(app):
-        pass
 
-    assert f"user:{DEMO_USERNAME}" in cache.store
-    assert demo_history() == [
-        ("openrecipes:1", 5),
-        ("openrecipes:2", 4),
-        ("openrecipes:3", 5),
-    ]
+    assert demo_history() == DEMO_RATINGS
+    connection = open_user_database()
+    try:
+        (row,) = connection.execute(
+            "SELECT json(preferences) AS preferences FROM app_user WHERE username = ?", (DEMO_USERNAME,)
+        ).fetchall()
+    finally:
+        connection.close()
+    assert json.loads(row["preferences"]) == {
+        "special_diet": None, "cuisines": ["Italian", "Mexican"], "preferred_nutrient": "protein",
+    }
+    injected = [record for record in caplog.records if record.getMessage().startswith("Injected the demo user")]
+    assert len(injected) == 1
 
 
-def test_demo_user_is_not_seeded_by_default(recipes, cache, monkeypatch):
+def test_an_existing_demo_history_is_kept(users, monkeypatch):
+    monkeypatch.setenv("SEED_DEMO_USER", "true")
+    init_user_database()
+    connection = open_user_database()
+    with connection:
+        connection.execute("DELETE FROM user_history WHERE recipe_id <> 'openrecipes:5210'")
+    connection.close()
+
+    init_user_database()
+
+    assert demo_history() == [("openrecipes:5210", 5)]
+
+
+def test_demo_user_is_not_injected_by_default(users, cache, monkeypatch):
     monkeypatch.delenv("SEED_DEMO_USER", raising=False)
 
     with TestClient(app):
@@ -79,17 +84,7 @@ def test_demo_user_is_not_seeded_by_default(recipes, cache, monkeypatch):
     assert demo_history() == []
 
 
-def test_missing_recipe_database_skips_the_demo_user(recipes, cache, monkeypatch):
-    monkeypatch.setenv("SEED_DEMO_USER", "true")
-    recipes.unlink()
-
-    with TestClient(app) as client:
-        assert client.get("/health").status_code == 200
-
-    assert demo_history() == []
-
-
-def test_swagger_is_served_with_the_demo_username_prefilled(recipes, cache):
+def test_swagger_is_served_with_the_demo_username_prefilled(users, cache):
     with TestClient(app) as client:
         assert client.get("/", follow_redirects=False).headers["location"] == "/docs"
         assert client.get("/docs").status_code == 200
