@@ -41,7 +41,12 @@ class FakeRepository:
         return Recipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
 
     def food(self, fdc_id: int) -> dict | None:
-        return next((food for food in CATALOG.values() if food["fdc_id"] == fdc_id), None)
+        found = next((food for food in CATALOG.values() if food["fdc_id"] == fdc_id), None)
+        if found is None:
+            # a recommended food, as the groceries panel rates it
+            found = next(({"fdc_id": item["fdc_id"], "name": item["name"], "price": item["price"], "nutrient_values": {}}
+                          for item in RECOMMENDED if item["fdc_id"] == fdc_id), None)
+        return found
 
     def digest_food(self, food_id: str) -> Recipe:
         self.digested.append(food_id)
@@ -290,3 +295,36 @@ def test_the_recommender_is_built_on_the_shared_repository(monkeypatch):
     monkeypatch.setattr(main, "recipe_repository", shared)
     monkeypatch.setattr(service.Recommender, "load", classmethod(lambda cls, repository: repository))
     assert load_recommender() is shared
+
+
+def test_a_disliked_pick_leaves_the_cached_recommendations(stores, models, repository, cache):
+    alice = seed_alice(stores, cache)
+    key = f"recommendations:{alice}"
+
+    with TestClient(app) as client:
+        first = client.get("/api/recommend/alice", params={"top_k": 3}).json()
+        # the cached entry has been there a while
+        cache.ttls[key] = 1234
+        disliked = client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": False})
+        liked = client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
+        second = client.get("/api/recommend/alice", params={"top_k": 3}).json()
+
+    assert disliked.status_code == liked.status_code == 200
+    assert [item["id"] for item in first["items"]] == ["167516", "175237", "168516"]
+    # served from the cache without the disliked one; the liked one stays
+    assert [item["id"] for item in second["items"]] == ["167516", "168516"]
+    assert len(models.calls) == 1
+    assert cache.ttls[key] == 1234
+    assert second["profile"] == first["profile"]
+
+
+def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache):
+    alice = seed_alice(stores, cache)
+    cache.down = True
+
+    with TestClient(app) as client:
+        response = client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": False})
+
+    assert response.status_code == 200
+    assert response.json()["like"] is False
+

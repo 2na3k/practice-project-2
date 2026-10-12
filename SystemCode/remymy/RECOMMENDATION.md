@@ -281,7 +281,7 @@ For each recommendation (one at a time) it:
 | GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
 | GET | `/api/users/{username}/likes` | none | Whether the user liked each recipe or catalog food they rated, `{id: true or false}`, from their latest `user_history` row for it; 404 if unknown |
-| PUT | `/api/recipes/{recipe_id}/rating` | `user_id`, `like` (`true` or `false`) | Adds whether the user liked the recipe to their history, and returns that `UserHistory` row; 404 for an unknown user or recipe |
+| PUT | `/api/recipes/{recipe_id}/rating` | `user_id`, `like` (`true` or `false`) | Adds whether the user liked the recipe to their history, and returns that `UserHistory` row; 404 for an unknown user or recipe; a dislike also takes the item out of the user's cached recommendations |
 
 #### `GET /api/recommend/{username}`
 
@@ -402,7 +402,9 @@ vector. When no recipe in the history matched a food, `items` is empty.
 
 Because the API always asks for 50 items, one cache entry serves any `top_k`.
 A user's new history only affects their recommendations once the cached entry
-expires. If Redis is down, user lookups fall back to the users database and
+expires, except a dislike: rating a recommended item `like=false` takes it out
+of the cached entry at once, keeping the time the entry has left, so the next
+request shows the next pick in its place. If Redis is down, user lookups fall back to the users database and
 recommendations are still answered, running the model on every request.
 
 ### Data model

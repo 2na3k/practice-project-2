@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from .db import close_database, open_database, split_preview
-from .cache import read_recommendations, write_recommendations
+from .cache import drop_recommendation, read_recommendations, write_recommendations
 from .recommend import recommend
 from .schemas import (
     HealthResponse,
@@ -223,16 +223,18 @@ def get_user_likes(username: str, request: Request) -> dict[str, bool]:
 def rate_recipe(
     recipe_id: str,
     user_id: int,
-    like: bool
+    like: bool,
+    request: Request,
 ) -> UserHistory:
     """Record whether the user liked a recipe they cooked, or a catalog food by its fdc_id (a recommended grocery). Rating
-    the same one again changes the like in their history rather than adding another."""
+    the same one again changes the like in their history rather than adding another. A recommendation they did not
+    like also leaves their cached recommendations."""
     connection = open_user_database()
     try:
         if connection.execute("SELECT 1 FROM app_user WHERE user_id = ?", (user_id,)).fetchone() is None:
             raise HTTPException(status_code=404, detail="User not found.")
         # add_history checks the recipe or food exists, then updates its row of user_history or inserts one
-        return add_history(connection, user_id, recipe_id, like)
+        entry = add_history(connection, user_id, recipe_id, like)
     except LookupError:
         raise HTTPException(status_code=404, detail="Recipe not found.")
     except sqlite3.Error:
@@ -240,3 +242,6 @@ def rate_recipe(
         raise HTTPException(status_code=503, detail="User data is unavailable.")
     finally:
         connection.close()
+    if not like and drop_recommendation(request.app.state.cache, user_id, recipe_id):
+        logger.debug("Dropped %s, which user %d did not like, from their cached recommendations.", recipe_id, user_id)
+    return entry

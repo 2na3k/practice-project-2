@@ -23,6 +23,12 @@ class FakeCache:
         self.reads.append(key)
         return self.store.get(key)
 
+    def ttl(self, key: str) -> int:
+        if self.down:
+            raise redis.ConnectionError("down")
+        # as Redis answers: -2 for a missing key, -1 for one without an expiry
+        return -2 if key not in self.store else (self.ttls.get(key) or -1)
+
     def set(self, key: str, value: object, ex: int | None = None) -> None:
         if self.down:
             raise redis.ConnectionError("down")

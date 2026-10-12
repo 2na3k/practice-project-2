@@ -77,3 +77,25 @@ def write_recommendations(
         logger.warning("Redis write of %s failed: %s", recommendations_key(user_id), error)
         return False
     return True
+
+
+def drop_recommendation(cache: redis.Redis, user_id: int, item_id: str) -> bool:
+    """Take one item out of the user's cached recommendations, so the next request goes on without it; the entry keeps
+    the time it had left. True when the item was cached and is gone."""
+    key = recommendations_key(user_id)
+    recommendations = read_recommendations(cache, user_id)
+    if recommendations is None:
+        return False
+    items = [item for item in recommendations.items if item.id != item_id]
+    if len(items) == len(recommendations.items):
+        return False
+    try:
+        # TTL rather than SET ... KEEPTTL, which needs Redis 6
+        remaining = cache.ttl(key)
+        cache.set(key, recommendations.model_copy(update={"items": items}).model_dump_json(),
+                  ex=remaining if remaining and remaining > 0 else cache_ttl())
+    except redis.RedisError as error:
+        logger.warning("Redis write of %s failed: %s", key, error)
+        return False
+    return True
+
