@@ -3,6 +3,7 @@
 import Image from "next/image";
 
 import { Bookmark, Clock3, Flame, Leaf, Sparkles } from "lucide-react";
+import { RecipeLikeButtons } from "@/components/RecipeLikeButtons";
 import { MEAL_DATA_NOTE, type Meal } from "@/lib/meals";
 
 export type MealRecommendation = {
@@ -16,6 +17,11 @@ type MealCardProps = {
   saved: boolean;
   onSave: (meal: Meal) => void;
   onOpen: (meal: Meal) => void;
+  // with onRate the card shows the like and dislike buttons
+  like?: boolean;
+  onRate?: (meal: Meal, like: boolean) => void;
+  // false leaves out the photo, for a compact list such as Saved
+  showImage?: boolean;
 };
 
 export function MealCard({
@@ -23,36 +29,41 @@ export function MealCard({
   saved,
   onSave,
   onOpen,
+  like,
+  onRate,
+  showImage = true,
 }: MealCardProps) {
   const { meal, reasons } = recommendation;
   return (
     <article className="meal-card">
-      <button
-        className="meal-card-media"
-        style={{ background: meal.color }}
-        onClick={() => onOpen(meal)}
-        aria-label={`Open ${meal.title}`}
-      >
-        {meal.image && (
-          <Image
-            unoptimized
-            width={800}
-            height={520}
-            className="meal-card-image"
-            src={meal.image}
-            alt={`Illustrative photo of ${meal.title}`}
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-          />
-        )}
-        <div className="dish-orb" aria-hidden="true">
-          <span className="dish-garnish dish-garnish-one" />
-          <span className="dish-garnish dish-garnish-two" />
-          <span className="dish-center" />
-        </div>
-        <span className="meal-card-cuisine">{meal.cuisine}</span>
-      </button>
+      {showImage && (
+        <button
+          className="meal-card-media"
+          style={{ background: meal.color }}
+          onClick={() => onOpen(meal)}
+          aria-label={`Open ${meal.title}`}
+        >
+          {meal.image && (
+            <Image
+              unoptimized
+              width={800}
+              height={520}
+              className="meal-card-image"
+              src={meal.image}
+              alt={`Illustrative photo of ${meal.title}`}
+              onError={(event) => {
+                event.currentTarget.style.display = "none";
+              }}
+            />
+          )}
+          <div className="dish-orb" aria-hidden="true">
+            <span className="dish-garnish dish-garnish-one" />
+            <span className="dish-garnish dish-garnish-two" />
+            <span className="dish-center" />
+          </div>
+          <span className="meal-card-cuisine">{meal.cuisine}</span>
+        </button>
+      )}
       <div className="meal-card-body">
         <div className="meal-card-meta">
           <span>
@@ -82,22 +93,31 @@ export function MealCard({
             <Sparkles size={14} aria-hidden="true" />{" "}
             {reasons[0] ?? "A good fit today"}
           </span>
-          <button
-            className={`save-button ${saved ? "is-saved" : ""}`}
-            onClick={() => onSave(meal)}
-            aria-label={
-              saved
-                ? `Remove ${meal.title} from saved meals`
-                : `Save ${meal.title}`
-            }
-            aria-pressed={saved}
-          >
-            <Bookmark
-              size={17}
-              fill={saved ? "currentColor" : "none"}
-              aria-hidden="true"
-            />
-          </button>
+          <div className="meal-card-actions">
+            {onRate && (
+              <RecipeLikeButtons
+                title={meal.title}
+                rating={{ like }}
+                onRate={(next) => onRate(meal, next)}
+              />
+            )}
+            <button
+              className={`save-button ${saved ? "is-saved" : ""}`}
+              onClick={() => onSave(meal)}
+              aria-label={
+                saved
+                  ? `Remove ${meal.title} from saved meals`
+                  : `Save ${meal.title}`
+              }
+              aria-pressed={saved}
+            >
+              <Bookmark
+                size={17}
+                fill={saved ? "currentColor" : "none"}
+                aria-hidden="true"
+              />
+            </button>
+          </div>
         </div>
       </div>
     </article>

@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { LoaderCircle, RotateCcw, ShoppingBasket } from "lucide-react";
+import { Bookmark, ChefHat, LoaderCircle, RotateCcw } from "lucide-react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
-import { saveRecipeRating } from "@/lib/recipes";
+import type { SavedFood } from "@/lib/saved";
 import {
   RECOMMENDATION_USERNAME,
   fetchRecommendations,
@@ -14,13 +14,20 @@ import {
 
 const TOP_K = 6;
 
-// onItemCount hears how many foods each successful load returned; pass a stable function, such as a state setter.
-export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: number) => void } = {}) {
+type RecommendationPanelProps = {
+  // hears how many foods each successful load returned; pass a stable function, such as a state setter
+  onItemCount?: (count: number) => void;
+  // the like or not of each pick, by its fdc_id, and saving a new one through the rating route
+  ratings: Record<string, RecipeRatingState>;
+  onRate: (id: string, like: boolean) => void;
+  savedIds: string[];
+  onSave: (food: SavedFood) => void;
+};
+
+export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, onSave }: RecommendationPanelProps) {
   const [result, setResult] = useState<Recommendations | null>(null);
   const [error, setError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
-  // what the user said about each pick this session, by its id
-  const [ratings, setRatings] = useState<Record<string, RecipeRatingState>>({});
 
   useEffect(() => {
     const controller = new AbortController();
@@ -40,15 +47,6 @@ export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: num
     setRetryNonce((current) => current + 1);
   };
 
-  // A pick is a catalog food, and the Data API's rating route takes its fdc_id as the recipe_id.
-  const rate = (id: string, like: boolean) => {
-    const update = (next: RecipeRatingState) => setRatings((current) => ({ ...current, [id]: { ...current[id], ...next } }));
-    update({ saving: true, error: undefined });
-    saveRecipeRating(id, RECOMMENDATION_USERNAME, like)
-      .then((saved) => update({ like: saved.like, saving: false }))
-      .catch((reason) => update({ saving: false, error: reason instanceof Error ? reason.message : "Your rating could not be saved." }));
-  };
-
   const loading = !result && !error;
   const profile = result?.profile ?? null;
 
@@ -57,7 +55,7 @@ export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: num
       <div className="for-you-header">
         <div>
           <p className="eyebrow">PICKED FOR YOU</p>
-          <h2 className="for-you-title" id="for-you-title"><ShoppingBasket size={18} aria-hidden="true" />Groceries you&apos;ll probably like</h2>
+          <h2 className="for-you-title" id="for-you-title"><ChefHat size={18} aria-hidden="true" />Recipes you&apos;ll probably like</h2>
           <p className="for-you-caption">Based on the recipes the demo profile has rated.</p>
         </div>
         {profile && (
@@ -70,18 +68,32 @@ export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: num
       {error ? (
         <p className="for-you-note is-error" role="alert">{error}<button onClick={retry}><RotateCcw size={12} aria-hidden="true" />Try again</button></p>
       ) : loading ? (
-        <p className="for-you-note" role="status"><LoaderCircle className="spin" size={14} aria-hidden="true" />Finding foods to your taste. The first time can take up to a minute.</p>
+        <p className="for-you-note" role="status"><LoaderCircle className="spin" size={14} aria-hidden="true" />Finding recipes to your taste. The first time can take up to a minute.</p>
       ) : result && result.items.length > 0 ? (
         <ol className="for-you-list">
-          {result.items.map((item) => (
-            <li className="for-you-item" key={item.id}>
-              <span className="for-you-name">{item.title}</span>
-              <div className="for-you-item-footer">
-                <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>
-                <RecipeLikeButtons title={item.title} rating={ratings[item.id]} onRate={(like) => rate(item.id, like)} />
-              </div>
-            </li>
-          ))}
+          {result.items.map((item) => {
+            const saved = savedIds.includes(item.id);
+            return (
+              <li className="for-you-item" key={item.id}>
+                <span className="for-you-name">{item.title}</span>
+                <div className="for-you-item-footer">
+                  <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>
+                  <div className="for-you-actions">
+                    <RecipeLikeButtons title={item.title} rating={ratings[item.id]} onRate={(like) => onRate(item.id, like)} />
+                    <button
+                      className={`save-button ${saved ? "is-saved" : ""}`}
+                      onClick={() => onSave({ id: item.id, title: item.title })}
+                      aria-pressed={saved}
+                      aria-label={saved ? `Remove ${item.title} from saved recipes` : `Save ${item.title}`}
+                      title={saved ? "Saved" : "Save for later"}
+                    >
+                      <Bookmark size={15} fill={saved ? "currentColor" : "none"} aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       ) : (
         <p className="for-you-note">No picks yet. They appear once the profile has rated recipes.</p>

@@ -10,6 +10,8 @@ import {
   MessageCircle,
   Plus,
   RotateCcw,
+  ChefHat,
+  Sparkles,
   Utensils,
 } from "lucide-react";
 import { Composer } from "@/components/Composer";
@@ -22,6 +24,7 @@ import { ConnectionPanel } from "@/components/ConnectionPanel";
 import { RecipeCard } from "@/components/RecipeCard";
 import { RecipeDetailModal } from "@/components/RecipeDetailModal";
 import { RecommendationPanel } from "@/components/RecommendationPanel";
+import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import {
   DEFAULT_PREFERENCES,
   MEALS,
@@ -35,7 +38,9 @@ import type {
   ChatTurn,
   ConnectionStatus,
 } from "@/lib/chat-types";
-import { fetchRecipeDetail, fetchRecipePage, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
+import { fetchRecipeDetail, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
+import { RECOMMENDATION_USERNAME } from "@/lib/recommendations";
+import { parseLikes, parseSavedFoods, type SavedFood } from "@/lib/saved";
 
 const FILTERS = [
   { id: "all", label: "All cravings" },
@@ -135,6 +140,11 @@ export default function HomePage() {
   const [view, setView] = useState<AppView>("discover");
   const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFERENCES);
   const [savedIds, setSavedIds] = useState<string[]>([]);
+  const [savedFoods, setSavedFoods] = useState<SavedFood[]>([]);
+  // like or not of each demo meal, by meal id, kept in this browser
+  const [mealLikes, setMealLikes] = useState<Record<string, boolean>>({});
+  // like or not of each recommended recipe, by fdc_id, saved with the Data API; the chosen likes are also kept in this browser
+  const [foodRatings, setFoodRatings] = useState<Record<string, RecipeRatingState>>({});
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [connection, setConnection] = useState<ConnectionStatus>({ connected: false });
@@ -203,9 +213,16 @@ export default function HomePage() {
     mountedRef.current = true;
     let storedPreferences: Preferences | null = null;
     let storedSaved: string[] | null = null;
+    let storedFoods: SavedFood[] = [];
+    let storedMealLikes: Record<string, boolean> = {};
+    let storedFoodLikes: Record<string, boolean> = {};
     try {
       const preferencesValue = window.localStorage.getItem("remymy-preferences");
       const savedValue = window.localStorage.getItem("remymy-saved-meals");
+      storedFoods = parseSavedFoods(JSON.parse(window.localStorage.getItem("remymy-saved-foods") ?? "[]"));
+      const mealLikes = parseLikes(JSON.parse(window.localStorage.getItem("remymy-meal-likes") ?? "{}"));
+      storedMealLikes = Object.fromEntries(Object.entries(mealLikes).filter(([id]) => MEALS.some((meal) => meal.id === id)));
+      storedFoodLikes = parseLikes(JSON.parse(window.localStorage.getItem("remymy-food-likes") ?? "{}"));
       if (preferencesValue) {
         const parsed: unknown = JSON.parse(preferencesValue);
         if (validPreferences(parsed)) storedPreferences = parsed;
@@ -221,6 +238,10 @@ export default function HomePage() {
       if (!mountedRef.current) return;
       if (storedPreferences) setPreferences(storedPreferences);
       if (storedSaved) setSavedIds(storedSaved);
+      // merged under anything chosen before storage was read
+      setSavedFoods((current) => [...storedFoods.filter((food) => !current.some((item) => item.id === food.id)), ...current]);
+      setMealLikes((current) => ({ ...storedMealLikes, ...current }));
+      setFoodRatings((current) => ({ ...Object.fromEntries(Object.entries(storedFoodLikes).map(([id, like]) => [id, { like }])), ...current }));
       setIsHydrated(true);
     });
     return () => {
@@ -240,6 +261,16 @@ export default function HomePage() {
     if (!isHydrated) return;
     try { window.localStorage.setItem("remymy-saved-meals", JSON.stringify(savedIds)); } catch { /* best effort */ }
   }, [isHydrated, savedIds]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    const foodLikes = Object.fromEntries(Object.entries(foodRatings).flatMap(([id, rating]) => typeof rating.like === "boolean" ? [[id, rating.like]] : []));
+    try {
+      window.localStorage.setItem("remymy-saved-foods", JSON.stringify(savedFoods));
+      window.localStorage.setItem("remymy-meal-likes", JSON.stringify(mealLikes));
+      window.localStorage.setItem("remymy-food-likes", JSON.stringify(foodLikes));
+    } catch { /* best effort */ }
+  }, [foodRatings, isHydrated, mealLikes, savedFoods]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -271,12 +302,33 @@ export default function HomePage() {
   }, [filter, preferences]);
   const browseRecommendations = useMemo(() => mealShortlist ?? recommendMeals(enginePreferences, undefined, MEALS.length), [enginePreferences, mealShortlist]);
 
+  const flashNotice = useCallback((text: string) => {
+    setNotice(text);
+    window.setTimeout(() => { if (mountedRef.current) setNotice(""); }, 2600);
+  }, []);
+
   const toggleSaved = useCallback((meal: Meal) => {
     const isSaved = savedIds.includes(meal.id);
     setSavedIds((current) => current.includes(meal.id) ? current.filter((id) => id !== meal.id) : [...current, meal.id]);
-    setNotice(isSaved ? `${meal.title} removed from saved meals` : `${meal.title} saved for later`);
-    window.setTimeout(() => { if (mountedRef.current) setNotice(""); }, 2600);
-  }, [savedIds]);
+    flashNotice(isSaved ? `${meal.title} removed from saved meals` : `${meal.title} saved for later`);
+  }, [flashNotice, savedIds]);
+
+  const toggleSavedFood = useCallback((food: SavedFood) => {
+    const isSaved = savedFoods.some((item) => item.id === food.id);
+    setSavedFoods((current) => current.some((item) => item.id === food.id) ? current.filter((item) => item.id !== food.id) : [...current, food]);
+    flashNotice(isSaved ? `${food.title} removed from saved recipes` : `${food.title} saved for later`);
+  }, [flashNotice, savedFoods]);
+
+  // A recommended recipe is a catalog item; the Data API's rating route takes its fdc_id as the recipe_id.
+  const rateFood = useCallback((id: string, like: boolean) => {
+    const update = (next: RecipeRatingState) => setFoodRatings((current) => ({ ...current, [id]: { ...current[id], ...next } }));
+    update({ saving: true, error: undefined });
+    void saveRecipeRating(id, RECOMMENDATION_USERNAME, like)
+      .then((saved) => { if (mountedRef.current) update({ like: saved.like, saving: false }); })
+      .catch((error) => { if (mountedRef.current) update({ saving: false, error: error instanceof Error ? error.message : "Your rating could not be saved." }); });
+  }, []);
+
+  const rateMeal = useCallback((meal: Meal, like: boolean) => setMealLikes((current) => ({ ...current, [meal.id]: like })), []);
 
   const stopRequest = useCallback(() => {
     requestRef.current?.abort();
@@ -399,9 +451,9 @@ export default function HomePage() {
               <div><p className="eyebrow">YOUR DAILY DOSE OF DELICIOUS</p><h1 className="workspace-title">{hasChat ? "Your food conversation" : "What sounds good?"}</h1></div>
               <div className="workspace-actions"><button className="model-status-button" onClick={() => setView("connection")}><span className={`connection-dot ${connection.connected ? "connected" : ""}`} />{modelLabel}</button>{connectionLoadError && <span className="connection-load-note">Status unavailable</span>}{hasChat && <button className="header-new-chat" onClick={startNewChat}><Plus className="header-new-chat-icon" size={15} aria-hidden="true" />New chat</button>}</div>
             </header>
-            {hasChat ? <ChatWorkspace messages={chat} failedAssistantId={failedRequest?.assistantId} onRetry={() => void submitMessage(failedRequest?.text ?? "", true)} retryAvailable={Boolean(failedRequest) && !isBusy} onOpenMeal={setActiveMeal} onViewShortlist={showShortlist} onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} modelLabel={modelLabel} onConnection={() => setView("connection")} /> : (
+            {hasChat ? <ChatWorkspace messages={chat} failedAssistantId={failedRequest?.assistantId} onRetry={() => void submitMessage(failedRequest?.text ?? "", true)} retryAvailable={Boolean(failedRequest) && !isBusy} onOpenMeal={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onViewShortlist={showShortlist} onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} modelLabel={modelLabel} onConnection={() => setView("connection")} /> : (
               <section className="welcome-screen">
-                <RecommendationPanel onItemCount={setPickCount} />
+                <RecommendationPanel onItemCount={setPickCount} ratings={foodRatings} onRate={rateFood} savedIds={savedFoods.map((food) => food.id)} onSave={toggleSavedFood} />
                 {pickCount === 0 && <div className="hero-grid"><div className="hero-copy"><p className="eyebrow">THE KIND OF HELPFUL YOU CAN EAT</p><h2 className="hero-title">Less overthinking.<br /><em>More good food.</em></h2><p className="hero-description">A tiny nudge toward something delicious, tuned to your cravings, your time, and the ingredients you love.</p></div><div className="hero-art" aria-label="Illustration of a colorful bowl of food" role="img"><div className="hero-sun" /><div className="hero-plate"><span className="hero-food hero-food-one" /><span className="hero-food hero-food-two" /><span className="hero-food hero-food-three" /><span className="hero-food hero-food-four" /><span className="hero-leaf" /></div><span className="hero-art-label">GOOD THINGS<br /><strong>COMING UP</strong></span></div></div>}
                 <Composer onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} welcome modelLabel={modelLabel} onConnection={() => setView("connection")} />
                 <p className="welcome-hint">Try a craving, a time limit, or an ingredient you want to use up.</p>
@@ -415,8 +467,8 @@ export default function HomePage() {
               </section>
             )}
           </>
-        ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
-          : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} onDiscover={() => navigate("discover")} />
+        ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
+          : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onDiscover={() => navigate("discover")} />
             : view === "preferences" ? <PreferencePanel preferences={preferences} onSave={savePreferences} />
               : <ConnectionPanel connection={connection} onConnectionChange={setConnection} onBackToChat={() => setView("discover")} />}
       </main>
@@ -427,12 +479,12 @@ export default function HomePage() {
   );
 }
 
-function ChatWorkspace({ messages, failedAssistantId, onRetry, retryAvailable, onOpenMeal, onViewShortlist, onSubmit, onStop, busy, modelLabel, onConnection }: { messages: ChatMessage[]; failedAssistantId?: string; onRetry: () => void; retryAvailable: boolean; onOpenMeal: (meal: Meal) => void; onViewShortlist: (recommendations: MealRecommendation[]) => void; onSubmit: (text: string) => void; onStop: () => void; busy: boolean; modelLabel: string; onConnection: () => void; }) {
-  return <section className="chat-workspace" aria-label="Your meal conversation"><div className="chat-scroll"><div className="chat-messages">{messages.map((message) => <article className={`chat-message ${message.role === "user" ? "is-user" : "is-assistant"}`} key={message.id}>{message.role === "assistant" && <div className="assistant-avatar" aria-hidden="true"><MessageCircle size={16} /></div>}<div className="message-body">{message.role === "assistant" && <span className="message-author">Remymy · {message.source ?? "Demo"}</span>}{message.status === "pending" ? <span className="chat-pending" aria-label="Remymy is thinking"><LoaderCircle className="spin" size={16} /> Thinking…</span> : <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ table: ({ children }) => <div className="markdown-table-wrap"><table>{children}</table></div> }}>{message.text}</ReactMarkdown>}{message.status === "error" && message.id === failedAssistantId && retryAvailable && <button className="chat-retry" onClick={onRetry}><RotateCcw size={14} /> Try again</button>}{message.recommendations && message.recommendations.length > 0 && <div className="chat-meal-list" aria-label="Meal suggestions">{message.recommendations.slice(0, 6).map((recommendation) => <button className="chat-meal-row" key={recommendation.meal.id} onClick={() => onOpenMeal(recommendation.meal)}><span className="chat-meal-thumb" style={{ background: recommendation.meal.color }} aria-hidden="true"><Utensils size={15} /></span><span className="chat-meal-info"><strong>{recommendation.meal.title}</strong><small>{recommendation.meal.minutes} min · {recommendation.meal.cuisine}</small></span><ArrowRight size={15} aria-hidden="true" /></button>)}<button className="shortlist-link" onClick={() => onViewShortlist(message.recommendations ?? [])}>View shortlist <ArrowRight size={14} /></button></div>}</div></article>)}</div></div><div className="chat-composer-dock"><Composer onSubmit={onSubmit} onStop={onStop} busy={busy} welcome={false} modelLabel={modelLabel} onConnection={onConnection} /></div></section>;
+function ChatWorkspace({ messages, failedAssistantId, onRetry, retryAvailable, onOpenMeal, mealLikes, onRateMeal, onViewShortlist, onSubmit, onStop, busy, modelLabel, onConnection }: { messages: ChatMessage[]; failedAssistantId?: string; onRetry: () => void; retryAvailable: boolean; onOpenMeal: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; onViewShortlist: (recommendations: MealRecommendation[]) => void; onSubmit: (text: string) => void; onStop: () => void; busy: boolean; modelLabel: string; onConnection: () => void; }) {
+  return <section className="chat-workspace" aria-label="Your meal conversation"><div className="chat-scroll"><div className="chat-messages">{messages.map((message) => <article className={`chat-message ${message.role === "user" ? "is-user" : "is-assistant"}`} key={message.id}>{message.role === "assistant" && <div className="assistant-avatar" aria-hidden="true"><MessageCircle size={16} /></div>}<div className="message-body">{message.role === "assistant" && <span className="message-author">Remymy · {message.source ?? "Demo"}</span>}{message.status === "pending" ? <span className="chat-pending" aria-label="Remymy is thinking"><LoaderCircle className="spin" size={16} /> Thinking…</span> : <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{ table: ({ children }) => <div className="markdown-table-wrap"><table>{children}</table></div> }}>{message.text}</ReactMarkdown>}{message.status === "error" && message.id === failedAssistantId && retryAvailable && <button className="chat-retry" onClick={onRetry}><RotateCcw size={14} /> Try again</button>}{message.recommendations && message.recommendations.length > 0 && <div className="chat-meal-list" aria-label="Meal suggestions">{message.recommendations.slice(0, 6).map((recommendation) => <div className="chat-meal-row" key={recommendation.meal.id}><button className="chat-meal-open" onClick={() => onOpenMeal(recommendation.meal)}><span className="chat-meal-thumb" style={{ background: recommendation.meal.color }} aria-hidden="true"><Utensils size={15} /></span><span className="chat-meal-info"><strong>{recommendation.meal.title}</strong><small>{recommendation.meal.minutes} min · {recommendation.meal.cuisine}</small></span><ArrowRight size={15} aria-hidden="true" /></button><RecipeLikeButtons title={recommendation.meal.title} rating={{ like: mealLikes[recommendation.meal.id] }} onRate={(like) => onRateMeal(recommendation.meal, like)} /></div>)}<button className="shortlist-link" onClick={() => onViewShortlist(message.recommendations ?? [])}>View shortlist <ArrowRight size={14} /></button></div>}</div></article>)}</div></div><div className="chat-composer-dock"><Composer onSubmit={onSubmit} onStop={onStop} busy={busy} welcome={false} modelLabel={modelLabel} onConnection={onConnection} /></div></section>;
 }
 
-function MealsView({ recommendations, preferences, isShortlist, filter, onFilterChange, onSave, savedIds, onOpen, onPreferences, onBrowseAll }: { recommendations: MealRecommendation[]; preferences: Preferences; isShortlist: boolean; filter: (typeof FILTERS)[number]["id"]; onFilterChange: (filter: (typeof FILTERS)[number]["id"]) => void; onSave: (meal: Meal) => void; savedIds: string[]; onOpen: (meal: Meal) => void; onPreferences: () => void; onBrowseAll: () => void; }) {
-  return <section className="browse-view"><div className="view-heading"><p className="eyebrow">A LITTLE INSPIRATION</p><h1>{isShortlist ? "Your shortlist." : "Meals for the mood."}</h1><p>{isShortlist ? "The ideas from your conversation, ready for a closer look." : "Browse the small, cheerful catalog and find something that fits today."}</p></div><div className="content-toolbar"><div><p className="eyebrow">TUNED TO YOUR DEFAULTS</p><h2>{recommendations.length ? `${recommendations.length} good ideas` : "Nothing matches yet"}</h2><div className="constraint-summary" aria-label="Active meal preferences"><span>Up to {preferences.maxMinutes} min</span>{preferences.diet !== "any" && <span>{preferences.diet}</span>}{preferences.goal !== "balanced" && <span>{preferences.goal} goal</span>}{preferences.cuisine !== "any" && <span>{preferences.cuisine}</span>}{preferences.exclude.map((item) => <span key={item}>No {item}</span>)}<button className="constraint-edit" onClick={onPreferences}>Edit preferences</button></div></div><div className="filter-chips" role="group" aria-label="Filter meals">{FILTERS.map((item) => <button key={item.id} className={`filter-chip ${filter === item.id && !isShortlist ? "is-active" : ""}`} onClick={() => onFilterChange(item.id)} aria-pressed={filter === item.id && !isShortlist}>{item.label}</button>)}</div></div>{isShortlist && <button className="text-button" onClick={onBrowseAll}>Browse all meals <ArrowRight size={14} /></button>}{recommendations.length ? <div className="shortlist-grid">{recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved={savedIds.includes(recommendation.meal.id)} onSave={onSave} onOpen={onOpen} />)}</div> : <div className="empty-state"><div className="empty-state-icon"><Utensils size={22} /></div><h3>Let&apos;s widen the plate.</h3><p>No meals in this demo match all your preferences. Adjust the time or ingredients to see more ideas.</p><div className="empty-actions"><button className="detail-action" onClick={onPreferences}>Edit preferences <ArrowRight size={17} /></button></div></div>}</section>;
+function MealsView({ recommendations, preferences, isShortlist, filter, onFilterChange, onSave, savedIds, onOpen, mealLikes, onRateMeal, onPreferences, onBrowseAll }: { recommendations: MealRecommendation[]; preferences: Preferences; isShortlist: boolean; filter: (typeof FILTERS)[number]["id"]; onFilterChange: (filter: (typeof FILTERS)[number]["id"]) => void; onSave: (meal: Meal) => void; savedIds: string[]; onOpen: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; onPreferences: () => void; onBrowseAll: () => void; }) {
+  return <section className="browse-view"><div className="view-heading"><p className="eyebrow">A LITTLE INSPIRATION</p><h1>{isShortlist ? "Your shortlist." : "Meals for the mood."}</h1><p>{isShortlist ? "The ideas from your conversation, ready for a closer look." : "Browse the small, cheerful catalog and find something that fits today."}</p></div><div className="content-toolbar"><div><p className="eyebrow">TUNED TO YOUR DEFAULTS</p><h2>{recommendations.length ? `${recommendations.length} good ideas` : "Nothing matches yet"}</h2><div className="constraint-summary" aria-label="Active meal preferences"><span>Up to {preferences.maxMinutes} min</span>{preferences.diet !== "any" && <span>{preferences.diet}</span>}{preferences.goal !== "balanced" && <span>{preferences.goal} goal</span>}{preferences.cuisine !== "any" && <span>{preferences.cuisine}</span>}{preferences.exclude.map((item) => <span key={item}>No {item}</span>)}<button className="constraint-edit" onClick={onPreferences}>Edit preferences</button></div></div><div className="filter-chips" role="group" aria-label="Filter meals">{FILTERS.map((item) => <button key={item.id} className={`filter-chip ${filter === item.id && !isShortlist ? "is-active" : ""}`} onClick={() => onFilterChange(item.id)} aria-pressed={filter === item.id && !isShortlist}>{item.label}</button>)}</div></div>{isShortlist && <button className="text-button" onClick={onBrowseAll}>Browse all meals <ArrowRight size={14} /></button>}{recommendations.length ? <div className="shortlist-grid">{recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved={savedIds.includes(recommendation.meal.id)} onSave={onSave} onOpen={onOpen} like={mealLikes[recommendation.meal.id]} onRate={onRateMeal} />)}</div> : <div className="empty-state"><div className="empty-state-icon"><Utensils size={22} /></div><h3>Let&apos;s widen the plate.</h3><p>No meals in this demo match all your preferences. Adjust the time or ingredients to see more ideas.</p><div className="empty-actions"><button className="detail-action" onClick={onPreferences}>Edit preferences <ArrowRight size={17} /></button></div></div>}</section>;
 }
 
 function RecipesView({ page, search, busy, error, pageNumber, onSearch, onRetry, onPageChange, onOpen }: { page: RecipePage | null; search: string; busy: boolean; error: string; pageNumber: number; onSearch: (value: string) => void; onRetry: () => void; onPageChange: (value: number) => void; onOpen: (recipe: RecipeSummary) => void; }) {
@@ -448,6 +500,13 @@ function RecipesView({ page, search, busy, error, pageNumber, onSearch, onRetry,
   </section>;
 }
 
-function SavedView({ recommendations, onSave, onOpen, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; onDiscover: () => void; }) {
-  return <section className="saved-view"><div className="view-heading"><p className="eyebrow">YOUR LITTLE ARCHIVE</p><h1>Saved for later.</h1><p>The meals that made you pause. They&apos;ll be here when you&apos;re ready.</p></div>{recommendations.length ? <div className="shortlist-grid">{recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved onSave={onSave} onOpen={onOpen} />)}</div> : <div className="empty-state"><div className="empty-state-icon"><Bookmark size={22} /></div><h3>No saved meals yet.</h3><p>When something looks good, tap the bookmark and it&apos;ll land here.</p><button className="detail-action" onClick={onDiscover}>Find something good <ArrowRight size={17} /></button></div>}</section>;
+function SavedView({ recommendations, onSave, onOpen, mealLikes, onRateMeal, foods, foodRatings, onRateFood, onToggleFood, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; foods: SavedFood[]; foodRatings: Record<string, RecipeRatingState>; onRateFood: (id: string, like: boolean) => void; onToggleFood: (food: SavedFood) => void; onDiscover: () => void; }) {
+  const empty = recommendations.length === 0 && foods.length === 0;
+  return <section className="saved-view"><div className="view-heading"><p className="eyebrow">YOUR LITTLE ARCHIVE</p><h1>Saved for later.</h1><p>The recipes that made you pause. They&apos;ll be here when you&apos;re ready.</p></div>
+    {!empty && <div className="shortlist-grid">
+      {recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved onSave={onSave} onOpen={onOpen} like={mealLikes[recommendation.meal.id]} onRate={onRateMeal} showImage={false} />)}
+      {foods.map((food) => <article className="meal-card recipe-card saved-recipe-card" key={food.id}><div className="meal-card-body"><div className="meal-card-meta"><span><ChefHat size={14} aria-hidden="true" /> Picked for you</span></div><h3 className="meal-card-title">{food.title}</h3><div className="meal-card-footer"><span className="rank-note"><Sparkles size={14} aria-hidden="true" /> Saved by you</span><div className="meal-card-actions"><RecipeLikeButtons title={food.title} rating={foodRatings[food.id]} onRate={(like) => onRateFood(food.id, like)} /><button className="save-button is-saved" onClick={() => onToggleFood(food)} aria-pressed aria-label={`Remove ${food.title} from saved recipes`} title="Saved"><Bookmark size={17} fill="currentColor" aria-hidden="true" /></button></div></div></div></article>)}
+    </div>}
+    {empty && <div className="empty-state"><div className="empty-state-icon"><Bookmark size={22} /></div><h3>Nothing saved yet.</h3><p>When a recipe looks good, tap the bookmark and it&apos;ll land here.</p><button className="detail-action" onClick={onDiscover}>Find something good <ArrowRight size={17} /></button></div>}
+  </section>;
 }
