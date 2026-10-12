@@ -286,6 +286,11 @@ class OneFoodCatalog:
     def food(self, fdc_id: int) -> object | None:
         return object() if fdc_id == 169286 else None
 
+    def foods_by_ids(self, fdc_ids) -> list:
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(fdc_id=169286, description="Spinach, raw") for fdc_id in fdc_ids if fdc_id == 169286]
+
 
 def test_rating_again_changes_the_like_and_dates_it_now(users, cache):
     alice = create_user(users, cache, "alice")
@@ -331,5 +336,32 @@ def test_the_likes_route_gives_each_rated_ids_latest_like(users, cache, monkeypa
 
     assert liked.json() == {"openrecipes:1": True, "169286": False}
     assert none.json() == {}
+    assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
+
+
+def test_the_history_route_lists_ratings_newest_first_with_titles(users, cache, monkeypatch):
+    alice = create_user(users, cache, "alice")
+    create_user(users, cache, "bob")
+    monkeypatch.setattr(users_module, "recipe_repository", OneFoodCatalog())
+    add_history(users, alice.id, "openrecipes:1", like=True)
+    add_history(users, alice.id, "169286", like=False)
+    # a recipe the recipe database no longer has
+    with users:
+        users.execute("INSERT INTO user_history (user_id, timestamp, liked, recipe_id) "
+                      "VALUES (?, '2000-01-01T00:00:00.000Z', 1, 'openrecipes:404')", (alice.id,))
+
+    with TestClient(app) as client:
+        history = client.get("/api/users/alice/history").json()
+        newest = client.get("/api/users/alice/history", params={"limit": 1}).json()
+        empty = client.get("/api/users/bob/history").json()
+        missing = client.get("/api/users/nobody/history")
+
+    assert [(item["recipe_id"], item["kind"], item["title"], item["like"]) for item in history] == [
+        ("169286", "food", "Spinach, raw", False),
+        ("openrecipes:1", "recipe", "Tomato Soup", True),
+        ("openrecipes:404", "recipe", None, True),
+    ]
+    assert [item["recipe_id"] for item in newest] == ["169286"]
+    assert empty == []
     assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
 

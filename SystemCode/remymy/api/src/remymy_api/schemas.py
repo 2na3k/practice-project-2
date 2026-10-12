@@ -67,6 +67,20 @@ class UserHistory(BaseModel):
     like: bool
     recipe_id: str
 
+class HistoryItem(BaseModel):
+    """One row of a user's history as a client shows it: what they rated, its title and whether they liked it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe_id: str
+    # "recipe" for one of the recipe database, "food" for a recommended catalog food rated by its fdc_id
+    kind: Literal["recipe", "food"]
+    # None when its database no longer has it, or is unavailable
+    title: str | None
+    like: bool
+    timestamp: datetime
+
+
 class Ingredient(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

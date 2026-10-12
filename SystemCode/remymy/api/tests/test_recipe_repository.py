@@ -194,3 +194,29 @@ def test_food_ids_are_fdc_ids_and_recipe_ids_are_not():
     assert is_food_id("169286")
     assert not is_food_id("openrecipes:5210")
     assert not is_food_id("١٢٣")
+
+
+def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from remymy_api import routes
+    from remymy_api.main import app
+
+    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
+    monkeypatch.setattr(routes, "recipe_repository", repository)
+    with TestClient(app) as client:
+        found = client.get("/api/catalog/2")
+        missing = client.get("/api/catalog/99")
+        invalid = client.get("/api/catalog/openrecipes:1")
+        monkeypatch.setattr(routes, "recipe_repository", None)
+        unloaded = client.get("/api/catalog/2")
+
+    assert found.status_code == 200
+    body = found.json()
+    assert (body["fdc_id"], body["description"], body["product"]) == (2, "Pineapple, raw", ["apple"])
+    assert body["item_prices"]["apple"] == {"price": 3.0, "quantity": [500.0, 1000.0]}
+    assert body["sugars_g"] is None
+    assert (missing.status_code, missing.json()) == (404, {"detail": "Catalog item not found."})
+    assert invalid.status_code == 422
+    assert unloaded.status_code == 503
+

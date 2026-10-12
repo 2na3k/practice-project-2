@@ -6,6 +6,8 @@ import remarkGfm from "remark-gfm";
 import {
   ArrowRight,
   Bookmark,
+  Check,
+  History as HistoryIcon,
   LoaderCircle,
   MessageCircle,
   Plus,
@@ -13,6 +15,7 @@ import {
   ChefHat,
   Sparkles,
   Utensils,
+  X,
 } from "lucide-react";
 import { Composer } from "@/components/Composer";
 import { MealCard } from "@/components/MealCard";
@@ -23,6 +26,7 @@ import { Sidebar, type AppView } from "@/components/Sidebar";
 import { ConnectionPanel } from "@/components/ConnectionPanel";
 import { RecipeCard } from "@/components/RecipeCard";
 import { RecipeDetailModal } from "@/components/RecipeDetailModal";
+import { CatalogItemModal } from "@/components/CatalogItemModal";
 import { RecommendationPanel } from "@/components/RecommendationPanel";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import {
@@ -41,6 +45,8 @@ import type {
 import { fetchRecipeDetail, fetchRecipeLikes, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
 import { RECOMMENDATION_USERNAME } from "@/lib/recommendations";
 import { parseLikes, parseSavedFoods, type SavedFood } from "@/lib/saved";
+import { fetchHistory, formatHistoryDate, type HistoryItem } from "@/lib/history";
+import { fetchCatalogItem, type CatalogItem } from "@/lib/catalog";
 
 const FILTERS = [
   { id: "all", label: "All cravings" },
@@ -162,6 +168,15 @@ export default function HomePage() {
   const [activeRecipe, setActiveRecipe] = useState<RecipeDetail | null>(null);
   const [recipeDetailBusy, setRecipeDetailBusy] = useState(false);
   const [recipeDetailError, setRecipeDetailError] = useState("");
+  // the recommended recipe whose details are open, from the Data API's catalog
+  const [activeCatalogItem, setActiveCatalogItem] = useState<CatalogItem | null>(null);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const catalogRef = useRef<AbortController | null>(null);
+  // the demo user's history, read again from the Data API each time the History page opens; null until first read
+  const [history, setHistory] = useState<HistoryItem[] | null>(null);
+  const [historyError, setHistoryError] = useState("");
+  const [historyNonce, setHistoryNonce] = useState(0);
   const [notice, setNotice] = useState("");
   const [mcpMessage, setMcpMessage] = useState("");
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -196,7 +211,41 @@ export default function HomePage() {
     return () => controller.abort();
   }, [mealShortlist, recipePageNumber, recipeRetryNonce, recipeSearch, view]);
 
-  const openRecipe = useCallback((summary: RecipeSummary) => {
+  useEffect(() => {
+    if (view !== "history") return;
+    const controller = new AbortController();
+    void Promise.resolve().then(() => {
+      if (controller.signal.aborted) return null;
+      setHistoryError("");
+      return fetchHistory(RECOMMENDATION_USERNAME, controller.signal);
+    })
+      .then((items) => { if (items && mountedRef.current) setHistory(items); })
+      .catch((error) => { if (!controller.signal.aborted && mountedRef.current) setHistoryError(error instanceof Error ? error.message : "Your history could not be loaded."); });
+    return () => controller.abort();
+  }, [historyNonce, view]);
+
+  const openCatalogItem = useCallback((id: string) => {
+    catalogRef.current?.abort();
+    const controller = new AbortController();
+    catalogRef.current = controller;
+    setActiveCatalogItem(null);
+    setCatalogError("");
+    setCatalogBusy(true);
+    void fetchCatalogItem(id, controller.signal)
+      .then((item) => { if (mountedRef.current) setActiveCatalogItem(item); })
+      .catch((error) => { if (!controller.signal.aborted && mountedRef.current) setCatalogError(error instanceof Error ? error.message : "This recipe could not be loaded."); })
+      .finally(() => { if (!controller.signal.aborted && mountedRef.current) { setCatalogBusy(false); catalogRef.current = null; } });
+  }, []);
+
+  const closeCatalogItem = useCallback(() => {
+    catalogRef.current?.abort();
+    catalogRef.current = null;
+    setActiveCatalogItem(null);
+    setCatalogError("");
+    setCatalogBusy(false);
+  }, []);
+
+  const openRecipe = useCallback((summary: Pick<RecipeSummary, "id">) => {
     recipeDetailRef.current?.abort();
     const controller = new AbortController();
     recipeDetailRef.current = controller;
@@ -467,7 +516,7 @@ export default function HomePage() {
             </header>
             {hasChat ? <ChatWorkspace messages={chat} failedAssistantId={failedRequest?.assistantId} onRetry={() => void submitMessage(failedRequest?.text ?? "", true)} retryAvailable={Boolean(failedRequest) && !isBusy} onOpenMeal={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onViewShortlist={showShortlist} onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} modelLabel={modelLabel} onConnection={() => setView("connection")} /> : (
               <section className="welcome-screen">
-                <RecommendationPanel onItemCount={setPickCount} ratings={foodRatings} onRate={rateFood} savedIds={savedFoods.map((food) => food.id)} onSave={toggleSavedFood} />
+                <RecommendationPanel onItemCount={setPickCount} ratings={foodRatings} onRate={rateFood} savedIds={savedFoods.map((food) => food.id)} onSave={toggleSavedFood} onOpen={openCatalogItem} />
                 {pickCount === 0 && <div className="hero-grid"><div className="hero-copy"><p className="eyebrow">THE KIND OF HELPFUL YOU CAN EAT</p><h2 className="hero-title">Less overthinking.<br /><em>More good food.</em></h2><p className="hero-description">A tiny nudge toward something delicious, tuned to your cravings, your time, and the ingredients you love.</p></div><div className="hero-art" aria-label="Illustration of a colorful bowl of food" role="img"><div className="hero-sun" /><div className="hero-plate"><span className="hero-food hero-food-one" /><span className="hero-food hero-food-two" /><span className="hero-food hero-food-three" /><span className="hero-food hero-food-four" /><span className="hero-leaf" /></div><span className="hero-art-label">GOOD THINGS<br /><strong>COMING UP</strong></span></div></div>}
                 <Composer onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} welcome modelLabel={modelLabel} onConnection={() => setView("connection")} />
                 <p className="welcome-hint">Try a craving, a time limit, or an ingredient you want to use up.</p>
@@ -482,13 +531,15 @@ export default function HomePage() {
             )}
           </>
         ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
-          : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onDiscover={() => navigate("discover")} />
+          : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onOpenFood={openCatalogItem} onDiscover={() => navigate("discover")} />
+            : view === "history" ? <HistoryView items={history} error={historyError} onRetry={() => setHistoryNonce((current) => current + 1)} onOpenRecipe={openRecipe} onOpenFood={openCatalogItem} />
             : view === "preferences" ? <PreferencePanel preferences={preferences} onSave={savePreferences} />
               : <ConnectionPanel connection={connection} onConnectionChange={setConnection} onBackToChat={() => setView("discover")} />}
       </main>
       {notice && <div className="notice" role="status"><Bookmark size={16} aria-hidden="true" />{notice}</div>}
       <MealDetailModal meal={activeMeal} saved={activeMeal ? savedIds.includes(activeMeal.id) : false} onClose={closeMeal} onSave={toggleSaved} />
       <RecipeDetailModal recipe={activeRecipe} loading={recipeDetailBusy} error={recipeDetailError} onClose={closeRecipe} />
+      <CatalogItemModal item={activeCatalogItem} loading={catalogBusy} error={catalogError} onClose={closeCatalogItem} rating={activeCatalogItem ? foodRatings[String(activeCatalogItem.fdc_id)] : undefined} onRate={rateFood} saved={activeCatalogItem ? savedFoods.some((food) => food.id === String(activeCatalogItem.fdc_id)) : false} onSave={(item) => toggleSavedFood({ id: String(item.fdc_id), title: item.description })} />
     </div>
   );
 }
@@ -514,13 +565,27 @@ function RecipesView({ page, search, busy, error, pageNumber, onSearch, onRetry,
   </section>;
 }
 
-function SavedView({ recommendations, onSave, onOpen, mealLikes, onRateMeal, foods, foodRatings, onRateFood, onToggleFood, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; foods: SavedFood[]; foodRatings: Record<string, RecipeRatingState>; onRateFood: (id: string, like: boolean) => void; onToggleFood: (food: SavedFood) => void; onDiscover: () => void; }) {
+function SavedView({ recommendations, onSave, onOpen, mealLikes, onRateMeal, foods, foodRatings, onRateFood, onToggleFood, onOpenFood, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; foods: SavedFood[]; foodRatings: Record<string, RecipeRatingState>; onRateFood: (id: string, like: boolean) => void; onToggleFood: (food: SavedFood) => void; onOpenFood: (id: string) => void; onDiscover: () => void; }) {
   const empty = recommendations.length === 0 && foods.length === 0;
   return <section className="saved-view"><div className="view-heading"><p className="eyebrow">YOUR LITTLE ARCHIVE</p><h1>Saved for later.</h1><p>The recipes that made you pause. They&apos;ll be here when you&apos;re ready.</p></div>
     {!empty && <div className="shortlist-grid">
       {recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved onSave={onSave} onOpen={onOpen} like={mealLikes[recommendation.meal.id]} onRate={onRateMeal} showImage={false} />)}
-      {foods.map((food) => <article className="meal-card recipe-card saved-recipe-card" key={food.id}><div className="meal-card-body"><div className="meal-card-meta"><span><ChefHat size={14} aria-hidden="true" /> Picked for you</span></div><h3 className="meal-card-title">{food.title}</h3><div className="meal-card-footer"><span className="rank-note"><Sparkles size={14} aria-hidden="true" /> Saved by you</span><div className="meal-card-actions"><RecipeLikeButtons title={food.title} rating={foodRatings[food.id]} onRate={(like) => onRateFood(food.id, like)} /><button className="save-button is-saved" onClick={() => onToggleFood(food)} aria-pressed aria-label={`Remove ${food.title} from saved recipes`} title="Saved"><Bookmark size={17} fill="currentColor" aria-hidden="true" /></button></div></div></div></article>)}
+      {foods.map((food) => <article className="meal-card recipe-card saved-recipe-card" key={food.id}><div className="meal-card-body"><div className="meal-card-meta"><span><ChefHat size={14} aria-hidden="true" /> Picked for you</span></div><button className="meal-card-title" onClick={() => onOpenFood(food.id)}>{food.title}</button><div className="meal-card-footer"><span className="rank-note"><Sparkles size={14} aria-hidden="true" /> Saved by you</span><div className="meal-card-actions"><RecipeLikeButtons title={food.title} rating={foodRatings[food.id]} onRate={(like) => onRateFood(food.id, like)} /><button className="save-button is-saved" onClick={() => onToggleFood(food)} aria-pressed aria-label={`Remove ${food.title} from saved recipes`} title="Saved"><Bookmark size={17} fill="currentColor" aria-hidden="true" /></button></div></div></div></article>)}
     </div>}
     {empty && <div className="empty-state"><div className="empty-state-icon"><Bookmark size={22} /></div><h3>Nothing saved yet.</h3><p>When a recipe looks good, tap the bookmark and it&apos;ll land here.</p><button className="detail-action" onClick={onDiscover}>Find something good <ArrowRight size={17} /></button></div>}
   </section>;
 }
+
+function HistoryView({ items, error, onRetry, onOpenRecipe, onOpenFood }: { items: HistoryItem[] | null; error: string; onRetry: () => void; onOpenRecipe: (recipe: { id: string }) => void; onOpenFood: (id: string) => void; }) {
+  return <section className="saved-view history-view"><div className="view-heading"><p className="eyebrow">WHAT YOU&apos;VE RATED</p><h1>Your history.</h1><p>Every recipe you liked or didn&apos;t, newest first, as the database holds it.</p></div>
+    {error ? <div className="empty-state recipe-state" role="alert"><h3>History unavailable.</h3><p>{error}</p><button className="detail-action" onClick={onRetry}>Try again <ArrowRight size={17} /></button></div>
+      : items === null ? <div className="empty-state recipe-state" role="status"><LoaderCircle className="spin" size={22} /><h3>Loading your history…</h3></div>
+        : items.length === 0 ? <div className="empty-state"><div className="empty-state-icon"><HistoryIcon size={22} /></div><h3>Nothing rated yet.</h3><p>Tap the tick or the cross on a recipe and it&apos;ll show up here.</p></div>
+          : <ol className="history-list">{items.map((item, index) => <li className="history-item" key={`${item.recipe_id}-${index}`}>
+            <span className="history-icon" aria-hidden="true">{item.kind === "food" ? <ChefHat size={16} /> : <Utensils size={16} />}</span>
+            <span className="history-info">{item.title ? <button className="history-title" onClick={() => item.kind === "food" ? onOpenFood(item.recipe_id) : onOpenRecipe({ id: item.recipe_id })}>{item.title}</button> : <strong className="history-title">{item.recipe_id}</strong>}<small>{item.kind === "food" ? "Picked for you" : "Recipe"} · {formatHistoryDate(item.timestamp)}</small></span>
+            <span className={`history-like ${item.like ? "is-like" : "is-dislike"}`}>{item.like ? <Check size={13} aria-hidden="true" /> : <X size={13} aria-hidden="true" />}{item.like ? "Liked" : "Not liked"}</span>
+          </li>)}</ol>}
+  </section>;
+}
+

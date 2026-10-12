@@ -10,8 +10,11 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 from .db import close_database, open_database, split_preview
 from .cache import drop_recommendation, read_recommendations, write_recommendations
 from .recommend import recommend
+from .repository.recipe_repository import is_food_id, recipe_repository
 from .schemas import (
+    CatalogFood,
     HealthResponse,
+    HistoryItem,
     Preferences,
     RecipeDetail,
     RecipeListResponse,
@@ -20,7 +23,14 @@ from .schemas import (
     User,
     UserHistory,
 )
-from .users import add_history, fetch_user_history, fetch_user_likes, open_user_database
+from .users import (
+    add_history,
+    fetch_user_history,
+    fetch_user_likes,
+    find_user_id,
+    item_titles,
+    open_user_database,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +158,22 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     finally:
         close_database(connection)
 
+@router.get("/api/catalog/{fdc_id}", response_model=CatalogFood, tags=["recipes"])
+def get_catalog_item(fdc_id: int) -> CatalogFood:
+    """One item of the priced catalog the recommendations come from: its ingredients with their FairPrice packs and
+    prices, and its nutrients per 100 g."""
+    if recipe_repository is None:
+        raise HTTPException(status_code=503, detail="The food catalog is not loaded.")
+    try:
+        item = recipe_repository.food(fdc_id)
+    except sqlite3.Error:
+        logger.exception("Reading catalog item %d failed.", fdc_id)
+        raise HTTPException(status_code=503, detail="The food catalog is unavailable.")
+    if item is None:
+        raise HTTPException(status_code=404, detail="Catalog item not found.")
+    return item
+
+
 @router.get("/api/recommend/{username}", response_model=RecommendationResponse, tags=["recommendations"])
 def get_recommendation(
     username: Annotated[
@@ -217,6 +243,33 @@ def get_user_likes(username: str, request: Request) -> dict[str, bool]:
     if likes is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return likes
+
+
+@router.get("/api/users/{username}/history", response_model=list[HistoryItem], tags=["users"])
+def get_user_history(
+    username: str,
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[HistoryItem]:
+    """The user's history, newest first: each recipe or recommended food they rated, its title, and whether they liked
+    it."""
+    cache = request.app.state.cache
+    connection = open_user_database()
+    try:
+        if find_user_id(connection, cache, username) is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        rows = fetch_user_history(connection, cache, username, limit)
+    except sqlite3.Error:
+        logger.exception("Reading the history of %r failed.", username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    finally:
+        connection.close()
+    titles = item_titles(row.recipe_id for row in rows)
+    return [
+        HistoryItem(recipe_id=row.recipe_id, kind="food" if is_food_id(row.recipe_id) else "recipe",
+                    title=titles.get(row.recipe_id), like=row.like, timestamp=row.timestamp)
+        for row in rows
+    ]
 
 
 @router.put("/api/recipes/{recipe_id}/rating", response_model=UserHistory, tags=["recipe"])

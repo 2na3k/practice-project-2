@@ -22,9 +22,11 @@ type RecommendationPanelProps = {
   onRate: (id: string, like: boolean) => void;
   savedIds: string[];
   onSave: (food: SavedFood) => void;
+  // opens a pick's details
+  onOpen: (id: string) => void;
 };
 
-export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, onSave }: RecommendationPanelProps) {
+export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, onSave, onOpen }: RecommendationPanelProps) {
   const [result, setResult] = useState<Recommendations | null>(null);
   const [error, setError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
@@ -75,7 +77,7 @@ export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, on
             const saved = savedIds.includes(item.id);
             return (
               <li className="for-you-item" key={item.id}>
-                <span className="for-you-name">{item.title}</span>
+                <button className="for-you-name" onClick={() => onOpen(item.id)}>{item.title}</button>
                 <div className="for-you-item-footer">
                   <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>
                   <div className="for-you-actions">

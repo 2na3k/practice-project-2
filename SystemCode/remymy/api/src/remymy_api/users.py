@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
+from fastapi import HTTPException
 from redis import Redis
 
 from .cache import read_user_id, write_user_id
@@ -221,6 +223,31 @@ def create_user(
     write_user_id(cache, username, row["user_id"])
     logger.info("Created user %r with id %d.", username, row["user_id"])
     return User(id=row["user_id"], username=username, preferences=preferences)
+
+
+def item_titles(item_ids: Iterable[str]) -> dict[str, str]:
+    """The title of each recipe among item_ids, from the recipe database, and of each catalog food, its description.
+    An id neither holds, or whose database is unavailable, is left out."""
+    ids = set(item_ids)
+    titles: dict[str, str] = {}
+    food_ids = [int(item_id) for item_id in ids if is_food_id(item_id)]
+    if food_ids and recipe_repository is not None:
+        titles.update({str(food.fdc_id): food.description for food in recipe_repository.foods_by_ids(food_ids)})
+    recipe_ids = [item_id for item_id in ids if not is_food_id(item_id)]
+    if recipe_ids:
+        try:
+            recipes = open_database()
+        except HTTPException:
+            return titles
+        try:
+            rows = recipes.execute(
+                f"SELECT recipe_id, title FROM recipe WHERE recipe_id IN ({', '.join('?' * len(recipe_ids))})",
+                recipe_ids,
+            ).fetchall()
+        finally:
+            close_database(recipes)
+        titles.update({row["recipe_id"]: row["title"] for row in rows if row["title"]})
+    return titles
 
 
 def known_item(recipe_id: str) -> bool:
