@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const DEFAULT_DATA_API_URL = "http://api:8002";
+const DEFAULT_DATA_API_URL = "http://localhost:8002";
 
 function upstreamUrl(request: NextRequest): URL {
   const base = process.env.DATA_API_URL ?? DEFAULT_DATA_API_URL;

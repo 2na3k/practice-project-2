@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from .db import close_database, open_database, split_preview
 from .cache import read_recommendations, write_recommendations
-from .jobs import JobFailed, JobRejected
 from .recommend import recommend
 from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendationResponse
 from .users import fetch_user_history, open_user_database
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -90,6 +93,7 @@ def list_recipes(
     except HTTPException:
         raise
     except sqlite3.Error:
+        logger.exception("Recipe search failed (q=%r, limit=%d, offset=%d).", q, limit, offset)
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     finally:
         close_database(connection)
@@ -130,6 +134,7 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     except HTTPException:
         raise
     except sqlite3.Error:
+        logger.exception("Reading recipe %s failed.", recipe_id)
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     finally:
         close_database(connection)
@@ -150,28 +155,22 @@ def get_recommendation(
     finally:
         connection.close()
     if len(user_history) == 0:
+        logger.debug("No history for %r, so no recommendations.", username)
         return RecommendationResponse(profile=None, items=[])
 
     user_id = user_history[0].user_id
     recommendations = read_recommendations(cache, user_id)
     if recommendations is None:
-        queue = request.app.state.queue
-        retries = request.app.state.retries
-        try:
-            recommendations = recommend(queue, user_history, user_id)
-        except JobRejected:
-            raise HTTPException(status_code=502, detail="The recommendation model rejected the request.")
-        except JobFailed:
-            def retry_and_cache() -> None:
-                if not write_recommendations(cache, user_id, recommend(queue, user_history, user_id)):
-                    raise RuntimeError("could not cache recommendations")
-
-            retries.schedule(user_id, retry_and_cache)
-            raise HTTPException(
-                status_code=503,
-                detail="Recommendations are unavailable right now; they will be retried in the background.",
-                headers={"Retry-After": str(int(retries.interval))},
-            )
+        recommender = request.app.state.recommender
+        if recommender is None:
+            logger.warning("Recommendations for user %d asked for, but no food catalog is loaded.", user_id)
+            raise HTTPException(status_code=503, detail="Recommendations are unavailable: the food catalog is not loaded.")
+        started = time.perf_counter()
+        recommendations = recommend(recommender, user_history)
+        logger.info("Recommended %d foods for user %d from %d history recipes in %.2fs.",
+                    len(recommendations.items), user_id, len(user_history), time.perf_counter() - started)
         write_recommendations(cache, user_id, recommendations)
+    else:
+        logger.debug("Recommendations for user %d served from the cache.", user_id)
 
     return recommendations.model_copy(update={"items": recommendations.items[:top_k]})

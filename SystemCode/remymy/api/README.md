@@ -8,6 +8,13 @@ and parameterized SQLite queries.
 
 - `src/remymy_api/` contains the FastAPI app, routes, database access, and
   response schemas.
+- `src/remymy_api/repository/` reads the priced food catalog (see
+  [Catalog database](#catalog-database)).
+- `src/remymy_api/inference/` runs the recommendation model in the API process:
+  `service.py` is what the recommend route calls, over the catalog the
+  repository serves; the two `model_inference_*` modules are the GRU +
+  cross-attention reranker and its HNSW retrieval. `weights/gru_xattn_reranker/`
+  holds the trained model.
 - `migrations/ingest_food_data.py` ingests Open Recipes 13k and FoodData
   Central Foundation CSVs without doing ingredient matching or nutrition
   inference.
@@ -57,7 +64,7 @@ checks it in code.
 
 ## Catalog database
 
-`RecommendRepository` (`src/remymy_api/repository/recommend_repository.py`)
+`RecipeRepository` (`src/remymy_api/repository/recipe_repository.py`)
 reads the priced food catalog from a third SQLite file,
 `CATALOG_DATABASE_PATH` (default `/state/remymy-catalog.db`), built from the
 catalog CSV at `CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`).
@@ -67,6 +74,16 @@ whose `fdc_id` is not among them; stored rows are not updated. Without the CSV
 an existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
 `foods_by_ids`, `food` and `search` (case-insensitive on the description).
 
+The app shares one instance, `recipe_repository` in the same module, created
+when the module is first imported; use it rather than creating another. It is
+`None` when there is neither a catalog database nor a CSV, so the import never
+fails. On startup the API hands it to the inference service, which loads the
+model from `ARTIFACT_DIR` (default
+`weights/gru_xattn_reranker`) and builds the HNSW index over `all_foods()`. The
+index is saved under `INDEX_DIR` and reused while the model files and the
+catalog's foods are unchanged. With neither the CSV nor the database the API
+still starts, and `GET /api/recommend/{username}` answers `503`.
+
 ## Try it in Swagger
 
 Open http://localhost:8002/docs (or just http://localhost:8002/). With
@@ -74,9 +91,7 @@ Open http://localhost:8002/docs (or just http://localhost:8002/). With
 user on startup if it does not exist yet. Its history is the first recipe whose
 title matches each of chicken, tomato, salad, soup and chocolate.
 `GET /api/recommend/{username}` comes pre-filled with `demo`, so "Try it out",
-then "Execute" returns its buying profile and recommendations. The model
-service has its own Swagger at http://localhost:8003/docs, with an example
-request body for `POST /v1/recommend`.
+then "Execute" returns its buying profile and recommendations.
 
 ## Run locally
 
@@ -91,9 +106,15 @@ python3 serve.py
 `DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./remymy-users.db`,
 `CATALOG_PATH=../data/price_mapped_nutrients.csv`,
 `CATALOG_DATABASE_PATH=./remymy-catalog.db`,
-`REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis must be
-running, since the API sends model jobs through it. Start the model service
-with `python3 serve.py` in `../ml_models`; it takes jobs from the same Redis.
+`REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis only
+caches user ids and recommendations; without it the API still answers, running
+the model on every request.
+
+The API logs to stderr, one line per record with time, level and module, next to
+uvicorn's own lines. `LOG_LEVEL` (default `INFO`) sets the level: `INFO` covers
+startup, the catalog and model loading, and each computed recommendation with
+its timing; failures that answer a generic `503` are logged with their cause;
+`DEBUG` adds cache hits, ingredient matching and every step of the pipeline.
 
 ## Bootstrap and ingestion
 

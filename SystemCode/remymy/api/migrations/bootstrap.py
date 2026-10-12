@@ -9,6 +9,7 @@ explicitly through flags or environment variables.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sqlite3
 import sys
@@ -20,6 +21,9 @@ try:
 except ModuleNotFoundError:  # Supports `python -m migrations.bootstrap`.
     from .ingest_food_data import main as ingest_main
 
+logger = logging.getLogger("migrations.bootstrap")
+# The same line format and LOG_LEVEL as the API's (remymy_api.logs), which this job does not import.
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 DEFAULT_DATABASE_PATH = "/data/remymy-food.db"
 REQUIRED_TABLES = {"recipe", "recipe_ingredient", "recipe_instruction"}
@@ -106,6 +110,7 @@ def build_database(args: argparse.Namespace) -> None:
             delete=False,
         ) as handle:
             temporary_path = Path(handle.name)
+        logger.info("Ingesting %s and %s into %s.", args.recipes, args.fdc_dir, temporary_path)
         ingest_main(
             [
                 "--recipes",
@@ -126,22 +131,28 @@ def build_database(args: argparse.Namespace) -> None:
             temporary_path.unlink()
 
 
+def configure_logging() -> None:
+    level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    logging.basicConfig(level=level if isinstance(logging.getLevelName(level), int) else "INFO", format=LOG_FORMAT)
+
+
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     args = parse_args(argv or sys.argv[1:])
     try:
         if args.database_path.is_file():
             validate_database(args.database_path)
-            print(f"Database is valid: {args.database_path}")
+            logger.info("Database is valid: %s", args.database_path)
             return 0
         if args.validate_only:
             raise DatabaseValidationError(
                 f"Database does not exist: {args.database_path}"
             )
         build_database(args)
-        print(f"Database created and validated: {args.database_path}")
+        logger.info("Database created and validated: %s", args.database_path)
         return 0
     except (DatabaseValidationError, OSError, SystemExit) as exc:
-        print(f"Bootstrap failed: {exc}", file=sys.stderr)
+        logger.error("Bootstrap failed: %s", exc)
         return 1
 
 

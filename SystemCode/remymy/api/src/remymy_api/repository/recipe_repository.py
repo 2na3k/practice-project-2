@@ -90,6 +90,8 @@ class RecipeRepository:
         """Insert the CSV's foods the table does not hold yet; returns how many went in."""
         if not self.csv_path.is_file():
             if self.database_path.is_file():
+                logger.info("No catalog CSV at %s; using the catalog database %s as it is.",
+                            self.csv_path, self.database_path)
                 return 0
             raise FileNotFoundError(
                 f"No catalog database at {self.database_path}, and no catalog CSV at {self.csv_path} to build it from."
@@ -116,6 +118,8 @@ class RecipeRepository:
                 connection.executemany(
                     f"INSERT INTO {TABLE} ({', '.join(types)}) VALUES ({', '.join('?' * len(types))})", values
                 )
+        logger.info("Catalog database %s: %d foods inserted from %s, %d already stored.",
+                    self.database_path, len(values), self.csv_path, len(rows) - len(values))
         return len(values)
 
     @staticmethod

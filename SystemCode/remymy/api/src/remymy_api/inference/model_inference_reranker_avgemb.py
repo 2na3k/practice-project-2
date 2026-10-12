@@ -6,6 +6,7 @@ more recipes described by ingredients, price and nutrients. Output: P(like) for 
 import argparse
 from functools import lru_cache
 import json
+import logging
 from pathlib import Path
 import re
 
@@ -17,7 +18,10 @@ import torch
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
-DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "model_artifacts" / "gru_xattn_reranker"
+logger = logging.getLogger(__name__)
+
+# api/weights/gru_xattn_reranker: model.pt and config.json as the training notebook writes them.
+DEFAULT_ARTIFACTS = Path(__file__).resolve().parents[3] / "weights" / "gru_xattn_reranker"
 THRESHOLD = 0.5  # P(positive) at or above this is classified positive, as in the notebook's metrics.
 
 # Recipes here give nutrients per serving in everyday units. The training data holds Food.com's % daily value times
@@ -294,6 +298,8 @@ class Reranker:
         self.model.load_state_dict(state)
         self.model.to(self.device).eval()
         self.tagger = tagger
+        logger.info("Loaded the reranker from %s on %s (vocabulary %d tokens).", artifact_dir, self.device,
+                    len(self.token_lookup))
 
     @lru_cache(maxsize=None)
     def _normalize_word(self, word, pos):

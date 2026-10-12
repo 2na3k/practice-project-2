@@ -1,18 +1,21 @@
 # Recommendations: model and API
 
 Remymy recommends grocery foods to a user based on the recipes they have
-cooked and rated. The foods come from a catalog of 10,845 USDA FoodData Central
+cooked and rated. The foods come from a catalog of 10,658 USDA FoodData Central
 (FDC) foods priced from FairPrice, in SGD. A trained reranker scores how likely
 the user is to like each food, and the API also returns a *buying profile*: the
 average price and nutrients of the foods the user's recipes call for.
 
-Three pieces are involved:
+The model runs inside the Data API. The recommend route is the controller, the
+inference service ([`api/src/remymy_api/inference/service.py`](api/src/remymy_api/inference/service.py))
+runs the model, and `RecipeRepository`
+([`api/src/remymy_api/repository/recipe_repository.py`](api/src/remymy_api/repository/recipe_repository.py))
+serves it the catalog through the one shared instance, `recipe_repository`.
 
 | Component | Code | Port | Role |
 | --- | --- | --- | --- |
-| Data API | [`api/`](api/) | 8002 | Users, history, recipes, the public recommendation endpoint, caching |
-| Model service | [`ml_models/`](ml_models/) | 8003 | Queue worker for ingredient matching, retrieval and reranking |
-| Redis | `redis` in [`docker-compose.yml`](docker-compose.yml) | 6379 (internal) | Job queue between the two, and cache for user ids and recommendations |
+| Data API | [`api/`](api/) | 8002 | Users, history, recipes, the catalog, the recommendation model, caching |
+| Redis | `redis` in [`docker-compose.yml`](docker-compose.yml) | 6379 (internal) | Cache for user ids and recommendations |
 
 ```mermaid
 sequenceDiagram
@@ -21,7 +24,7 @@ sequenceDiagram
     participant R as Redis
     participant U as Users DB (SQLite)
     participant D as Recipe DB (SQLite)
-    participant M as Model worker
+    participant M as Inference service (in the API)
 
     C->>A: GET /api/recommend/{username}?top_k=10
     A->>R: user:{username}
@@ -33,15 +36,12 @@ sequenceDiagram
     A->>R: recommendations:{user_id}
     alt cache miss
         A->>D: ingredient lines of each history recipe
-        A->>R: LPUSH ml:jobs {id, deadline, payload with top_k=50}
-        M->>R: BRPOP ml:jobs
-        M->>R: LPUSH ml:result:{id} matched foods + scored items
-        A->>R: BLPOP ml:result:{id} (up to 10 s)
-        Note over A,M: up to 5 attempts, backoff 0.5, 1, 2, 4 s
+        A->>M: recommend(history, top_k=50)
+        M-->>A: matched foods + scored items
         A->>A: compute UserBuyingProfile
         A->>R: store recommendations:{user_id} (1 day TTL)
     end
-    A-->>C: profile + first top_k items, or 503 and a background retry every 10 min
+    A-->>C: profile + first top_k items, or 503 when no catalog is loaded
 ```
 
 ---
@@ -54,7 +54,7 @@ The model is a **GRU + cross-attention reranker**. Given a user's dated, rated
 history and a candidate item, it outputs **P(like)**: the probability that the
 user would rate the candidate 3 to 5 stars. It only scores candidates. Choosing
 them is the retrieval step described under
-[How the model service uses it](#how-the-model-service-uses-it).
+[How the API uses it](#how-the-api-uses-it).
 
 The design spec is `recipe_reranker_spec.md` in the ML development folder. The
 training notebook is
@@ -140,7 +140,7 @@ candidate item_emb ──► cross-attention over [profile token; window states]
   512, binary cross-entropy, early stopping on validation log loss. The best
   epoch was 5 of at most 10.
 
-Artifacts in [`ml_models/weights/gru_xattn_reranker/`](ml_models/weights/gru_xattn_reranker/):
+Artifacts in [`api/weights/gru_xattn_reranker/`](api/weights/gru_xattn_reranker/), where the API loads them from:
 
 | File | Contents |
 | --- | --- |
@@ -177,29 +177,32 @@ The AUC against rated negatives, 0.514, is close to chance: the model tells
 recipes a user engages with apart from random ones, but hardly separates recipes
 the user liked from recipes they rated and disliked.
 
-### How the model service uses it
+### How the API uses it
 
-[`ml_models/serve.py`](ml_models/serve.py) wraps the pipeline in
-[`ml_models/inference/model_inference_score_recommend.py`](ml_models/inference/model_inference_score_recommend.py).
+[`api/src/remymy_api/inference/service.py`](api/src/remymy_api/inference/service.py)
+wraps the pipeline in
+[`model_inference_score_recommend.py`](api/src/remymy_api/inference/model_inference_score_recommend.py)
+next to it.
 
-At startup it:
+At startup the API:
 
-1. Loads the catalog, `price_mapped_nutrients.csv`: 10,845 FDC foods, each
-   with a price (the sum of its FairPrice item prices, in SGD) and nutrients per
-   100 g. Missing nutrients take the catalog median.
+1. Creates the shared `recipe_repository`, which builds the catalog database
+   (`CATALOG_DATABASE_PATH`) from `price_mapped_nutrients.csv` or adds the CSV's
+   new foods to it, and reads every food from it: 10,658 FDC foods, each with a
+   price (the sum of its FairPrice item prices, in SGD) and nutrients per 100 g.
+   Missing nutrients take the catalog median.
 2. Embeds every catalog food with the ItemEncoder and builds an HNSW index with
    cosine distance (M 16, ef 200). The index is saved under `INDEX_DIR` and
-   reused while the model and catalog files are unchanged.
-3. Builds the ingredient index. Each catalog food gets a key: the first
-   comma-separated part of its FDC description, normalized (lowercase,
-   parentheses and punctuation removed, stop words dropped, singularized), so
-   "Waffles, buttermilk, frozen" becomes `waffle`. For each key it keeps one
-   fully priced food, the one whose price is closest to the median price of that
-   key's foods. This gives 1,377 keys. The method is the exact-match step of
-   `map_recipe_nutrients.ipynb`.
-4. Starts the queue worker (see [The job queue](#the-job-queue)).
+   reused while the model files and the catalog's foods are unchanged.
+3. Builds the ingredient index from the same foods. Each catalog food gets a
+   key: the first comma-separated part of its FDC description, normalized
+   (lowercase, parentheses and punctuation removed, stop words dropped,
+   singularized), so "Waffles, buttermilk, frozen" becomes `waffle`. For each
+   key it keeps one fully priced food, the one whose price is closest to the
+   median price of that key's foods. This gives 1,381 keys. The method is the
+   exact-match step of `map_recipe_nutrients.ipynb`.
 
-For each job it:
+For each recommendation (one at a time) it:
 
 1. Normalizes each ingredient line the same way and looks it up in the
    ingredient index. Each food counts once per history entry, in order.
@@ -237,17 +240,14 @@ For each job it:
 ### Running it
 
 - **Docker:** `docker compose --env-file .env.nonprod up --build` from this
-  directory starts everything, including Redis and the model service. The model
-  service is healthy about 25 seconds after start.
-- **Locally:** start Redis on `localhost:6379` first (for example
-  `redis-server`); both services need it. Then `./run-local.sh` starts the
-  model service, waits for it to become healthy, then starts the Data API, with
-  both logs in one terminal. Ctrl+C stops both. Alternatively, run `python3 serve.py` in `ml_models/` and then in
-  `api/`. The API's `serve.py` fills in localhost defaults (see
-  [Configuration](#configuration)).
-- **Swagger:** http://localhost:8002/docs for the Data API and
-  http://localhost:8003/docs for the model service. `/` on either redirects to
-  `/docs`.
+  directory starts everything, including Redis. The API loads the model and
+  builds the HNSW index before it reports healthy.
+- **Locally:** `./run-local.sh` starts the Data API and waits for it to become
+  healthy. Alternatively, run `python3 serve.py` in `api/`, which fills in
+  localhost defaults (see [Configuration](#configuration)). Redis on
+  `localhost:6379` (for example `redis-server`) is only the cache; without it
+  the API runs the model on every request.
+- **Swagger:** http://localhost:8002/docs. `/` redirects to `/docs`.
 - **Demo user:** with `SEED_DEMO_USER=true` (the default in compose and in
   `serve.py`), the API creates a `demo` user at startup if it does not exist.
   Its history is the first recipe whose title contains each of chicken, tomato,
@@ -309,50 +309,38 @@ lines (see [Limitations](#limitations)).
 - **Unknown user, or no history:** `{"profile": null, "items": []}` with status
   200.
 - **Errors:**
-  - 503 `Recommendations are unavailable right now; they will be retried in the
-    background.` with `Retry-After: 600` when five attempts through the queue
-    fail (see [The job queue](#the-job-queue)). A later request is answered from
-    the cache once the background retry has succeeded.
-  - 502 `The recommendation model rejected the request.` when the worker finds
-    the job invalid. This is not retried.
+  - 503 `Recommendations are unavailable: the food catalog is not loaded.` when
+    the API started with neither the catalog CSV nor the catalog database.
   - 503 `Recipe data is unavailable.` when the recipe database is missing.
   - 422 when `top_k` is out of range.
 
-### Model service endpoints (port 8003)
+### The inference service
 
-The Data API reaches the model through the Redis queue, not over HTTP. The
-HTTP endpoints stay for the compose health check and for trying the model
-directly in Swagger; `POST /v1/recommend` runs the same code as a queue job.
+The route calls `Recommender.recommend(history, top_k, candidates=100)` in
+[`service.py`](api/src/remymy_api/inference/service.py) in the same process,
+one call at a time.
 
-| Method | Path | Returns |
+| Argument | Type | Meaning |
 | --- | --- | --- |
-| GET | `/health` | `{"status": "ok", "catalog_items": 10845, "ingredient_keys": 1377}` once the index is built |
-| POST | `/v1/recommend` | Matched foods per history entry, and scored recommendations |
-
-#### `POST /v1/recommend`
-
-| Field | Type | Limits |
-| --- | --- | --- |
-| `history` | list of `{rating, date, ingredients}` | 1–500 entries |
-| `history[].rating` | number or `null` | `null` counts as the user's mean |
+| `history` | list of `{rating, date, ingredients}` | One entry per rated recipe |
+| `history[].rating` | number or `None` | `None` counts as the user's mean |
 | `history[].date` | `YYYY-MM-DD` | Orders the history and cuts the windows |
-| `history[].ingredients` | list of ingredient lines | up to 500 |
-| `top_k` | integer | 1–50, default 10 |
-| `candidates` | integer | 1–1000, default 100 foods retrieved before reranking |
+| `history[].ingredients` | list of ingredient lines | Matched to catalog foods by name key |
+| `top_k` | integer | Recommendations kept; the route asks for 50 |
+| `candidates` | integer | Foods retrieved before reranking, default 100 |
+
+For this history:
 
 ```json
-{
-  "history": [
-    {"rating": 5, "date": "2026-09-01", "ingredients": ["chicken breast", "tomatoes", "salt", "butter"]},
-    {"rating": 2, "date": "2026-09-10", "ingredients": ["apples", "butter"]}
-  ],
-  "top_k": 5
-}
+[
+  {"rating": 5, "date": "2026-09-01", "ingredients": ["chicken breast", "tomatoes", "salt", "butter"]},
+  {"rating": 2, "date": "2026-09-10", "ingredients": ["apples", "butter"]}
+]
 ```
 
-The response has one list of matched foods per history entry, in request order,
-and the scored items in MMR pick order. For the body above, with only the first
-food of each entry, three nutrients per food and the first item shown:
+it returns one list of matched foods per history entry, in history order, and
+the scored items in MMR pick order. With `top_k=5`, only the first food of each
+entry, three nutrients per food and the first item shown:
 
 ```json
 {
@@ -391,45 +379,15 @@ vector. When no ingredient matches, `items` is empty.
    trimmed to `top_k`.
 4. **On a miss:**
    1. Read the ingredient lines of each history recipe from the recipe database.
-   2. Submit one model job through the queue with `top_k=50`, retrying as
-      described below.
+   2. Call the inference service with `top_k=50`.
    3. Compute the `UserBuyingProfile` from the matched foods it returns.
    4. Store the result in Redis for `CACHE_TTL_SECONDS` (default 86400, one
       day), then return it trimmed to `top_k`.
 
 Because the API always asks for 50 items, one cache entry serves any `top_k`.
 A user's new history only affects their recommendations once the cached entry
-expires. If Redis is down, user lookups fall back to the users database, but
-recommendations fail with 503 because the queue lives in Redis too.
-
-### The job queue
-
-The code is in [`api/src/remymy_api/jobs.py`](api/src/remymy_api/jobs.py) and
-the worker in [`ml_models/serve.py`](ml_models/serve.py).
-
-- **Submit.** The API pushes `{"id", "deadline", "payload"}` onto the list
-  `ml:jobs` (`LPUSH`), where `payload` is the `POST /v1/recommend` body and
-  `deadline` is now plus `ML_QUEUE_TIMEOUT_SECONDS`. It then waits on
-  `ml:result:{id}` with `BLPOP` for up to that many seconds.
-- **Work.** The model service runs one worker thread that takes jobs with
-  `BRPOP`, so jobs are served first in, first out. It drops jobs past their
-  deadline without running the model, since nobody is waiting for them any
-  more. It replies on `ml:result:{id}` (kept 60 s) with `{"result": ...}`, or
-  `{"error": ..., "retryable": true|false}`. A payload that fails validation is
-  not retryable; any other exception is. To add throughput, run more model
-  service replicas against the same Redis.
-- **Retry with backoff.** A timeout, a Redis error, an unreadable reply or a
-  retryable error counts as a failed attempt. The API makes up to 5 attempts,
-  each with a new job id, and waits 0.5, 1, 2 and 4 seconds between them. With
-  the default 10-second timeout, a request that fails every attempt returns
-  after about 57 seconds.
-- **Background retry.** After the fifth failure, the API answers 503 and hands
-  the user to a background thread. Every 10 minutes the thread repeats the
-  whole cycle (5 attempts with backoff) and writes the result to the cache. It
-  stops only once the cache write succeeds, or when the API shuts down. There
-  is at most one such thread per user id in each API process, so repeated
-  requests do not start more. The retry uses the history as it was when the
-  request failed.
+expires. If Redis is down, user lookups fall back to the users database and
+recommendations are still answered, running the model on every request.
 
 ### Data model
 
@@ -451,8 +409,8 @@ Storage:
 | --- | --- | --- |
 | Recipe database | `data/remymy-food.db`, mounted read-only | `recipe`, `recipe_ingredient`, `recipe_instruction`, plus FDC Foundation Foods tables. Built by `api/migrations/bootstrap.py` and replaced on rebuild |
 | Users database | `USER_DATABASE_PATH`, the `remymy-user-data` volume in compose | `app_user` (`user_id`, unique `username`, `preferences` as SQLite JSONB, `created_at`) and `user_history` (`user_id` → `app_user`, `timestamp`, `rating` 0–5 or `null`, `recipe_id`) |
-| Redis | `redis` service, 256 MB, least-recently-used eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON; `ml:jobs` → pending model jobs; `ml:result:{id}` → one job's reply |
-| Catalog | `data/price_mapped_nutrients.csv` | The priced FDC foods, read by the model service |
+| Redis | `redis` service, 256 MB, least-recently-used eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON |
+| Catalog database | `CATALOG_DATABASE_PATH`, the `remymy-user-data` volume in compose | `price_mapped_nutrients`: the priced FDC foods, one row per `fdc_id`. `recipe_repository` creates it on startup from `data/price_mapped_nutrients.csv`, adds the CSV's new `fdc_id`s, and serves it to the inference service |
 
 The users database enforces the preference rules itself: a `CHECK` constraint
 holds `preferences` to exactly the three keys and their allowed values, and a
@@ -468,21 +426,15 @@ Data API:
 | --- | --- | --- | --- |
 | `DATABASE_PATH` | `/data/remymy-food.db` | `../data/remymy-food.db` | Recipe database |
 | `USER_DATABASE_PATH` | `/state/remymy-users.db` | `./remymy-users.db` | Users database, created on startup |
-| `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Cache and job queue |
-| `ML_QUEUE_TIMEOUT_SECONDS` | `10` | `10` | How long one attempt waits for the worker's reply |
-| `CACHE_TTL_SECONDS` | `86400` | `86400` | Lifetime of cached user ids and recommendations (one day) |
-| `SEED_DEMO_USER` | `true` in compose | `true` | Create the `demo` user at startup |
-| `HOST`, `PORT` | `0.0.0.0`, `8002` | `127.0.0.1`, `8002` | Listen address |
-
-Model service:
-
-| Variable | Docker default | Local default | Purpose |
-| --- | --- | --- | --- |
-| `CATALOG_PATH` | `/catalog/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog |
+| `CATALOG_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog database is built from |
+| `CATALOG_DATABASE_PATH` | `/state/remymy-catalog.db` | `./remymy-catalog.db` | Catalog database, created and updated on startup |
 | `ARTIFACT_DIR` | `weights/gru_xattn_reranker` | same | Model weights and config |
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
-| `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Job queue |
-| `HOST`, `PORT` | `0.0.0.0`, `8003` | same | Listen address |
+| `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Cache |
+| `CACHE_TTL_SECONDS` | `86400` | `86400` | Lifetime of cached user ids and recommendations (one day) |
+| `SEED_DEMO_USER` | `true` in compose | `true` | Create the `demo` user at startup |
+| `LOG_LEVEL` | `INFO` | `INFO` | Level of the API's own log (`DEBUG` adds cache hits, ingredient matching and each pipeline step); compose passes it to `api-migrate`, `mcp` and `models` too |
+| `HOST`, `PORT` | `0.0.0.0`, `8002` | `127.0.0.1`, `8002` | Listen address |
 
 ### Building the recipe database
 
@@ -503,11 +455,8 @@ In Docker, `api-migrate` runs this once, using `RECIPES_SOURCE` and
 ```bash
 cd api
 PYTHONPATH=src python -m pytest
-
-cd ../ml_models
-python -m pytest tests
 ```
 
-The API suite uses a fake Redis and a fake queue, and the model service suite
-tests the worker with a fake Redis and a stubbed model, so neither needs Redis
-running.
+The suite uses a fake Redis, so it does not need Redis running. The route tests
+stand a fake recommender in for the model; `tests/test_inference_service.py`
+runs the real model and HNSW index over a small catalog.

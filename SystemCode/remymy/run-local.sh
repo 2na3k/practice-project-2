@@ -11,13 +11,12 @@ if [ -z "${PYTHON:-}" ]; then
   fi
 fi
 
-ML_PID=""
 API_PID=""
 
 cleanup() {
-  for pid in $API_PID $ML_PID; do
-    kill "$pid" 2>/dev/null || true
-  done
+  if [ -n "$API_PID" ]; then
+    kill "$API_PID" 2>/dev/null || true
+  fi
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -49,26 +48,22 @@ if [ ! -e "$RECIPE_DB" ]; then
   echo "warning: $RECIPE_DB not found; recipe routes return 503 and no demo user is created" >&2
 fi
 
-REDIS="${REDIS_URL:-redis://localhost:6379/0}"
-if ! "$PYTHON" -c "import redis, sys; redis.Redis.from_url(sys.argv[1], socket_connect_timeout=2).ping()" "$REDIS" 2>/dev/null; then
-  echo "error: Redis is not reachable at $REDIS; start it first (e.g. redis-server)" >&2
-  exit 1
+CATALOG_CSV="${CATALOG_PATH:-$ROOT/data/price_mapped_nutrients.csv}"
+CATALOG_DB="${CATALOG_DATABASE_PATH:-$ROOT/api/remymy-catalog.db}"
+if [ ! -e "$CATALOG_CSV" ] && [ ! -e "$CATALOG_DB" ]; then
+  echo "warning: neither $CATALOG_CSV nor $CATALOG_DB found; recommendations return 503" >&2
 fi
 
-cd "$ROOT/ml_models"
-"$PYTHON" serve.py > >(prefix ml-models) 2>&1 &
-ML_PID=$!
-wait_for ml-models http://localhost:8003/health "$ML_PID" 180
+REDIS="${REDIS_URL:-redis://localhost:6379/0}"
+if ! "$PYTHON" -c "import redis, sys; redis.Redis.from_url(sys.argv[1], socket_connect_timeout=2).ping()" "$REDIS" 2>/dev/null; then
+  echo "warning: Redis is not reachable at $REDIS; the API runs without its cache" >&2
+fi
 
 cd "$ROOT/api"
 "$PYTHON" serve.py > >(prefix api) 2>&1 &
 API_PID=$!
-wait_for api http://localhost:8002/health "$API_PID" 60
+# startup builds the catalog database, loads the model and builds the HNSW index before the API answers
+wait_for api http://localhost:8002/health "$API_PID" 180
 
-echo "Swagger: http://localhost:8002/docs (api), http://localhost:8003/docs (ml-models). Ctrl+C stops both."
-
-while kill -0 "$ML_PID" 2>/dev/null && kill -0 "$API_PID" 2>/dev/null; do
-  sleep 1
-done
-echo "a service stopped; shutting down the other" >&2
-exit 1
+echo "Swagger: http://localhost:8002/docs. Ctrl+C stops it."
+wait "$API_PID"

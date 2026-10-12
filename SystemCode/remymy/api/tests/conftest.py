@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
-import time
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import pytest
 import redis
 
-from remymy_api import jobs, main
+from remymy_api import main
 
 
 class FakeCache:
@@ -41,41 +38,29 @@ def cache(monkeypatch) -> FakeCache:
     return fake
 
 
-class FakeQueue:
+class FakeRecommender:
+    """Stands in for inference.service.Recommender, recording what each recommend call was given."""
+
     def __init__(self) -> None:
-        self.jobs: list[dict] = []
-        self.handler: Callable[[dict], dict | None] = lambda payload: None
-        self.down = False
+        self.handler: Callable[[list[dict], int], dict] = lambda history, top_k: {
+            "ingredients": [[] for _ in history],
+            "items": [],
+        }
+        self.calls: list[dict] = []
 
-    def lpush(self, key: str, value: str) -> None:
-        if self.down:
-            raise redis.ConnectionError("down")
-        assert key == jobs.QUEUE_KEY
-        self.jobs.append(json.loads(value))
+    def recommend(self, history: list[dict], top_k: int) -> dict:
+        self.calls.append({"history": history, "top_k": top_k})
+        return self.handler(history, top_k)
 
-    def blpop(self, keys: list[str], timeout: float) -> tuple[bytes, bytes] | None:
-        job = self.jobs[-1]
-        assert keys == [jobs.RESULT_KEY_PREFIX + job["id"]]
-        reply = self.handler(job["payload"])
-        return None if reply is None else (keys[0].encode(), json.dumps(reply).encode())
 
-    @property
-    def payloads(self) -> list[dict]:
-        return [job["payload"] for job in self.jobs]
-
-    def close(self) -> None:
-        pass
+@pytest.fixture(autouse=True)
+def no_model(monkeypatch) -> None:
+    """No test loads the real model and catalog unless it asks for them."""
+    monkeypatch.setattr(main, "load_recommender", lambda: None)
 
 
 @pytest.fixture
-def queue(monkeypatch) -> FakeQueue:
-    fake = FakeQueue()
-    monkeypatch.setattr(main, "connect_queue", lambda: fake)
+def recommender(monkeypatch) -> FakeRecommender:
+    fake = FakeRecommender()
+    monkeypatch.setattr(main, "load_recommender", lambda: fake)
     return fake
-
-
-@pytest.fixture
-def sleeps(monkeypatch) -> list[float]:
-    recorded: list[float] = []
-    monkeypatch.setattr(jobs, "time", SimpleNamespace(time=time.time, sleep=recorded.append))
-    return recorded

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -10,6 +11,7 @@ from .cache import read_user_id, write_user_id
 from .db import close_database, open_database
 from .schemas import Preferences, User, UserHistory
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_USER_DATABASE_PATH = "/state/remymy-users.db"
 
@@ -92,6 +94,7 @@ def init_user_database() -> None:
         connection.executescript(SCHEMA)
     finally:
         connection.close()
+    logger.info("Users database ready at %s.", user_database_path())
 
 
 def find_user_id(connection: sqlite3.Connection, cache: Redis, username: str) -> int | None:
@@ -147,6 +150,7 @@ def create_user(
             (username, preferences.model_dump_json()),
         ).fetchall()
     write_user_id(cache, username, row["user_id"])
+    logger.info("Created user %r with id %d.", username, row["user_id"])
     return User(id=row["user_id"], username=username, preferences=preferences)
 
 
@@ -172,6 +176,7 @@ def add_history(
             "RETURNING timestamp",
             (user_id, rating, recipe_id),
         ).fetchall()
+    logger.debug("User %d rated recipe %s: %s.", user_id, recipe_id, rating)
     return UserHistory(
         user_id=user_id, timestamp=row["timestamp"], rating=rating, recipe_id=recipe_id
     )

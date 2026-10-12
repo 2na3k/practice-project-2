@@ -14,7 +14,7 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
       MCP_URL: http://mcp:8000/mcp
-      DATA_API_URL: http://api:8002
+      DATA_API_URL: http://localhost:8002
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
@@ -34,6 +34,7 @@ services:
     restart: "no"
     environment:
       ENV: ${ENV:-nonprod}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_PATH: /data/remymy-food.db
       PYTHONPATH: /opt/remymy-api/migrations:/opt/remymy-api/src
       RECIPES_SOURCE: ${RECIPES_SOURCE:-}
@@ -55,6 +56,7 @@ services:
       - "${API_PORT:-8002}:8002"
     environment:
       ENV: ${ENV:-nonprod}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HOST: 0.0.0.0
       PORT: 8002
       DATABASE_PATH: /data/remymy-food.db
@@ -73,7 +75,8 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
-      start_period: 10s
+      # startup builds the catalog database from data/price_mapped_nutrients.csv, loads the model and the HNSW index
+      start_period: 120s
       retries: 5
     networks:
       - remymy
@@ -88,6 +91,7 @@ services:
       - "${MCP_PORT:-8000}:8000"
     environment:
       ENV: ${ENV:-nonprod}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HOST: 0.0.0.0
       PORT: 8000
       MODEL_URL: http://models:8001
@@ -107,6 +111,7 @@ services:
       - "${MODEL_PORT:-8001}:8001"
     environment:
       ENV: ${ENV:-nonprod}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HOST: 0.0.0.0
       PORT: 8001
       MODEL_ARTIFACT_PATH: /data/models/${MODEL_FILE:-hybrid-foodcom-bpr.npz}
@@ -118,34 +123,6 @@ services:
       interval: 10s
       timeout: 3s
       start_period: 20s
-      retries: 5
-    networks:
-      - remymy
-
-  ml-models:
-    build:
-      context: ./ml_models
-      dockerfile: Dockerfile
-    image: remymy-ml-models:dev
-    restart: unless-stopped
-    ports:
-      - "${ML_MODELS_PORT:-8003}:8003"
-    environment:
-      ENV: ${ENV:-nonprod}
-      HOST: 0.0.0.0
-      PORT: 8003
-      CATALOG_PATH: /catalog/price_mapped_nutrients.csv
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      redis:
-        condition: service_healthy
-    volumes:
-      - "${DATA_DIR:-./data}/price_mapped_nutrients.csv:/catalog/price_mapped_nutrients.csv:ro"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=2)"]
-      interval: 10s
-      timeout: 3s
-      start_period: 120s
       retries: 5
     networks:
       - remymy

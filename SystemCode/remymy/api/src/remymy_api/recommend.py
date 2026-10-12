@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections import defaultdict
 from statistics import fmean
+from typing import TYPE_CHECKING
 
-import redis
 from fastapi import HTTPException
 
 from .db import close_database, open_database
-from .jobs import submit_with_retries
 from .schemas import (
     Ingredient,
     RecommendationResponse,
@@ -17,6 +17,10 @@ from .schemas import (
     UserHistory,
 )
 
+if TYPE_CHECKING:
+    from .inference.service import Recommender
+
+logger = logging.getLogger(__name__)
 
 MAX_TOP_K = 50
 
@@ -31,6 +35,7 @@ def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
             tuple(recipe_ids),
         ).fetchall()
     except sqlite3.Error:
+        logger.exception("Reading the ingredient lines of %d history recipes failed.", len(recipe_ids))
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     finally:
         close_database(connection)
@@ -59,24 +64,25 @@ def buying_profile(
     )
 
 
-def recommend(queue: redis.Redis, history: list[UserHistory], user_id: str) -> RecommendationResponse:
+def recommend(recommender: Recommender, history: list[UserHistory]) -> RecommendationResponse:
     ingredients_by_recipe = recipe_ingredients({entry.recipe_id for entry in history})
-    result = submit_with_retries(
-        queue,
-        {
-            "user_id": user_id,
-            "history": [
-                {
-                    "rating": entry.rating,
-                    "date": entry.timestamp.date().isoformat(),
-                    "ingredients": ingredients_by_recipe.get(entry.recipe_id, []),
-                }
-                for entry in history
-            ],
-            "top_k": MAX_TOP_K,
-        },
+    result = recommender.recommend(
+        [
+            {
+                "rating": entry.rating,
+                "date": entry.timestamp.date().isoformat(),
+                "ingredients": ingredients_by_recipe.get(entry.recipe_id, []),
+            }
+            for entry in history
+        ],
+        top_k=MAX_TOP_K,
     )
     matched = [[Ingredient(**ingredient) for ingredient in entry] for entry in result["ingredients"]]
+    logger.debug("User %d: %d ingredient lines of %d recipes matched %d priced foods.", history[0].user_id,
+                 sum(map(len, ingredients_by_recipe.values())), len(ingredients_by_recipe), sum(map(len, matched)))
+    if not any(matched):
+        logger.debug("User %d: no ingredient matched a priced food, so there is no buying profile.",
+                     history[0].user_id)
     recommended_items = sorted(result["items"], key=lambda x: x["p_like"], reverse=True)
     return RecommendationResponse(
         profile=buying_profile(history, matched),

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import csv
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from remymy_api.repository.recommend_repository import RecommendRepository
+from remymy_api.repository.recipe_repository import RecipeRepository
+
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def food(fdc_id: int, description: str = "Apples, raw", sugars_g: str = "10.4") -> dict[str, str]:
@@ -28,9 +33,29 @@ def write_catalog(path: Path, rows: list[dict[str, str]]) -> Path:
     return path
 
 
+def shared_repository_on_import(catalog_csv: Path, catalog_database: Path) -> str:
+    """What recipe_repository is when the module is first imported with these paths, in a fresh interpreter so this
+    process's already-imported module is left alone."""
+    code = ("from remymy_api.repository.recipe_repository import recipe_repository as shared; "
+            "print(None if shared is None else sorted(shared.fdc_ids()))")
+    env = {**os.environ, "PYTHONPATH": str(SRC),
+           "CATALOG_PATH": str(catalog_csv), "CATALOG_DATABASE_PATH": str(catalog_database)}
+    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def test_the_shared_repository_is_built_when_the_module_is_imported(tmp_path):
+    catalog = write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])
+    assert shared_repository_on_import(catalog, tmp_path / "catalog.db") == "[1, 2]"
+
+
+def test_importing_without_a_catalog_leaves_the_shared_repository_none(tmp_path):
+    assert shared_repository_on_import(tmp_path / "missing.csv", tmp_path / "missing.db") == "None"
+
+
 def test_builds_the_database_when_there_is_none(tmp_path):
     database = tmp_path / "state" / "catalog.db"
-    repository = RecommendRepository(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)]))
+    repository = RecipeRepository(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)]))
     assert database.is_file()
     assert repository.injected == 2
     assert repository.fdc_ids() == {1, 2}
@@ -38,40 +63,40 @@ def test_builds_the_database_when_there_is_none(tmp_path):
 
 def test_injects_only_the_ids_the_database_does_not_hold(tmp_path):
     database = tmp_path / "catalog.db"
-    RecommendRepository(database, write_catalog(tmp_path / "first.csv", [food(1), food(2)]))
+    RecipeRepository(database, write_catalog(tmp_path / "first.csv", [food(1), food(2)]))
     grown = write_catalog(tmp_path / "grown.csv", [food(1), food(2, description="Apples, renamed"), food(3)])
-    repository = RecommendRepository(database, grown)
+    repository = RecipeRepository(database, grown)
     assert repository.injected == 1
     assert repository.fdc_ids() == {1, 2, 3}
     # 2 was already stored, so the CSV's newer row for it is not written over it
     assert repository.food(2).description == "Apples, raw"
-    assert RecommendRepository(database, grown).injected == 0
+    assert RecipeRepository(database, grown).injected == 0
 
 
 def test_uses_an_existing_database_without_a_csv(tmp_path):
     database = tmp_path / "catalog.db"
-    RecommendRepository(database, write_catalog(tmp_path / "catalog.csv", [food(1)]))
-    repository = RecommendRepository(database, tmp_path / "missing.csv")
+    RecipeRepository(database, write_catalog(tmp_path / "catalog.csv", [food(1)]))
+    repository = RecipeRepository(database, tmp_path / "missing.csv")
     assert repository.injected == 0
     assert repository.fdc_ids() == {1}
 
 
 def test_needs_a_database_or_a_csv(tmp_path):
     with pytest.raises(FileNotFoundError):
-        RecommendRepository(tmp_path / "catalog.db", tmp_path / "missing.csv")
+        RecipeRepository(tmp_path / "catalog.db", tmp_path / "missing.csv")
 
 
 def test_rejects_a_csv_missing_a_column(tmp_path):
     row = food(1)
     del row["sugars_g"]
     with pytest.raises(ValueError, match="sugars_g"):
-        RecommendRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", [row]))
+        RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", [row]))
 
 
 @pytest.fixture
-def repository(tmp_path) -> RecommendRepository:
+def repository(tmp_path) -> RecipeRepository:
     rows = [food(3, "Chicken, breast, roasted"), food(1), food(2, "Pineapple, raw", sugars_g="")]
-    return RecommendRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
+    return RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
 
 
 def test_foods_come_back_with_their_lists_dicts_and_missing_nutrients(repository):

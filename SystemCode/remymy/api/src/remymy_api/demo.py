@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 
@@ -10,6 +11,7 @@ from .db import close_database, open_database
 from .schemas import Preferences
 from .users import add_history, create_user, username_exists
 
+logger = logging.getLogger(__name__)
 
 DEMO_USERNAME = "demo"
 DEMO_HISTORY = (
@@ -43,6 +45,7 @@ def demo_recipes() -> list[tuple[str, int]]:
             if row is not None:
                 picked.setdefault(row["recipe_id"], rating)
     except sqlite3.Error:
+        logger.exception("Could not pick the demo user's recipes.")
         return []
     finally:
         close_database(recipes)
@@ -51,9 +54,11 @@ def demo_recipes() -> list[tuple[str, int]]:
 
 def seed_demo_user(connection: sqlite3.Connection, cache: Redis) -> None:
     if username_exists(connection, cache, DEMO_USERNAME):
+        logger.debug("Demo user %r already exists.", DEMO_USERNAME)
         return
     history = demo_recipes()
     if not history:
+        logger.warning("No recipe matched the demo history, so the demo user %r was not created.", DEMO_USERNAME)
         return
     user = create_user(
         connection,
@@ -63,3 +68,4 @@ def seed_demo_user(connection: sqlite3.Connection, cache: Redis) -> None:
     )
     for recipe_id, rating in history:
         add_history(connection, user.id, recipe_id, rating)
+    logger.info("Seeded demo user %r with %d rated recipes.", DEMO_USERNAME, len(history))
