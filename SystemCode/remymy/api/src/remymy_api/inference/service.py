@@ -1,23 +1,29 @@
 """The inference service the recommend route calls, over the catalog RecipeRepository serves.
 
-A user's History holds their rated Recipes, which RecipeRepository.digest matched to catalog foods; those foods, each
-with its recipe's rating and date, are the user's history for the retrieval pipeline, which retrieves, reranks and
-diversifies the catalog's foods for them."""
+A user's History holds whether they liked each recipe they cooked, and RecipeRepository.digest matches each recipe to
+catalog foods; those foods, each with its like as a rating and its date, are the user's history for the retrieval
+pipeline, which retrieves, reranks and diversifies the catalog's foods for them."""
 from __future__ import annotations
 
 import logging
 import os
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from statistics import median
 
 from ..history import History
+from ..recipe import Recipe
 from ..repository.recipe_repository import RecipeRepository
 from ..schemas import CatalogFood
 from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS
 from .model_inference_score_recommend import CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, TEXT_COLUMNS, RetrievalPipeline
 
 logger = logging.getLogger(__name__)
+
+# The model reads Food.com's 0-5 ratings, of which training counted 3 to 5 as liked: a like goes in as the top
+# rating, a dislike as the bottom one.
+LIKED_RATING, DISLIKED_RATING = 5, 0
 
 
 def artifact_dir() -> Path:
@@ -71,13 +77,16 @@ class Recommender:
         logger.info("Recommender loaded: %d catalog foods, %d ingredient keys.", len(foods), keys)
         return cls(repository, pipeline)
 
-    def recommend(self, history: History, top_k: int, candidates: int = 100) -> list[dict]:
-        """The catalog foods to recommend to the user whose history this is, best first. Each food a rated recipe
-        matched goes to the pipeline with that rating's rating and date."""
+    def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
+                  candidates: int = 100) -> list[dict]:
+        """The catalog foods to recommend to the user whose history this is, best first. recipes holds the digested
+        Recipe of each recipe_id in history. Each food a recipe matched goes to the pipeline with that entry's like,
+        as LIKED_RATING or DISLIKED_RATING, and its date."""
         foods = [
-            {"fdc_id": ingredient.fdc_id, "rating": entry.rating, "date": entry.timestamp.date().isoformat()}
+            {"fdc_id": ingredient.fdc_id, "rating": LIKED_RATING if entry.like else DISLIKED_RATING,
+             "date": entry.timestamp.date().isoformat()}
             for entry in history
-            for ingredient in entry.recipe.ingredients
+            for ingredient in recipes[entry.recipe_id].ingredients
         ]
         results = []
         if foods:

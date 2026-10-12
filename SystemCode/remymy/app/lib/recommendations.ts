@@ -1,4 +1,4 @@
-import { apiError } from "./recipes";
+import { dataApiError } from "./recipes";
 
 // The app has no sign-in yet, so it asks for the user the Data API seeds for demos.
 export const RECOMMENDATION_USERNAME = "demo";
@@ -51,20 +51,11 @@ export function parseRecommendations(value: unknown): Recommendations {
   return result as Recommendations;
 }
 
-// The Data API answers errors as FastAPI does, {detail}; the app's own route as {error}.
-function recommendationError(value: unknown): string {
-  if (value && typeof value === "object" && "detail" in value) {
-    const detail = (value as { detail?: unknown }).detail;
-    if (typeof detail === "string" && detail.trim()) return detail;
-  }
-  return apiError(value, "Recommendations could not be loaded.");
-}
-
 export async function fetchRecommendations(username: string, topK: number, signal?: AbortSignal): Promise<Recommendations> {
   const params = new URLSearchParams({ top_k: String(topK) });
   const response = await fetch(`/api/recommend/${encodeURIComponent(username)}?${params.toString()}`, { cache: "no-store", signal });
   const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(recommendationError(body));
+  if (!response.ok) throw new Error(dataApiError(body, "Recommendations could not be loaded."));
   return parseRecommendations(body);
 }
 

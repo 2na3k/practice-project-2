@@ -78,8 +78,9 @@ an existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
 normalized by `name_key` and looked up in the ingredient index, and the mean
 of their nutrients. The API builds that index at startup with
 `load_ingredient_index()`; otherwise the first `digest` builds it. The
-recommend route digests each rated recipe once and puts the ratings in the
-user's `History` (`src/remymy_api/history.py`) for the inference service.
+recommend route puts the user's likes in their `History`
+(`src/remymy_api/history.py`) and digests each of its recipes once for the
+inference service.
 
 The app shares one instance, `recipe_repository` in the same module, created
 when the module is first imported; use it rather than creating another. It is
@@ -95,9 +96,9 @@ still starts, and `GET /api/recommend/{username}` answers `503`.
 
 Open http://localhost:8002/docs (or just http://localhost:8002/). With
 `SEED_DEMO_USER=true`, which compose sets by default, the API injects a `demo`
-user and its ratings into the users database with its schema on startup
+user and its likes into the users database with its schema on startup
 (`DEMO_SEED` in `src/remymy_api/users.py`), unless the demo user already has a
-history. The ratings are of five real recipes of the 13k recipes CSV, chosen
+history. The likes are of five real recipes of the 13k recipes CSV, chosen
 because their ingredient lines match the priced catalog best.
 `GET /api/recommend/{username}` comes pre-filled with `demo`, so "Try it out",
 then "Execute" returns its buying profile and recommendations.

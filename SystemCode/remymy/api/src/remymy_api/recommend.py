@@ -3,14 +3,16 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections import defaultdict
+from collections.abc import Mapping
 from statistics import fmean
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
 from .db import close_database, open_database
-from .history import History, RecipeHistory
-from .repository.recipe_repository import recipe_repository
+from .history import History
+from .recipe import Recipe
+from .repository.recipe_repository import is_food_id, recipe_repository
 from .schemas import (
     RecommendationResponse,
     RecommendedRecipe,
@@ -46,13 +48,13 @@ def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
     return ingredients
 
 
-def buying_profile(history: History) -> UserBuyingProfile | None:
-    """The average price and nutrient values of every priced food the user's rated recipes matched, a food once per
-    rating of its recipe."""
+def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserBuyingProfile | None:
+    """The average price and nutrient values of every priced food the user's recipes matched, a food once per time
+    its recipe is in the history."""
     prices: list[float] = []
     nutrients: dict[str, list[float]] = defaultdict(list)
     for entry in history:
-        for ingredient in entry.recipe.ingredients:
+        for ingredient in recipes[entry.recipe_id].ingredients:
             prices.append(ingredient.price)
             for name, value in ingredient.nutrient_values.items():
                 nutrients[name].append(value)
@@ -66,26 +68,36 @@ def buying_profile(history: History) -> UserBuyingProfile | None:
 
 
 def user_history(rows: list[UserHistory]) -> History:
-    """A user's ratings, as fetch_user_history reads them (newest first), as their History (oldest first). The shared
-    recipe_repository digests each recipe once, so the ratings of a recipe rated twice refer to one Recipe."""
-    ingredients_by_recipe = recipe_ingredients({row.recipe_id for row in rows})
-    recipes = {
-        recipe_id: recipe_repository.digest(recipe_id, ingredients_by_recipe.get(recipe_id, []))
-        for recipe_id in dict.fromkeys(row.recipe_id for row in rows)
-    }
+    """A user's likes as fetch_user_history reads them (newest first), as their History (oldest first)."""
     history = History(rows[0].user_id)
     for row in reversed(rows):
-        history.add(RecipeHistory(recipes[row.recipe_id], row.rating, row.timestamp))
+        history.add(row)
+    return history
+
+
+def digest_recipes(history: History) -> dict[str, Recipe]:
+    """The Recipe of each recipe or catalog food in the history: the shared recipe_repository digests it once,
+    however often it is in the history."""
+    ids = list(dict.fromkeys(entry.recipe_id for entry in history))
+    # a catalog food the user rated itself, such as a recommended grocery, is digested as itself
+    recipe_ids = {recipe_id for recipe_id in ids if not is_food_id(recipe_id)}
+    ingredients_by_recipe = recipe_ingredients(recipe_ids) if recipe_ids else {}
+    recipes = {
+        recipe_id: recipe_repository.digest_food(recipe_id) if is_food_id(recipe_id)
+        else recipe_repository.digest(recipe_id, ingredients_by_recipe.get(recipe_id, []))
+        for recipe_id in ids
+    }
     logger.debug("User %d: %d ingredient lines of %d recipes matched %d priced foods.", history.user_id,
                  sum(map(len, ingredients_by_recipe.values())), len(recipes),
                  sum(len(recipe.ingredients) for recipe in recipes.values()))
-    return history
+    return recipes
 
 
 def recommend(recommender: Recommender, rows: list[UserHistory]) -> RecommendationResponse:
     history = user_history(rows)
-    items = recommender.recommend(history, top_k=MAX_TOP_K)
-    profile = buying_profile(history)
+    recipes = digest_recipes(history)
+    items = recommender.recommend(history, recipes, top_k=MAX_TOP_K)
+    profile = buying_profile(history, recipes)
     if profile is None:
         logger.debug("User %d: no ingredient matched a priced food, so there is no buying profile.", history.user_id)
     recommended_items = sorted(items, key=lambda x: x["p_like"], reverse=True)

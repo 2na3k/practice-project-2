@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import pytest
 import redis
 
 from remymy_api import main
 from remymy_api.history import History
+from remymy_api.recipe import Recipe
 
 
 class FakeCache:
@@ -43,12 +44,14 @@ class FakeRecommender:
     """Stands in for inference.service.Recommender, recording what each recommend call was given."""
 
     def __init__(self) -> None:
-        self.handler: Callable[[History, int], list[dict]] = lambda history, top_k: []
+        self.handler: Callable[[History, Mapping[str, Recipe], int], list[dict]] = (
+            lambda history, recipes, top_k: []
+        )
         self.calls: list[dict] = []
 
-    def recommend(self, history: History, top_k: int) -> list[dict]:
-        self.calls.append({"history": history, "top_k": top_k})
-        return self.handler(history, top_k)
+    def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int) -> list[dict]:
+        self.calls.append({"history": history, "recipes": recipes, "top_k": top_k})
+        return self.handler(history, recipes, top_k)
 
 
 @pytest.fixture(autouse=True)

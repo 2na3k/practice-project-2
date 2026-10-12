@@ -114,6 +114,22 @@ def name_key(text: str) -> str:
     return " ".join(lemmatizer.lemmatize(word, "n") for word in words)
 
 
+def is_food_id(item_id: str) -> bool:
+    """Whether an id a user rated is a catalog food's fdc_id ("169286") rather than a recipe's ("openrecipes:5210")."""
+    return item_id.isascii() and item_id.isdigit()
+
+
+def food_ingredient(food: CatalogFood, price: float | None = None) -> Ingredient:
+    """A catalog food as an Ingredient: by default its price is the sum of its items' pack prices, which is its
+    total_price when every item is priced; its nutrient values are the ones FDC has a value for."""
+    return Ingredient(
+        fdc_id=food.fdc_id,
+        name=food.description,
+        price=sum(item.price for item in food.item_prices.values()) if price is None else price,
+        nutrient_values={column: value for column in NUTRIENT_COLUMNS if (value := getattr(food, column)) is not None},
+    )
+
+
 def ingredient_index(foods: Iterable[CatalogFood]) -> dict[str, Ingredient]:
     """One fully priced food per name key, the first comma-separated part of the description normalized ("Waffles,
     buttermilk, frozen" → "waffle"): of a key's foods, the one whose total_price is nearest their median."""
@@ -127,14 +143,7 @@ def ingredient_index(foods: Iterable[CatalogFood]) -> dict[str, Ingredient]:
         middle = median(food.total_price for food in group)
         # min keeps the first of a tie, the lowest fdc_id
         food = min(group, key=lambda food: abs(food.total_price - middle))
-        index[key] = Ingredient(
-            fdc_id=food.fdc_id,
-            name=food.description,
-            price=food.total_price,
-            nutrient_values={
-                column: value for column in NUTRIENT_COLUMNS if (value := getattr(food, column)) is not None
-            },
-        )
+        index[key] = food_ingredient(food, price=food.total_price)
     return index
 
 
@@ -250,6 +259,15 @@ class RecipeRepository:
             for name, value in ingredient.nutrient_values.items():
                 nutrients[name].append(value)
         return Recipe(recipe_id, ingredients, {name: fmean(values) for name, values in sorted(nutrients.items())})
+
+    def digest_food(self, food_id: str) -> Recipe:
+        """A catalog food the user rated itself, such as a recommended grocery, by its fdc_id: the Recipe whose one
+        ingredient is the food, or none when the catalog does not have it."""
+        food = self.food(int(food_id))
+        if food is None:
+            return Recipe(food_id, [])
+        ingredient = food_ingredient(food)
+        return Recipe(food_id, [ingredient], ingredient.nutrient_values)
 
 
 # The one repository the app shares, built from CATALOG_PATH / CATALOG_DATABASE_PATH when this module is first

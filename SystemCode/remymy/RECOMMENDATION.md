@@ -36,8 +36,8 @@ sequenceDiagram
     A->>R: recommendations:{user_id}
     alt cache miss
         A->>D: ingredient lines of each history recipe
-        A->>A: recipe_repository digests each recipe into a Recipe; the ratings go into a History
-        A->>M: recommend(history, top_k=50)
+        A->>A: the likes go into a History; recipe_repository digests each recipe into a Recipe
+        A->>M: recommend(history, recipes, top_k=50)
         M-->>A: scored items
         A->>A: compute UserBuyingProfile from the History
         A->>R: store recommendations:{user_id} (1 day TTL)
@@ -207,14 +207,15 @@ At startup the API:
 
 For each recommendation (one at a time) it:
 
-1. Digests each rated recipe with `recipe_repository.digest`: normalizes each
+1. Builds the user's `History`: their `user_history` rows (`UserHistory`:
+   recipe, like or not, timestamp), oldest first.
+2. Digests each of its recipes with `recipe_repository.digest`: normalizes each
    ingredient line with `name_key` and looks it up in the ingredient index, a
    food once per recipe. The result is a `Recipe` holding the matched foods and
-   the mean of their nutrients. A recipe rated twice is digested once.
-2. Builds the user's `History`: one `RecipeHistory` per rating, oldest first,
-   each referring to its `Recipe`.
-3. Turns every food of each rating's recipe into a history item with that
-   rating's rating and date.
+   the mean of their nutrients. A recipe in the history twice is digested once.
+3. Turns every food of each entry's recipe into a history item with that
+   entry's date and its like as a rating on the model's 0–5 scale: 5 liked, 0
+   not (training counted 3 to 5 as liked).
 4. Averages the history items' normalized embeddings into one query vector and
    retrieves the 100 nearest catalog foods, excluding the history itself.
 5. Drops candidates with cosine similarity 0.97 or more to any history food,
@@ -259,12 +260,12 @@ For each recommendation (one at a time) it:
 - **Swagger:** http://localhost:8002/docs. `/` redirects to `/docs`.
 - **Demo user:** with `SEED_DEMO_USER=true` (the default in compose and in
   `serve.py`), creating the users database's schema also injects a `demo`
-  user and its ratings with SQL (`DEMO_SEED` in
+  user and its likes with SQL (`DEMO_SEED` in
   [`api/src/remymy_api/users.py`](api/src/remymy_api/users.py)). Its history
-  is five real recipes of the 13k recipes CSV, by `recipe_id`: Roast Chicken
-  with Carrots (5), Baked Eggs with Tomato (4), Avocado and Watercress Salad
-  (5), Meatballs and Noodle Soup (Almondigas) (3) and Citrus Cookies (2). Each
-  is the recipe of its kind whose ingredient lines match the priced catalog
+  is five real recipes of the 13k recipes CSV, by `recipe_id`: it liked Roast
+  Chicken with Carrots, Baked Eggs with Tomato, Avocado and Watercress Salad and
+  Meatballs and Noodle Soup (Almondigas), and not Citrus Cookies. Each is the
+  recipe of its kind whose ingredient lines match the priced catalog
   best. Nothing is written once the demo user has a history, so an existing
   users database keeps its old one. In Swagger,
   `GET /api/recommend/{username}` comes pre-filled with `demo`.
@@ -278,6 +279,8 @@ For each recommendation (one at a time) it:
 | GET | `/api/recipes` | `q` (optional, max 200 characters), `limit` 1–100 (default 20), `offset` ≥ 0 | Paged recipe summaries. `q` searches titles and ingredient lines, case-insensitive |
 | GET | `/api/recipes/{recipe_id}` | none | Title, ingredient lines, instruction steps; 404 if unknown |
 | GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
+| GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
+| PUT | `/api/recipes/{recipe_id}/rating` | `user_id`, `like` (`true` or `false`) | Adds whether the user liked the recipe to their history, and returns that `UserHistory` row; 404 for an unknown user or recipe |
 
 #### `GET /api/recommend/{username}`
 
@@ -331,16 +334,17 @@ lines (see [Limitations](#limitations)).
 
 ### The inference service
 
-The route calls `Recommender.recommend(history, top_k, candidates=100)` in
+The route calls `Recommender.recommend(history, recipes, top_k, candidates=100)` in
 [`service.py`](api/src/remymy_api/inference/service.py) in the same process,
 one call at a time.
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
-| `history` | `History` | The user's ratings, oldest first, one `RecipeHistory` each |
-| `history[].recipe` | `Recipe` | The rated recipe as `recipe_repository.digest` made it; its `ingredients` are the catalog foods its lines matched |
-| `history[].rating` | 0–5 or `None` | `None` counts as the user's mean |
+| `history` | `History` | The user's `UserHistory` rows, oldest first |
+| `history[].recipe_id` | string | The recipe; `recipes` holds its digested `Recipe` |
+| `history[].like` | boolean | Goes to the model as rating 5 (liked) or 0 (not) |
 | `history[].timestamp` | datetime | Its date orders the history and cuts the windows |
+| `recipes` | `recipe_id` → `Recipe` | Each history recipe as `recipe_repository.digest` made it; its `ingredients` are the catalog foods its lines matched |
 | `top_k` | integer | Recommendations kept; the route asks for 50 |
 | `candidates` | integer | Foods retrieved before reranking, default 100 |
 
@@ -349,15 +353,18 @@ For this history:
 ```python
 from datetime import datetime, timezone
 
-from remymy_api.history import History, RecipeHistory
+from remymy_api.history import History
 from remymy_api.repository.recipe_repository import recipe_repository
+from remymy_api.schemas import UserHistory
 
 soup = recipe_repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "salt", "butter"])
 apples = recipe_repository.digest("openrecipes:2", ["apples", "butter"])
 history = History(user_id=1)
-history.add(RecipeHistory(soup, rating=5, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc)))
-history.add(RecipeHistory(apples, rating=2, timestamp=datetime(2026, 9, 10, tzinfo=timezone.utc)))
-items = recommender.recommend(history, top_k=5)
+history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
+                        recipe_id="openrecipes:1"))
+history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 10, tzinfo=timezone.utc), like=False,
+                        recipe_id="openrecipes:2"))
+items = recommender.recommend(history, {"openrecipes:1": soup, "openrecipes:2": apples}, top_k=5)
 ```
 
 `soup.ingredients` holds four foods ("Chicken breast, NS as to cooking method,
@@ -367,7 +374,7 @@ skin eaten", "Tomatoes, sun-dried", "Salt, table" and "Butter, Clarified butter
 
 ```json
 {"fdc_id": 2709611, "name": "Mustard greens, frozen, cooked, fat added", "price": 3.17,
- "p_like": 0.725, "similarity": 0.849}
+ "p_like": 0.718, "similarity": 0.849}
 ```
 
 `similarity` is the cosine similarity between the food and the user's query
@@ -384,9 +391,10 @@ vector. When no recipe in the history matched a food, `items` is empty.
    trimmed to `top_k`.
 4. **On a miss:**
    1. Read the ingredient lines of each history recipe from the recipe database.
-   2. Digest each recipe with `recipe_repository.digest` and put the ratings in
-      the user's `History`, oldest first.
-   3. Call the inference service with the `History` and `top_k=50`.
+   2. Put the rows in the user's `History`, oldest first, and digest each of
+      its recipes with `recipe_repository.digest`.
+   3. Call the inference service with the `History`, the `Recipe`s and
+      `top_k=50`.
    4. Compute the `UserBuyingProfile` from the foods of the `History`'s recipes.
    5. Store the result in Redis for `CACHE_TTL_SECONDS` (default 86400, one
       day), then return it trimmed to `top_k`.
@@ -404,7 +412,7 @@ API schemas, in [`api/src/remymy_api/schemas.py`](api/src/remymy_api/schemas.py)
 | --- | --- |
 | `Preferences` | `special_diet` (`vegetarian`, `halal`, `Hinduism` or `null`), `cuisines` (up to 40), `preferred_nutrient` (up to 64 characters). Unknown keys are rejected |
 | `User` | `id`, `username`, `preferences` |
-| `UserHistory` | `user_id`, `timestamp`, `rating` (0–5 or `null`), `recipe_id` |
+| `UserHistory` | `user_id`, `timestamp`, `like` (boolean), `recipe_id` |
 | `Ingredient` | `fdc_id`, `name`, `price`, `nutrient_values` |
 | `UserBuyingProfile` | `user_id`, `avg_price`, `avg_nutrient_values` |
 | `RecommendedRecipe` | `id`, `title`, `score` |
@@ -417,15 +425,14 @@ What the recommend route hands the inference service, in
 | Class | Holds |
 | --- | --- |
 | `Recipe` | `recipe_id`, `ingredients` (the `Ingredient`s its lines matched), `nutrient_values` (their mean, per 100 g) |
-| `RecipeHistory` | `recipe` (a reference to a `Recipe`, not a copy), `rating` (0–5 or `None`), `timestamp` |
-| `History` | `user_id` and `history`, a queue of `RecipeHistory`, oldest first; past 50, each new rating drops the oldest |
+| `History` | `user_id` and `history`, a queue of `UserHistory`, oldest first; past 50, each new entry drops the oldest |
 
 Storage:
 
 | Store | Location | Contents |
 | --- | --- | --- |
 | Recipe database | `data/remymy-food.db`, mounted read-only | `recipe`, `recipe_ingredient`, `recipe_instruction`, plus FDC Foundation Foods tables. Built by `api/migrations/bootstrap.py` and replaced on rebuild |
-| Users database | `USER_DATABASE_PATH`, the `remymy-user-data` volume in compose | `app_user` (`user_id`, unique `username`, `preferences` as SQLite JSONB, `created_at`) and `user_history` (`user_id` → `app_user`, `timestamp`, `rating` 0–5 or `null`, `recipe_id`) |
+| Users database | `USER_DATABASE_PATH`, the `remymy-user-data` volume in compose | `app_user` (`user_id`, unique `username`, `preferences` as SQLite JSONB, `created_at`) and `user_history` (`user_id` → `app_user`, `timestamp`, `liked` 1 or 0, `recipe_id`). A database from before likes has its 0–5 ratings turned into likes on startup, 3 to 5 liked |
 | Redis | `redis` service, 256 MB, least-recently-used eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON |
 | Catalog database | `CATALOG_DATABASE_PATH`, the `remymy-user-data` volume in compose | `price_mapped_nutrients`: the priced FDC foods, one row per `fdc_id`. `recipe_repository` creates it on startup from `data/price_mapped_nutrients.csv`, adds the CSV's new `fdc_id`s, and serves it to the inference service |
 

@@ -64,7 +64,7 @@ class UserHistory(BaseModel):
 
     user_id: int
     timestamp: datetime
-    rating: int | None = Field(default=None, ge=0, le=5)
+    like: bool
     recipe_id: str
 
 class Ingredient(BaseModel):

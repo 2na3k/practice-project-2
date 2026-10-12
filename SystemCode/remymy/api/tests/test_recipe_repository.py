@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from remymy_api.repository.recipe_repository import RecipeRepository, ingredient_index, name_key
+from remymy_api.repository.recipe_repository import RecipeRepository, ingredient_index, is_food_id, name_key
 from remymy_api.schemas import CatalogFood, ItemPrice
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -180,3 +180,17 @@ def test_name_key_drops_case_asides_punctuation_and_stop_words_then_singularizes
     # negations are kept, and a lone % is dropped
     assert name_key("No-salt butter, 100% %") == "no salt butter 100%"
     assert name_key("(optional)") == ""
+
+
+def test_a_rated_food_is_digested_as_itself(repository):
+    apple = repository.digest_food("1")
+    # its price is the sum of its items' pack prices
+    assert [(ingredient.fdc_id, ingredient.price) for ingredient in apple.ingredients] == [(1, 3.0)]
+    assert apple.nutrient_values["energy_kcal"] == 52.0
+    assert repository.digest_food("99").ingredients == []
+
+
+def test_food_ids_are_fdc_ids_and_recipe_ids_are_not():
+    assert is_food_id("169286")
+    assert not is_food_id("openrecipes:5210")
+    assert not is_food_id("١٢٣")

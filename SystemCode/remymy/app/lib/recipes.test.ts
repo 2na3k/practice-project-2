@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { parseRecipeDetail, parseRecipePage } from "./recipes";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { dataApiError, parseRecipeDetail, parseRecipePage, parseRecipeRating, saveRecipeRating } from "./recipes";
 
 describe("recipe API contracts", () => {
   it("accepts the narrow list response", () => {
@@ -15,5 +15,39 @@ describe("recipe API contracts", () => {
 
   it("accepts recipe detail without inventing metadata", () => {
     expect(parseRecipeDetail({ id: "1", title: "Soup", ingredients: ["water"], instructions: ["Boil."], quality_status: "usable" }).instructions).toEqual(["Boil."]);
+  });
+});
+
+describe("recipe ratings", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const saved = { user_id: 1, recipe_id: "openrecipes:1", like: true, timestamp: "2026-10-12T09:00:00.000Z" };
+
+  it("accepts a saved like and rejects other shapes", () => {
+    expect(parseRecipeRating(saved).like).toBe(true);
+    expect(() => parseRecipeRating({ ...saved, like: "yes" })).toThrow();
+    expect(() => parseRecipeRating({ ...saved, rating: 5, like: undefined })).toThrow();
+  });
+
+  it("reads the Data API's detail, then the app's error, then the fallback", () => {
+    expect(dataApiError({ detail: "Recipe not found." }, "fallback")).toBe("Recipe not found.");
+    expect(dataApiError({ error: "Invalid recipe id." }, "fallback")).toBe("Invalid recipe id.");
+    expect(dataApiError(null, "fallback")).toBe("fallback");
+  });
+
+  it("sends the username and like to the app's rating route", async () => {
+    const fetchMock = vi.fn(async () => Response.json(saved));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(saveRecipeRating("openrecipes:1", "demo", true)).resolves.toEqual(saved);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/recipes/openrecipes%3A1/rating");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ username: "demo", like: true });
+  });
+
+  it("throws the API's reason when the like is not saved", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "User not found." }, { status: 404 })));
+    await expect(saveRecipeRating("openrecipes:1", "nobody", false)).rejects.toThrow("User not found.");
   });
 });

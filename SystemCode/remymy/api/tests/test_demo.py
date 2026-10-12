@@ -8,12 +8,12 @@ from fastapi.testclient import TestClient
 from remymy_api.main import app
 from remymy_api.users import DEMO_USERNAME, init_user_database, open_user_database
 
-DEMO_RATINGS = [
-    ("openrecipes:5210", 5),
-    ("openrecipes:8236", 4),
-    ("openrecipes:9906", 5),
-    ("openrecipes:1052", 3),
-    ("openrecipes:3911", 2),
+DEMO_LIKES = [
+    ("openrecipes:5210", True),
+    ("openrecipes:8236", True),
+    ("openrecipes:9906", True),
+    ("openrecipes:1052", True),
+    ("openrecipes:3911", False),
 ]
 
 
@@ -24,13 +24,13 @@ def users(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
 
 
-def demo_history() -> list[tuple[str, int]]:
+def demo_history() -> list[tuple[str, bool]]:
     connection = open_user_database()
     try:
         return [
-            (row["recipe_id"], row["rating"])
+            (row["recipe_id"], bool(row["liked"]))
             for row in connection.execute(
-                "SELECT h.recipe_id, h.rating FROM user_history h "
+                "SELECT h.recipe_id, h.liked FROM user_history h "
                 "JOIN app_user u ON u.user_id = h.user_id WHERE u.username = ? ORDER BY h.history_id",
                 (DEMO_USERNAME,),
             )
@@ -47,7 +47,7 @@ def test_demo_user_is_injected_once_with_the_schema(users, cache, monkeypatch, c
     with TestClient(app):
         pass
 
-    assert demo_history() == DEMO_RATINGS
+    assert demo_history() == DEMO_LIKES
     connection = open_user_database()
     try:
         (row,) = connection.execute(
@@ -72,7 +72,7 @@ def test_an_existing_demo_history_is_kept(users, monkeypatch):
 
     init_user_database()
 
-    assert demo_history() == [("openrecipes:5210", 5)]
+    assert demo_history() == [("openrecipes:5210", True)]
 
 
 def test_demo_user_is_not_injected_by_default(users, cache, monkeypatch):

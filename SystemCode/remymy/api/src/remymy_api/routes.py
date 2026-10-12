@@ -10,8 +10,17 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 from .db import close_database, open_database, split_preview
 from .cache import read_recommendations, write_recommendations
 from .recommend import recommend
-from .schemas import HealthResponse, RecipeDetail, RecipeListResponse, RecipeSummary, RecommendationResponse
-from .users import fetch_user_history, open_user_database
+from .schemas import (
+    HealthResponse,
+    Preferences,
+    RecipeDetail,
+    RecipeListResponse,
+    RecipeSummary,
+    RecommendationResponse,
+    User,
+    UserHistory,
+)
+from .users import add_history, fetch_user_history, open_user_database
 
 logger = logging.getLogger(__name__)
 
@@ -174,3 +183,44 @@ def get_recommendation(
         logger.debug("Recommendations for user %d served from the cache.", user_id)
 
     return recommendations.model_copy(update={"items": recommendations.items[:top_k]})
+
+@router.get("/api/users/{username}", response_model=User, tags=["users"])
+def get_user(username: str) -> User:
+    """A user by username, for clients that know the username but need the user_id the other routes take."""
+    connection = open_user_database()
+    try:
+        row = connection.execute(
+            "SELECT user_id, username, json(preferences) AS preferences FROM app_user WHERE username = ?", (username,)
+        ).fetchone()
+    except sqlite3.Error:
+        logger.exception("Reading user %r failed.", username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    finally:
+        connection.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return User(id=row["user_id"], username=row["username"],
+                preferences=Preferences.model_validate_json(row["preferences"]))
+
+
+@router.put("/api/recipes/{recipe_id}/rating", response_model=UserHistory, tags=["recipe"])
+def rate_recipe(
+    recipe_id: str,
+    user_id: int,
+    like: bool
+) -> UserHistory:
+    """Record whether the user liked a recipe they cooked, or a catalog food by its fdc_id (a recommended grocery). Rating
+    the same one again changes the like in their history rather than adding another."""
+    connection = open_user_database()
+    try:
+        if connection.execute("SELECT 1 FROM app_user WHERE user_id = ?", (user_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        # add_history checks the recipe or food exists, then updates its row of user_history or inserts one
+        return add_history(connection, user_id, recipe_id, like)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    except sqlite3.Error:
+        logger.exception("Recording whether user %d liked recipe %s failed.", user_id, recipe_id)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    finally:
+        connection.close()

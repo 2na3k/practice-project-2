@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-
-from remymy_api.history import DEFAULT_MAX_ENTRIES, History, RecipeHistory
+from remymy_api.history import DEFAULT_MAX_ENTRIES, History
 from remymy_api.recipe import Recipe
-from remymy_api.schemas import Ingredient
+from remymy_api.schemas import Ingredient, UserHistory
 
 
 def test_a_recipe_keeps_its_own_copy_of_ingredients_and_nutrients():
@@ -21,29 +19,21 @@ def test_a_recipe_keeps_its_own_copy_of_ingredients_and_nutrients():
     assert Recipe("openrecipes:2", []).nutrient_values == {}
 
 
-def test_history_entries_refer_to_one_recipe():
-    soup = Recipe("openrecipes:1", ["tomatoes"])
-    first, again = RecipeHistory(soup, rating=4), RecipeHistory(soup, rating=5)
-    assert first.recipe is again.recipe is soup
-
-
-@pytest.mark.parametrize("rating", [-1, 6])
-def test_ratings_outside_zero_to_five_are_rejected(rating):
-    with pytest.raises(ValueError):
-        RecipeHistory(Recipe("openrecipes:1", []), rating=rating)
-
-
-def test_an_unrated_entry_is_stamped_now():
-    entry = RecipeHistory(Recipe("openrecipes:1", []))
-    assert entry.rating is None
-    assert (datetime.now(timezone.utc) - entry.timestamp).total_seconds() < 5
+def like(recipe_id: str, liked: bool = True) -> UserHistory:
+    return UserHistory(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=liked, recipe_id=recipe_id)
 
 
 def test_history_is_a_queue_that_drops_the_oldest_when_full():
     history = History(1, max_entries=2)
-    recipes = [Recipe(f"openrecipes:{n}", []) for n in (1, 2, 3)]
-    for recipe in recipes:
-        history.add(RecipeHistory(recipe, rating=3))
+    for recipe_id in ("openrecipes:1", "openrecipes:2", "openrecipes:3"):
+        history.add(like(recipe_id))
     assert len(history) == 2
-    assert [entry.recipe.recipe_id for entry in history] == ["openrecipes:2", "openrecipes:3"]
+    assert [entry.recipe_id for entry in history] == ["openrecipes:2", "openrecipes:3"]
     assert History(2).history.maxlen == DEFAULT_MAX_ENTRIES
+
+
+def test_history_keeps_each_entrys_like():
+    history = History(1)
+    history.add(like("openrecipes:1", liked=False))
+    history.add(like("openrecipes:1"))
+    assert [entry.like for entry in history] == [False, True]

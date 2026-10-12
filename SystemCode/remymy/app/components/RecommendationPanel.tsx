@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { LoaderCircle, RotateCcw, ShoppingBasket } from "lucide-react";
+import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
+import { saveRecipeRating } from "@/lib/recipes";
 import {
   RECOMMENDATION_USERNAME,
   fetchRecommendations,
@@ -17,6 +19,8 @@ export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: num
   const [result, setResult] = useState<Recommendations | null>(null);
   const [error, setError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
+  // what the user said about each pick this session, by its id
+  const [ratings, setRatings] = useState<Record<string, RecipeRatingState>>({});
 
   useEffect(() => {
     const controller = new AbortController();
@@ -34,6 +38,15 @@ export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: num
     setError("");
     setResult(null);
     setRetryNonce((current) => current + 1);
+  };
+
+  // A pick is a catalog food, and the Data API's rating route takes its fdc_id as the recipe_id.
+  const rate = (id: string, like: boolean) => {
+    const update = (next: RecipeRatingState) => setRatings((current) => ({ ...current, [id]: { ...current[id], ...next } }));
+    update({ saving: true, error: undefined });
+    saveRecipeRating(id, RECOMMENDATION_USERNAME, like)
+      .then((saved) => update({ like: saved.like, saving: false }))
+      .catch((reason) => update({ saving: false, error: reason instanceof Error ? reason.message : "Your rating could not be saved." }));
   };
 
   const loading = !result && !error;
@@ -63,7 +76,10 @@ export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: num
           {result.items.map((item) => (
             <li className="for-you-item" key={item.id}>
               <span className="for-you-name">{item.title}</span>
-              <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>
+              <div className="for-you-item-footer">
+                <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>
+                <RecipeLikeButtons title={item.title} rating={ratings[item.id]} onRate={(like) => rate(item.id, like)} />
+              </div>
             </li>
           ))}
         </ol>

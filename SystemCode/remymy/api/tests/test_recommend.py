@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from remymy_api import main, recommend
+from remymy_api import main, recommend, users
 from remymy_api.main import app, load_recommender
 from remymy_api.recipe import Recipe
 from remymy_api.schemas import Ingredient
@@ -40,9 +40,17 @@ class FakeRepository:
         self.digested.append(recipe_id)
         return Recipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
 
+    def food(self, fdc_id: int) -> dict | None:
+        return next((food for food in CATALOG.values() if food["fdc_id"] == fdc_id), None)
 
-def answer(history, top_k: int) -> list[dict]:
-    return RECOMMENDED if any(entry.recipe.ingredients for entry in history) else []
+    def digest_food(self, food_id: str) -> Recipe:
+        self.digested.append(food_id)
+        food = self.food(int(food_id))
+        return Recipe(food_id, [] if food is None else [Ingredient(**food)])
+
+
+def answer(history, recipes, top_k: int) -> list[dict]:
+    return RECOMMENDED if any(recipes[entry.recipe_id].ingredients for entry in history) else []
 
 
 @pytest.fixture
@@ -83,6 +91,8 @@ def stores(tmp_path, monkeypatch):
 def repository(monkeypatch) -> FakeRepository:
     fake = FakeRepository()
     monkeypatch.setattr(recommend, "recipe_repository", fake)
+    # add_history looks a rated catalog food up in it
+    monkeypatch.setattr(users, "recipe_repository", fake)
     return fake
 
 
@@ -94,8 +104,8 @@ def models(recommender, repository):
 
 def seed_alice(stores, cache) -> int:
     alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", rating=4)
-    add_history(stores, alice.id, "openrecipes:2")
+    add_history(stores, alice.id, "openrecipes:1", like=True)
+    add_history(stores, alice.id, "openrecipes:2", like=False)
     return alice.id
 
 
@@ -123,10 +133,13 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
     history = call["history"]
     assert history.user_id == alice
     # oldest first, each recipe's lines matched once ("salt" twice, "water" to nothing)
-    assert [(entry.recipe.recipe_id, entry.rating) for entry in history] == [
-        ("openrecipes:1", 4), ("openrecipes:2", None),
+    assert [(entry.recipe_id, entry.like) for entry in history] == [
+        ("openrecipes:1", True), ("openrecipes:2", False),
     ]
-    assert [[ingredient.fdc_id for ingredient in entry.recipe.ingredients] for entry in history] == [[1, 2], [3]]
+    recipes = call["recipes"]
+    assert [[ingredient.fdc_id for ingredient in recipes[entry.recipe_id].ingredients] for entry in history] == [
+        [1, 2], [3],
+    ]
     today = datetime.now(timezone.utc).date()
     assert all(entry.timestamp.date() == today for entry in history)
 
@@ -135,21 +148,34 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
     assert cache.ttls[f"recommendations:{alice}"] == 86400
 
 
-def test_a_recipe_rated_twice_is_digested_once_and_both_ratings_refer_to_it(stores, models, repository, cache):
+def test_rating_a_recipe_again_changes_its_like(stores, models, repository, cache):
     alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", rating=2)
-    add_history(stores, alice.id, "openrecipes:1", rating=5)
+    add_history(stores, alice.id, "openrecipes:1", like=False)
+    add_history(stores, alice.id, "openrecipes:1", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice")
 
     assert response.status_code == 200
-    first, again = models.calls[0]["history"]
-    assert (first.rating, again.rating) == (2, 5)
-    assert first.recipe is again.recipe
+    (call,) = models.calls
+    assert [(entry.recipe_id, entry.like) for entry in call["history"]] == [("openrecipes:1", True)]
     assert repository.digested == ["openrecipes:1"]
-    # each rating counts the recipe's foods: tomatoes 2.0 and salt 1.0, twice
+    # tomatoes 2.0 and salt 1.0
     assert response.json()["profile"]["avg_price"] == pytest.approx(1.5)
+
+
+def test_a_rated_grocery_goes_to_the_model_as_itself(stores, models, repository, cache):
+    alice = create_user(stores, cache, "alice")
+    # "Apples, raw" of CATALOG, by its fdc_id, as the groceries panel rates it
+    add_history(stores, alice.id, "3", like=True)
+
+    with TestClient(app) as client:
+        response = client.get("/api/recommend/alice")
+
+    (call,) = models.calls
+    assert [(entry.recipe_id, entry.like) for entry in call["history"]] == [("3", True)]
+    assert [ingredient.fdc_id for ingredient in call["recipes"]["3"].ingredients] == [3]
+    assert response.json()["profile"]["avg_price"] == pytest.approx(3.0)
 
 
 def test_later_requests_are_served_from_the_cache(stores, models, cache):
@@ -190,7 +216,7 @@ def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
 
 def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache):
     bob = create_user(stores, cache, "bob")
-    add_history(stores, bob.id, "openrecipes:3", rating=5)
+    add_history(stores, bob.id, "openrecipes:3", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/bob")

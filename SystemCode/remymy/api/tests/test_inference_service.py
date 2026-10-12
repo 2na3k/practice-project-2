@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 
 from test_recipe_repository import catalog_food, food as csv_food, write_catalog
 
-from remymy_api.history import History, RecipeHistory
+from remymy_api.history import History
 from remymy_api.inference.service import Recommender, catalog_recipes
 from remymy_api.repository.recipe_repository import RecipeRepository
-from remymy_api.schemas import ItemPrice
+from remymy_api.schemas import ItemPrice, UserHistory
 
 
 def test_catalog_recipes_are_the_rerankers_input_format():
@@ -52,9 +52,10 @@ def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatc
     recommender = Recommender.load(repository)
     soup = repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "unknown thing"])
     history = History(1)
-    history.add(RecipeHistory(soup, rating=5, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc)))
+    history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
+                            recipe_id="openrecipes:1"))
 
-    items = recommender.recommend(history, top_k=3)
+    items = recommender.recommend(history, {"openrecipes:1": soup}, top_k=3)
 
     assert [ingredient.fdc_id for ingredient in soup.ingredients] == [1, 2]
     assert 0 < len(items) <= 3
