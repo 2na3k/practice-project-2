@@ -55,6 +55,18 @@ newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
 recipe database; SQLite cannot enforce that across files, so `add_history`
 checks it in code.
 
+## Catalog database
+
+`RecommendRepository` (`src/remymy_api/repository/recommend_repository.py`)
+reads the priced food catalog from a third SQLite file,
+`CATALOG_DATABASE_PATH` (default `/state/remymy-catalog.db`), built from the
+catalog CSV at `CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`).
+Creating the repository creates the file and table if they are missing, reads
+the stored ids with `SELECT DISTINCT fdc_id`, and inserts only the CSV rows
+whose `fdc_id` is not among them; stored rows are not updated. Without the CSV
+an existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
+`foods_by_ids`, `food` and `search` (case-insensitive on the description).
+
 ## Try it in Swagger
 
 Open http://localhost:8002/docs (or just http://localhost:8002/). With
@@ -77,6 +89,8 @@ python3 serve.py
 
 `serve.py` fills in local defaults for anything you have not set:
 `DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./remymy-users.db`,
+`CATALOG_PATH=../data/price_mapped_nutrients.csv`,
+`CATALOG_DATABASE_PATH=./remymy-catalog.db`,
 `REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis must be
 running, since the API sends model jobs through it. Start the model service
 with `python3 serve.py` in `../ml_models`; it takes jobs from the same Redis.

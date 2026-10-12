@@ -8,6 +8,8 @@ sys.path.insert(0, str(HERE / "src"))
 LOCAL_DEFAULTS = {
     "DATABASE_PATH": str(HERE.parent / "data" / "remymy-food.db"),
     "USER_DATABASE_PATH": str(HERE / "remymy-users.db"),
+    "CATALOG_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
+    "CATALOG_DATABASE_PATH": str(HERE / "remymy-catalog.db"),
     "REDIS_URL": "redis://localhost:6379/0",
     "SEED_DEMO_USER": "true",
 }

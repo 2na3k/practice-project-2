@@ -269,25 +269,6 @@ class Reranker(BaseReranker):
         return torch.sigmoid(logits).cpu()
 
 
-def load_catalog(path):
-    """price_mapped_nutrients.csv → recipes in the reranker's input format, in file order.
-
-    product / adj / verb are already NER output, so each phrase becomes one ingredient of "entities" and no tagging
-    is needed. total_price is 0 whenever an item is unpriced, so price is the sum of item_prices instead (as in
-    recipe_clustering.ipynb). Missing nutrients (sugars_g for 13% of rows) take the catalog median."""
-    frame = pd.read_csv(path)
-    nutrients = frame[list(CATALOG_NUTRIENTS.values())]
-    nutrients = nutrients.fillna(nutrients.median())
-    prices = frame["item_prices"].map(lambda value: float(sum(ast.literal_eval(value).values())))
-    recipes = []
-    for row, nutrient_row, price in zip(frame.to_dict("records"), nutrients.to_dict("records"), prices):
-        recipes.append({"fdc_id": int(row["fdc_id"]), "name": row["description"], "price": price,
-                        "nutrients": {key: float(nutrient_row[column]) for key, column in CATALOG_NUTRIENTS.items()},
-                        "entities": {field: [[phrase] for phrase in ast.literal_eval(row[field])]
-                                     for field in TEXT_COLUMNS}})
-    return recipes
-
-
 def fingerprint(*paths):
     """sha256 over the files' bytes: the index is stale when the model or the catalog changes."""
     digest = hashlib.sha256()
