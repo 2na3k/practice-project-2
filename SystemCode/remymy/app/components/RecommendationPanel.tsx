@@ -12,7 +12,8 @@ import {
 
 const TOP_K = 6;
 
-export function RecommendationPanel() {
+// onItemCount hears how many foods each successful load returned; pass a stable function, such as a state setter.
+export function RecommendationPanel({ onItemCount }: { onItemCount?: (count: number) => void } = {}) {
   const [result, setResult] = useState<Recommendations | null>(null);
   const [error, setError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
@@ -24,6 +25,10 @@ export function RecommendationPanel() {
       .catch((reason) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Recommendations could not be loaded."); });
     return () => controller.abort();
   }, [retryNonce]);
+
+  useEffect(() => {
+    if (result) onItemCount?.(result.items.length);
+  }, [result, onItemCount]);
 
   const retry = () => {
     setError("");

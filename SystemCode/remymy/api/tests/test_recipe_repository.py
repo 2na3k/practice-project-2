@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from remymy_api.repository.recipe_repository import RecipeRepository
+from remymy_api.repository.recipe_repository import RecipeRepository, ingredient_index, name_key
+from remymy_api.schemas import CatalogFood, ItemPrice
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -23,6 +24,20 @@ def food(fdc_id: int, description: str = "Apples, raw", sugars_g: str = "10.4") 
         "protein_g": "0.26", "fat_g": "0.17", "carb_g": "13.81", "energy_kcal": "52.0", "fiber_g": "2.4",
         "sodium_mg": "1.0", "cholesterol_mg": "0.0", "satfat_g": "0.028", "sugars_g": sugars_g,
     }
+
+
+def catalog_food(fdc_id: int, description: str, **values: object) -> CatalogFood:
+    fields = {
+        "fdc_id": fdc_id, "description": description, "product": ["apple"],
+        "item_prices": {"apple": ItemPrice(price=2.5, quantity=500.0)}, "item_unit_prices": {"apple": 0.5},
+        "item_routes": {"apple": "average"}, "matched_variations": {}, "unpriced_items": [],
+        "priced_items": 1, "total_items": 1, "priced_share": 1.0, "items_without_unit_price": 0,
+        "adj": ["fresh"], "verb": [], "total_price": 2.5, "basket_per_100": 0.5,
+        "protein_g": 1.0, "fat_g": 1.0, "carb_g": 1.0, "energy_kcal": 10.0, "fiber_g": 1.0,
+        "sodium_mg": 1.0, "cholesterol_mg": 0.0, "satfat_g": 0.1, "sugars_g": 10.0,
+    }
+    fields.update(values)
+    return CatalogFood(**fields)
 
 
 def write_catalog(path: Path, rows: list[dict[str, str]]) -> Path:
@@ -124,3 +139,44 @@ def test_search_matches_the_description_case_insensitively(repository):
     assert [food.fdc_id for food in repository.search("APPLE")] == [1, 2]
     assert [food.fdc_id for food in repository.search("apple", limit=1, offset=1)] == [2]
     assert repository.search("tofu") == []
+
+
+def test_ingredient_index_keeps_one_fully_priced_food_per_name():
+    index = ingredient_index([
+        catalog_food(4, "Bread, rye", total_price=9.0),
+        catalog_food(1, "Bread, white", priced_share=0.5, total_price=0.0),
+        catalog_food(2, "Bread, wheat", total_price=3.0),
+        catalog_food(3, "Bread, multigrain", total_price=3.0, fiber_g=None),
+        catalog_food(5, "Apples, raw", total_price=0.0),
+    ])
+    bread = index[name_key("Bread")]
+    # white is half priced and left out; of 3.0, 3.0 and 9.0 the median is 3.0, a tie the lower fdc_id wins
+    assert bread.fdc_id == 2 and bread.price == 3.0
+    assert name_key("Apples") not in index
+    assert "fiber_g" not in ingredient_index([catalog_food(3, "Bread, multigrain", fiber_g=None)])[
+        name_key("Bread")].nutrient_values
+
+
+def test_digest_matches_each_line_once_and_averages_the_matched_nutrients(tmp_path):
+    bread = food(2, "Bread, white", sugars_g="")
+    bread.update(energy_kcal="266.0", total_price="2.0")
+    repository = RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", [food(1), bread]))
+    # apple and bread
+    assert repository.load_ingredient_index() == 2
+
+    toast = repository.digest("openrecipes:7", ["apples", "Apples", "bread", "unknown thing"])
+
+    assert toast.recipe_id == "openrecipes:7"
+    assert [(ingredient.fdc_id, ingredient.price) for ingredient in toast.ingredients] == [(1, 3.0), (2, 2.0)]
+    assert toast.nutrient_values["energy_kcal"] == (52.0 + 266.0) / 2
+    # bread has no sugars value, so the apple's is the mean
+    assert toast.nutrient_values["sugars_g"] == 10.4
+    assert repository.digest("openrecipes:8", ["unknown thing"]).ingredients == []
+
+
+def test_name_key_drops_case_asides_punctuation_and_stop_words_then_singularizes():
+    assert name_key("Tomatoes (ripe), chopped") == "tomato chopped"
+    assert name_key("2 cups of the Apples") == "2 cup apple"
+    # negations are kept, and a lone % is dropped
+    assert name_key("No-salt butter, 100% %") == "no salt butter 100%"
+    assert name_key("(optional)") == ""

@@ -36,9 +36,10 @@ sequenceDiagram
     A->>R: recommendations:{user_id}
     alt cache miss
         A->>D: ingredient lines of each history recipe
+        A->>A: recipe_repository digests each recipe into a Recipe; the ratings go into a History
         A->>M: recommend(history, top_k=50)
-        M-->>A: matched foods + scored items
-        A->>A: compute UserBuyingProfile
+        M-->>A: scored items
+        A->>A: compute UserBuyingProfile from the History
         A->>R: store recommendations:{user_id} (1 day TTL)
     end
     A-->>C: profile + first top_k items, or 503 when no catalog is loaded
@@ -194,25 +195,32 @@ At startup the API:
 2. Embeds every catalog food with the ItemEncoder and builds an HNSW index with
    cosine distance (M 16, ef 200). The index is saved under `INDEX_DIR` and
    reused while the model files and the catalog's foods are unchanged.
-3. Builds the ingredient index from the same foods. Each catalog food gets a
-   key: the first comma-separated part of its FDC description, normalized
-   (lowercase, parentheses and punctuation removed, stop words dropped,
-   singularized), so "Waffles, buttermilk, frozen" becomes `waffle`. For each
-   key it keeps one fully priced food, the one whose price is closest to the
-   median price of that key's foods. This gives 1,381 keys. The method is the
-   exact-match step of `map_recipe_nutrients.ipynb`.
+3. Has the repository build its ingredient index from the catalog
+   (`recipe_repository.load_ingredient_index()`), which `digest` matches
+   ingredient lines with. Each catalog food gets a key: the first
+   comma-separated part of its FDC description, normalized by the repository's
+   `name_key` (lowercase, parentheses and punctuation removed, stop words
+   dropped, singularized), so "Waffles, buttermilk, frozen" becomes `waffle`.
+   For each key it keeps one fully priced food, the one whose price is closest
+   to the median price of that key's foods. This gives 1,381 keys. The method
+   is the exact-match step of `map_recipe_nutrients.ipynb`.
 
 For each recommendation (one at a time) it:
 
-1. Normalizes each ingredient line the same way and looks it up in the
-   ingredient index. Each food counts once per history entry, in order.
-2. Turns every matched food into a history item with its entry's rating and date.
-3. Averages the history items' normalized embeddings into one query vector and
+1. Digests each rated recipe with `recipe_repository.digest`: normalizes each
+   ingredient line with `name_key` and looks it up in the ingredient index, a
+   food once per recipe. The result is a `Recipe` holding the matched foods and
+   the mean of their nutrients. A recipe rated twice is digested once.
+2. Builds the user's `History`: one `RecipeHistory` per rating, oldest first,
+   each referring to its `Recipe`.
+3. Turns every food of each rating's recipe into a history item with that
+   rating's rating and date.
+4. Averages the history items' normalized embeddings into one query vector and
    retrieves the 100 nearest catalog foods, excluding the history itself.
-4. Drops candidates with cosine similarity 0.97 or more to any history food,
+5. Drops candidates with cosine similarity 0.97 or more to any history food,
    since the catalog holds many near-identical foods.
-5. Scores the rest with the reranker.
-6. Picks `top_k` by maximal marginal relevance, with weight 0.5 on P(like) and
+6. Scores the rest with the reranker.
+7. Picks `top_k` by maximal marginal relevance, with weight 0.5 on P(like) and
    0.5 on diversity. It never picks two foods with cosine similarity 0.97 or
    more, so it can return fewer than `top_k`.
 
@@ -322,51 +330,41 @@ one call at a time.
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
-| `history` | list of `{rating, date, ingredients}` | One entry per rated recipe |
-| `history[].rating` | number or `None` | `None` counts as the user's mean |
-| `history[].date` | `YYYY-MM-DD` | Orders the history and cuts the windows |
-| `history[].ingredients` | list of ingredient lines | Matched to catalog foods by name key |
+| `history` | `History` | The user's ratings, oldest first, one `RecipeHistory` each |
+| `history[].recipe` | `Recipe` | The rated recipe as `recipe_repository.digest` made it; its `ingredients` are the catalog foods its lines matched |
+| `history[].rating` | 0–5 or `None` | `None` counts as the user's mean |
+| `history[].timestamp` | datetime | Its date orders the history and cuts the windows |
 | `top_k` | integer | Recommendations kept; the route asks for 50 |
 | `candidates` | integer | Foods retrieved before reranking, default 100 |
 
 For this history:
 
-```json
-[
-  {"rating": 5, "date": "2026-09-01", "ingredients": ["chicken breast", "tomatoes", "salt", "butter"]},
-  {"rating": 2, "date": "2026-09-10", "ingredients": ["apples", "butter"]}
-]
+```python
+from datetime import datetime, timezone
+
+from remymy_api.history import History, RecipeHistory
+from remymy_api.repository.recipe_repository import recipe_repository
+
+soup = recipe_repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "salt", "butter"])
+apples = recipe_repository.digest("openrecipes:2", ["apples", "butter"])
+history = History(user_id=1)
+history.add(RecipeHistory(soup, rating=5, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc)))
+history.add(RecipeHistory(apples, rating=2, timestamp=datetime(2026, 9, 10, tzinfo=timezone.utc)))
+items = recommender.recommend(history, top_k=5)
 ```
 
-it returns one list of matched foods per history entry, in history order, and
-the scored items in MMR pick order. With `top_k=5`, only the first food of each
-entry, three nutrients per food and the first item shown:
+`soup.ingredients` holds four foods ("Chicken breast, NS as to cooking method,
+skin eaten", "Tomatoes, sun-dried", "Salt, table" and "Butter, Clarified butter
+(ghee)") and `apples.ingredients` the Fuji apples and the same butter.
+`recommend` returns the scored items in MMR pick order. The first one:
 
 ```json
-{
-  "ingredients": [
-    [
-      {"fdc_id": 172962, "name": "Chicken breast, fat-free, mesquite flavor, sliced", "price": 4.95,
-       "nutrient_values": {"energy_kcal": 80.0, "protein_g": 16.8, "fat_g": 0.39}}
-    ],
-    [
-      {"fdc_id": 167793, "name": "Apples, raw, fuji, with skin (Includes foods for USDA's Food Distribution Program)",
-       "price": 5.9, "nutrient_values": {"energy_kcal": 63.0, "protein_g": 0.2, "fat_g": 0.18}}
-    ]
-  ],
-  "items": [
-    {"fdc_id": 2709611, "name": "Mustard greens, frozen, cooked, fat added", "price": 2.12,
-     "p_like": 0.710, "similarity": 0.886}
-  ]
-}
+{"fdc_id": 2709611, "name": "Mustard greens, frozen, cooked, fat added", "price": 3.17,
+ "p_like": 0.725, "similarity": 0.849}
 ```
-
-In full, the first entry matches four foods (chicken breast, "Tomatoes,
-sun-dried", "Salt, table" and "Butter, Clarified butter (ghee)") and the second
-matches apples and the same butter.
 
 `similarity` is the cosine similarity between the food and the user's query
-vector. When no ingredient matches, `items` is empty.
+vector. When no recipe in the history matched a food, `items` is empty.
 
 ### How a recommendation request is served
 
@@ -379,9 +377,11 @@ vector. When no ingredient matches, `items` is empty.
    trimmed to `top_k`.
 4. **On a miss:**
    1. Read the ingredient lines of each history recipe from the recipe database.
-   2. Call the inference service with `top_k=50`.
-   3. Compute the `UserBuyingProfile` from the matched foods it returns.
-   4. Store the result in Redis for `CACHE_TTL_SECONDS` (default 86400, one
+   2. Digest each recipe with `recipe_repository.digest` and put the ratings in
+      the user's `History`, oldest first.
+   3. Call the inference service with the `History` and `top_k=50`.
+   4. Compute the `UserBuyingProfile` from the foods of the `History`'s recipes.
+   5. Store the result in Redis for `CACHE_TTL_SECONDS` (default 86400, one
       day), then return it trimmed to `top_k`.
 
 Because the API always asks for 50 items, one cache entry serves any `top_k`.
@@ -402,6 +402,16 @@ API schemas, in [`api/src/remymy_api/schemas.py`](api/src/remymy_api/schemas.py)
 | `UserBuyingProfile` | `user_id`, `avg_price`, `avg_nutrient_values` |
 | `RecommendedRecipe` | `id`, `title`, `score` |
 | `RecommendationResponse` | `profile` (`UserBuyingProfile` or `null`), `items` (list of `RecommendedRecipe`) |
+
+What the recommend route hands the inference service, in
+[`api/src/remymy_api/recipe.py`](api/src/remymy_api/recipe.py) and
+[`api/src/remymy_api/history.py`](api/src/remymy_api/history.py):
+
+| Class | Holds |
+| --- | --- |
+| `Recipe` | `recipe_id`, `ingredients` (the `Ingredient`s its lines matched), `nutrient_values` (their mean, per 100 g) |
+| `RecipeHistory` | `recipe` (a reference to a `Recipe`, not a copy), `rating` (0–5 or `None`), `timestamp` |
+| `History` | `user_id` and `history`, a queue of `RecipeHistory`, oldest first; past 50, each new rating drops the oldest |
 
 Storage:
 

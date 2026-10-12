@@ -50,7 +50,7 @@ Open [http://localhost:3000](http://localhost:3000). The app container calls the
 ## Product behavior
 
 - Discover opens with a short welcome in the chat composer; once the user sends a request, it becomes an active conversation with bounded recommendations alongside the response.
-- Above the welcome, "Picked for you" shows the Data API's model recommendations: grocery foods with their predicted chance of being liked, and the buying profile (average ingredient price and nutrients) of the rated recipes. The app has no sign-in, so it asks for the API's seeded `demo` user through its `/api/recommend/[username]` route; set `DATA_API_URL` when the API is not at `http://localhost:8002`.
+- Above the welcome, "Picked for you" shows the Data API's model recommendations: grocery foods with their predicted chance of being liked, and the buying profile (average ingredient price and nutrients) of the rated recipes. The app has no sign-in, so it asks for the API's seeded `demo` user through its `/api/recommend/[username]` route; set `DATA_API_URL` when the API is not at `http://localhost:8002`. The "Less overthinking. More good food." banner shows under it only when the API returns no picks; while they load, after an error, or once there are picks, the query box follows the panel directly.
 - Meals remains a separate full grid for catalog browsing, meal details, and locally saved meals.
 - Plain-language requests are interpreted into dietary, time, cuisine, exclusion, and goal preferences.
 - Results are filtered by hard constraints first, then ranked by query matches and preference fit.

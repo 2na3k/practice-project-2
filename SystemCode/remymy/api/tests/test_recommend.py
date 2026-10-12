@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from remymy_api import main, recommend
 from remymy_api.main import app, load_recommender
+from remymy_api.recipe import Recipe
+from remymy_api.schemas import Ingredient
 from remymy_api.users import add_history, create_user, init_user_database, open_user_database
 
 
@@ -28,12 +30,19 @@ RECOMMENDED = [
 ]
 
 
-def answer(history: list[dict], top_k: int) -> dict:
-    matched = [
-        [CATALOG[text] for text in dict.fromkeys(entry["ingredients"]) if text in CATALOG]
-        for entry in history
-    ]
-    return {"ingredients": matched, "items": RECOMMENDED if any(matched) else []}
+class FakeRepository:
+    """Stands in for the shared recipe_repository: an ingredient line matches the CATALOG food it names exactly."""
+
+    def __init__(self) -> None:
+        self.digested: list[str] = []
+
+    def digest(self, recipe_id: str, lines: list[str]) -> Recipe:
+        self.digested.append(recipe_id)
+        return Recipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
+
+
+def answer(history, top_k: int) -> list[dict]:
+    return RECOMMENDED if any(entry.recipe.ingredients for entry in history) else []
 
 
 @pytest.fixture
@@ -71,7 +80,14 @@ def stores(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def models(recommender):
+def repository(monkeypatch) -> FakeRepository:
+    fake = FakeRepository()
+    monkeypatch.setattr(recommend, "recipe_repository", fake)
+    return fake
+
+
+@pytest.fixture
+def models(recommender, repository):
     recommender.handler = answer
     return recommender
 
@@ -102,20 +118,38 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
     }
     assert [item["id"] for item in body["items"]] == ["167516", "175237"]
 
-    today = datetime.now(timezone.utc).date().isoformat()
-    assert models.calls == [
-        {
-            "history": [
-                {"rating": None, "date": today, "ingredients": ["apple"]},
-                {"rating": 4, "date": today, "ingredients": ["tomatoes", "salt", "salt", "water"]},
-            ],
-            "top_k": recommend.MAX_TOP_K,
-        },
+    (call,) = models.calls
+    assert call["top_k"] == recommend.MAX_TOP_K
+    history = call["history"]
+    assert history.user_id == alice
+    # oldest first, each recipe's lines matched once ("salt" twice, "water" to nothing)
+    assert [(entry.recipe.recipe_id, entry.rating) for entry in history] == [
+        ("openrecipes:1", 4), ("openrecipes:2", None),
     ]
+    assert [[ingredient.fdc_id for ingredient in entry.recipe.ingredients] for entry in history] == [[1, 2], [3]]
+    today = datetime.now(timezone.utc).date()
+    assert all(entry.timestamp.date() == today for entry in history)
 
     cached = json.loads(cache.store[f"recommendations:{alice}"])
     assert len(cached["items"]) == 3
     assert cache.ttls[f"recommendations:{alice}"] == 86400
+
+
+def test_a_recipe_rated_twice_is_digested_once_and_both_ratings_refer_to_it(stores, models, repository, cache):
+    alice = create_user(stores, cache, "alice")
+    add_history(stores, alice.id, "openrecipes:1", rating=2)
+    add_history(stores, alice.id, "openrecipes:1", rating=5)
+
+    with TestClient(app) as client:
+        response = client.get("/api/recommend/alice")
+
+    assert response.status_code == 200
+    first, again = models.calls[0]["history"]
+    assert (first.rating, again.rating) == (2, 5)
+    assert first.recipe is again.recipe
+    assert repository.digested == ["openrecipes:1"]
+    # each rating counts the recipe's foods: tomatoes 2.0 and salt 1.0, twice
+    assert response.json()["profile"]["avg_price"] == pytest.approx(1.5)
 
 
 def test_later_requests_are_served_from_the_cache(stores, models, cache):

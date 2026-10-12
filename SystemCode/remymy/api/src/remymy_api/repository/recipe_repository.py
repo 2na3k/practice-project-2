@@ -4,12 +4,21 @@ import ast
 import csv
 import logging
 import os
+import re
 import sqlite3
+from collections import defaultdict
 from collections.abc import Iterable
 from contextlib import closing
+from functools import cache, cached_property
 from pathlib import Path
+from statistics import fmean, median
 
-from ..schemas import CatalogFood
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+from ..recipe import Recipe
+from ..schemas import CatalogFood, Ingredient
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,14 @@ LITERAL_COLUMNS = (
 )
 CONVERTERS = {"INTEGER": int, "REAL": float, "TEXT": str}
 
+# The nutrients a matched ingredient reports, for its recipe's nutrient values and the buying profile.
+NUTRIENT_COLUMNS = (
+    "energy_kcal", "protein_g", "fat_g", "satfat_g", "carb_g", "sugars_g", "fiber_g", "sodium_mg", "cholesterol_mg",
+)
+
+# map_recipe_nutrients.ipynb keeps these of NLTK's English stop words: the single letters and the negations.
+KEPT_STOP_WORDS = {"a", "d", "i", "m", "no", "nor", "not", "o", "s", "t", "y"}
+
 
 def catalog_path() -> Path:
     return Path(os.getenv("CATALOG_PATH", DEFAULT_CATALOG_PATH))
@@ -69,8 +86,60 @@ def food_from_row(row: sqlite3.Row) -> CatalogFood:
         values[column] = ast.literal_eval(values[column])
     return CatalogFood(**values)
 
+
+@cache
+def text_tools() -> tuple[set[str], WordNetLemmatizer]:
+    """The stop words name_key drops and the lemmatizer it singularizes with, loaded the first time a name is
+    normalized. The NLTK data they read is downloaded then if it is missing; the API image ships it."""
+    lemmatizer = WordNetLemmatizer()
+    try:
+        words = stopwords.words("english")
+        lemmatizer.lemmatize("tomatoes", "n")
+    except LookupError:
+        for package in ("stopwords", "wordnet", "omw-1.4"):
+            nltk.download(package, quiet=True)
+        words = stopwords.words("english")
+    return set(words) - KEPT_STOP_WORDS, lemmatizer
+
+
+def name_key(text: str) -> str:
+    """An ingredient line or a food's name, normalized as map_recipe_nutrients.ipynb normalizes them to match:
+    lowercased, "(...)" asides, punctuation and stop words dropped, then each word singularized ("Tomatoes (ripe),
+    chopped" → "tomato chopped"). The notebook singularizes with its own plural rules; WordNet's noun lemma stands in
+    for them, as in the reranker."""
+    stop_words, lemmatizer = text_tools()
+    text = re.sub(r"\(.*?\)", " ", text.lower())
+    text = re.sub(r"[^a-z0-9%\s]", " ", text)
+    words = [word for word in text.split() if word not in stop_words and word.strip("%")]
+    return " ".join(lemmatizer.lemmatize(word, "n") for word in words)
+
+
+def ingredient_index(foods: Iterable[CatalogFood]) -> dict[str, Ingredient]:
+    """One fully priced food per name key, the first comma-separated part of the description normalized ("Waffles,
+    buttermilk, frozen" → "waffle"): of a key's foods, the one whose total_price is nearest their median."""
+    groups: dict[str, list[CatalogFood]] = {}
+    for food in sorted(foods, key=lambda food: food.fdc_id):
+        key = name_key(food.description.split(",", 1)[0].strip())
+        if key and food.priced_share == 1 and food.total_price > 0:
+            groups.setdefault(key, []).append(food)
+    index = {}
+    for key, group in groups.items():
+        middle = median(food.total_price for food in group)
+        # min keeps the first of a tie, the lowest fdc_id
+        food = min(group, key=lambda food: abs(food.total_price - middle))
+        index[key] = Ingredient(
+            fdc_id=food.fdc_id,
+            name=food.description,
+            price=food.total_price,
+            nutrient_values={
+                column: value for column in NUTRIENT_COLUMNS if (value := getattr(food, column)) is not None
+            },
+        )
+    return index
+
+
 class RecipeRepository:
-    """The priced food catalog, read from its SQLite database.
+    """The priced food catalog, read from its SQLite database, and the Recipes digested against it.
 
     Creating one brings the database up to date with the catalog CSV first: a missing database is created, and the
     CSV's foods whose fdc_id the table does not hold yet are injected, so a grown catalog adds just its new foods.
@@ -159,6 +228,28 @@ class RecipeRepository:
                 (f"%{query.strip()}%", limit, offset),
             ).fetchall()
         return [food_from_row(row) for row in rows]
+
+    @cached_property
+    def _ingredients(self) -> dict[str, Ingredient]:
+        """The catalog's ingredient_index, built the first time it is needed and kept."""
+        return ingredient_index(self.all_foods())
+
+    def load_ingredient_index(self) -> int:
+        """Build the ingredient index now, so the first recipe digested does not wait for it; returns its name keys'
+        count. Building it again does nothing."""
+        return len(self._ingredients)
+
+    def digest(self, recipe_id: str, lines: Iterable[str]) -> Recipe:
+        """A recipe's ingredient lines → the Recipe the recommender reads. Each line's name key is matched to the
+        food the ingredient index holds for it, a key once however many lines share it; a line no priced food
+        matches is left out. The recipe's nutrient values are the mean of its matched foods'."""
+        keys = dict.fromkeys(name_key(line) for line in lines)
+        ingredients = [self._ingredients[key] for key in keys if key in self._ingredients]
+        nutrients: dict[str, list[float]] = defaultdict(list)
+        for ingredient in ingredients:
+            for name, value in ingredient.nutrient_values.items():
+                nutrients[name].append(value)
+        return Recipe(recipe_id, ingredients, {name: fmean(values) for name, values in sorted(nutrients.items())})
 
 
 # The one repository the app shares, built from CATALOG_PATH / CATALOG_DATABASE_PATH when this module is first

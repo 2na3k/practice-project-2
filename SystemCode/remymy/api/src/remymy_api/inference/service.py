@@ -1,8 +1,8 @@
 """The inference service the recommend route calls, over the catalog RecipeRepository serves.
 
-A history recipe's ingredient lines are matched to catalog foods by name key; those foods, each with its recipe's
-rating and date, are the user's history for the retrieval pipeline, which retrieves, reranks and diversifies the
-catalog's foods for them."""
+A user's History holds their rated Recipes, which RecipeRepository.digest matched to catalog foods; those foods, each
+with its recipe's rating and date, are the user's history for the retrieval pipeline, which retrieves, reranks and
+diversifies the catalog's foods for them."""
 from __future__ import annotations
 
 import logging
@@ -11,17 +11,13 @@ import threading
 from pathlib import Path
 from statistics import median
 
+from ..history import History
 from ..repository.recipe_repository import RecipeRepository
 from ..schemas import CatalogFood
-from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS, normalize_price_text
+from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS
 from .model_inference_score_recommend import CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, TEXT_COLUMNS, RetrievalPipeline
 
 logger = logging.getLogger(__name__)
-
-# The nutrients a matched ingredient reports, for the buying profile.
-NUTRIENT_COLUMNS = (
-    "energy_kcal", "protein_g", "fat_g", "satfat_g", "carb_g", "sugars_g", "fiber_g", "sodium_mg", "cholesterol_mg",
-)
 
 
 def artifact_dir() -> Path:
@@ -56,43 +52,12 @@ def catalog_recipes(foods: list[CatalogFood]) -> list[dict]:
     return recipes
 
 
-def ingredient_index(foods: list[CatalogFood]) -> dict[str, dict[str, object]]:
-    """One fully priced food per name key, the first comma-separated part of the description normalized ("Waffles,
-    buttermilk, frozen" → "waffle"): of a key's foods, the one whose total_price is nearest their median."""
-    groups: dict[str, list[CatalogFood]] = {}
-    for food in sorted(foods, key=lambda food: food.fdc_id):
-        key = normalize_price_text(food.description.split(",", 1)[0].strip())
-        if key and food.priced_share == 1 and food.total_price > 0:
-            groups.setdefault(key, []).append(food)
-    index = {}
-    for key, group in groups.items():
-        middle = median(food.total_price for food in group)
-        # min keeps the first of a tie, the lowest fdc_id
-        food = min(group, key=lambda food: abs(food.total_price - middle))
-        index[key] = {
-            "fdc_id": food.fdc_id,
-            "name": food.description,
-            "price": food.total_price,
-            "nutrient_values": {
-                column: value for column in NUTRIENT_COLUMNS if (value := getattr(food, column)) is not None
-            },
-        }
-    return index
-
-
-def match_entry(index: dict[str, dict[str, object]], texts: list[str]) -> list[dict[str, object]]:
-    keys = dict.fromkeys(normalize_price_text(text) for text in texts)
-    return [index[key] for key in keys if key in index]
-
-
 class Recommender:
-    """The retrieval pipeline and the ingredient index, both built from the repository's catalog."""
+    """The retrieval pipeline, built from the repository's catalog."""
 
-    def __init__(self, repository: RecipeRepository, pipeline: RetrievalPipeline,
-                 ingredients: dict[str, dict[str, object]]) -> None:
+    def __init__(self, repository: RecipeRepository, pipeline: RetrievalPipeline) -> None:
         self.repository = repository
         self.pipeline = pipeline
-        self.ingredients = ingredients
         # One recommendation at a time, as the model service's single queue worker ran them: the pipeline keeps
         # per-user state between calls.
         self.lock = threading.Lock()
@@ -101,18 +66,18 @@ class Recommender:
     def load(cls, repository: RecipeRepository) -> Recommender:
         foods = repository.all_foods()
         pipeline = RetrievalPipeline.from_recipes(catalog_recipes(foods), artifact_dir(), index_dir())
-        ingredients = ingredient_index(foods)
-        logger.info("Recommender loaded: %d catalog foods, %d ingredient keys.", len(foods), len(ingredients))
-        return cls(repository, pipeline, ingredients)
+        # at startup, so the first recommendation does not wait for the repository to build it
+        keys = repository.load_ingredient_index()
+        logger.info("Recommender loaded: %d catalog foods, %d ingredient keys.", len(foods), keys)
+        return cls(repository, pipeline)
 
-    def recommend(self, history: list[dict], top_k: int, candidates: int = 100) -> dict[str, list]:
-        """history holds one {"rating", "date", "ingredients"} per rated recipe. Returns the catalog foods each
-        recipe's ingredients matched ("ingredients", one list per recipe) and the recommended foods ("items")."""
-        matched = [match_entry(self.ingredients, entry["ingredients"]) for entry in history]
+    def recommend(self, history: History, top_k: int, candidates: int = 100) -> list[dict]:
+        """The catalog foods to recommend to the user whose history this is, best first. Each food a rated recipe
+        matched goes to the pipeline with that rating's rating and date."""
         foods = [
-            {"fdc_id": food["fdc_id"], "rating": entry["rating"], "date": entry["date"]}
-            for entry, ingredients in zip(history, matched)
-            for food in ingredients
+            {"fdc_id": ingredient.fdc_id, "rating": entry.rating, "date": entry.timestamp.date().isoformat()}
+            for entry in history
+            for ingredient in entry.recipe.ingredients
         ]
         results = []
         if foods:
@@ -122,10 +87,7 @@ class Recommender:
                 results = self.pipeline.recommend({"history": foods}, n_candidates=candidates, top_k=top_k, log=trace)
         logger.debug("%d history recipes matched %d catalog foods; %d recommended.", len(history), len(foods),
                      len(results))
-        return {
-            "ingredients": matched,
-            "items": [
-                {key: result[key] for key in ("fdc_id", "name", "price", "p_like", "similarity")}
-                for result in results
-            ],
-        }
+        return [
+            {key: result[key] for key in ("fdc_id", "name", "price", "p_like", "similarity")}
+            for result in results
+        ]

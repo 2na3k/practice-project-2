@@ -6,6 +6,7 @@ import pytest
 import redis
 
 from remymy_api import main
+from remymy_api.history import History
 
 
 class FakeCache:
@@ -42,13 +43,10 @@ class FakeRecommender:
     """Stands in for inference.service.Recommender, recording what each recommend call was given."""
 
     def __init__(self) -> None:
-        self.handler: Callable[[list[dict], int], dict] = lambda history, top_k: {
-            "ingredients": [[] for _ in history],
-            "items": [],
-        }
+        self.handler: Callable[[History, int], list[dict]] = lambda history, top_k: []
         self.calls: list[dict] = []
 
-    def recommend(self, history: list[dict], top_k: int) -> dict:
+    def recommend(self, history: History, top_k: int) -> list[dict]:
         self.calls.append({"history": history, "top_k": top_k})
         return self.handler(history, top_k)
 

@@ -72,7 +72,14 @@ Creating the repository creates the file and table if they are missing, reads
 the stored ids with `SELECT DISTINCT fdc_id`, and inserts only the CSV rows
 whose `fdc_id` is not among them; stored rows are not updated. Without the CSV
 an existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
-`foods_by_ids`, `food` and `search` (case-insensitive on the description).
+`foods_by_ids`, `food` and `search` (case-insensitive on the description), and
+`digest`, which turns a recipe's ingredient lines into a `Recipe`
+(`src/remymy_api/recipe.py`): the priced foods the lines match, each line
+normalized by `name_key` and looked up in the ingredient index, and the mean
+of their nutrients. The API builds that index at startup with
+`load_ingredient_index()`; otherwise the first `digest` builds it. The
+recommend route digests each rated recipe once and puts the ratings in the
+user's `History` (`src/remymy_api/history.py`) for the inference service.
 
 The app shares one instance, `recipe_repository` in the same module, created
 when the module is first imported; use it rather than creating another. It is
