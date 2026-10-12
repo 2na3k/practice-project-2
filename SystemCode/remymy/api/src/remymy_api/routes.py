@@ -20,7 +20,7 @@ from .schemas import (
     User,
     UserHistory,
 )
-from .users import add_history, fetch_user_history, open_user_database
+from .users import add_history, fetch_user_history, fetch_user_likes, open_user_database
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +201,22 @@ def get_user(username: str) -> User:
         raise HTTPException(status_code=404, detail="User not found.")
     return User(id=row["user_id"], username=row["username"],
                 preferences=Preferences.model_validate_json(row["preferences"]))
+
+
+@router.get("/api/users/{username}/likes", response_model=dict[str, bool], tags=["users"])
+def get_user_likes(username: str, request: Request) -> dict[str, bool]:
+    """Whether the user liked each recipe or catalog food they rated, by its id, so a client can show it."""
+    connection = open_user_database()
+    try:
+        likes = fetch_user_likes(connection, request.app.state.cache, username)
+    except sqlite3.Error:
+        logger.exception("Reading the likes of %r failed.", username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    finally:
+        connection.close()
+    if likes is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return likes
 
 
 @router.put("/api/recipes/{recipe_id}/rating", response_model=UserHistory, tags=["recipe"])

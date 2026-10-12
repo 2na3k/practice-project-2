@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dataApiError, parseRecipeDetail, parseRecipePage, parseRecipeRating, saveRecipeRating } from "./recipes";
+import { dataApiError, fetchRecipeLikes, parseRecipeDetail, parseRecipePage, parseRecipeRating, saveRecipeRating } from "./recipes";
 
 describe("recipe API contracts", () => {
   it("accepts the narrow list response", () => {
@@ -51,3 +51,23 @@ describe("recipe ratings", () => {
     await expect(saveRecipeRating("openrecipes:1", "nobody", false)).rejects.toThrow("User not found.");
   });
 });
+
+describe("recipe likes from the database", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads the user's likes through the app's route", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ "170138": true, "openrecipes:1": false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchRecipeLikes("demo")).resolves.toEqual({ "170138": true, "openrecipes:1": false });
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe("/api/users/demo/likes");
+  });
+
+  it("rejects a response that is not id to true or false, and passes on the API's reason", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ "170138": "yes" })));
+    await expect(fetchRecipeLikes("demo")).rejects.toThrow("unexpected response");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "User not found." }, { status: 404 })));
+    await expect(fetchRecipeLikes("nobody")).rejects.toThrow("User not found.");
+  });
+});
+

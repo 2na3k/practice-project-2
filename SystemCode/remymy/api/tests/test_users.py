@@ -311,3 +311,25 @@ def test_a_catalog_food_is_rated_by_its_fdc_id(users, cache, monkeypatch):
     monkeypatch.setattr(users_module, "recipe_repository", None)
     with pytest.raises(LookupError):
         add_history(users, alice.id, "169286", like=False)
+
+
+def test_the_likes_route_gives_each_rated_ids_latest_like(users, cache, monkeypatch):
+    alice = create_user(users, cache, "alice")
+    create_user(users, cache, "bob")
+    monkeypatch.setattr(users_module, "recipe_repository", OneFoodCatalog())
+    add_history(users, alice.id, "openrecipes:1", like=True)
+    add_history(users, alice.id, "169286", like=False)
+    # a second row for a recipe, as an older database can hold: the later one counts
+    with users:
+        users.execute("INSERT INTO user_history (user_id, timestamp, liked, recipe_id) "
+                      "VALUES (?, '2000-01-01T00:00:00.000Z', 0, 'openrecipes:1')", (alice.id,))
+
+    with TestClient(app) as client:
+        liked = client.get("/api/users/alice/likes")
+        none = client.get("/api/users/bob/likes")
+        missing = client.get("/api/users/nobody/likes")
+
+    assert liked.json() == {"openrecipes:1": True, "169286": False}
+    assert none.json() == {}
+    assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
+

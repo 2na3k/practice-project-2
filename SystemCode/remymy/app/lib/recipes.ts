@@ -117,3 +117,14 @@ export async function saveRecipeRating(id: string, username: string, like: boole
   if (!response.ok) throw new Error(dataApiError(body, "Your rating could not be saved."));
   return parseRecipeRating(body);
 }
+
+// Whether the user liked each recipe they rated, by id, as the Data API holds it.
+export async function fetchRecipeLikes(username: string, signal?: AbortSignal): Promise<Record<string, boolean>> {
+  const response = await fetch(`/api/users/${encodeURIComponent(username)}/likes`, { cache: "no-store", signal });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(dataApiError(body, "Your likes could not be loaded."));
+  if (!body || typeof body !== "object" || Array.isArray(body) || !Object.values(body).every((like) => typeof like === "boolean")) {
+    throw new Error("Likes service returned an unexpected response.");
+  }
+  return body as Record<string, boolean>;
+}

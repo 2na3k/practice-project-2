@@ -280,6 +280,7 @@ For each recommendation (one at a time) it:
 | GET | `/api/recipes/{recipe_id}` | none | Title, ingredient lines, instruction steps; 404 if unknown |
 | GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
+| GET | `/api/users/{username}/likes` | none | Whether the user liked each recipe or catalog food they rated, `{id: true or false}`, from their latest `user_history` row for it; 404 if unknown |
 | PUT | `/api/recipes/{recipe_id}/rating` | `user_id`, `like` (`true` or `false`) | Adds whether the user liked the recipe to their history, and returns that `UserHistory` row; 404 for an unknown user or recipe |
 
 #### `GET /api/recommend/{username}`

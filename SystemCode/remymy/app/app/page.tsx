@@ -38,7 +38,7 @@ import type {
   ChatTurn,
   ConnectionStatus,
 } from "@/lib/chat-types";
-import { fetchRecipeDetail, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
+import { fetchRecipeDetail, fetchRecipeLikes, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
 import { RECOMMENDATION_USERNAME } from "@/lib/recommendations";
 import { parseLikes, parseSavedFoods, type SavedFood } from "@/lib/saved";
 
@@ -143,7 +143,7 @@ export default function HomePage() {
   const [savedFoods, setSavedFoods] = useState<SavedFood[]>([]);
   // like or not of each demo meal, by meal id, kept in this browser
   const [mealLikes, setMealLikes] = useState<Record<string, boolean>>({});
-  // like or not of each recommended recipe, by fdc_id, saved with the Data API; the chosen likes are also kept in this browser
+  // like or not of each recommended recipe, by fdc_id, as the Data API's users database holds it
   const [foodRatings, setFoodRatings] = useState<Record<string, RecipeRatingState>>({});
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
   const [chat, setChat] = useState<ChatMessage[]>([]);
@@ -215,14 +215,12 @@ export default function HomePage() {
     let storedSaved: string[] | null = null;
     let storedFoods: SavedFood[] = [];
     let storedMealLikes: Record<string, boolean> = {};
-    let storedFoodLikes: Record<string, boolean> = {};
     try {
       const preferencesValue = window.localStorage.getItem("remymy-preferences");
       const savedValue = window.localStorage.getItem("remymy-saved-meals");
       storedFoods = parseSavedFoods(JSON.parse(window.localStorage.getItem("remymy-saved-foods") ?? "[]"));
       const mealLikes = parseLikes(JSON.parse(window.localStorage.getItem("remymy-meal-likes") ?? "{}"));
       storedMealLikes = Object.fromEntries(Object.entries(mealLikes).filter(([id]) => MEALS.some((meal) => meal.id === id)));
-      storedFoodLikes = parseLikes(JSON.parse(window.localStorage.getItem("remymy-food-likes") ?? "{}"));
       if (preferencesValue) {
         const parsed: unknown = JSON.parse(preferencesValue);
         if (validPreferences(parsed)) storedPreferences = parsed;
@@ -241,7 +239,6 @@ export default function HomePage() {
       // merged under anything chosen before storage was read
       setSavedFoods((current) => [...storedFoods.filter((food) => !current.some((item) => item.id === food.id)), ...current]);
       setMealLikes((current) => ({ ...storedMealLikes, ...current }));
-      setFoodRatings((current) => ({ ...Object.fromEntries(Object.entries(storedFoodLikes).map(([id, like]) => [id, { like }])), ...current }));
       setIsHydrated(true);
     });
     return () => {
@@ -264,13 +261,11 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    const foodLikes = Object.fromEntries(Object.entries(foodRatings).flatMap(([id, rating]) => typeof rating.like === "boolean" ? [[id, rating.like]] : []));
     try {
       window.localStorage.setItem("remymy-saved-foods", JSON.stringify(savedFoods));
       window.localStorage.setItem("remymy-meal-likes", JSON.stringify(mealLikes));
-      window.localStorage.setItem("remymy-food-likes", JSON.stringify(foodLikes));
     } catch { /* best effort */ }
-  }, [foodRatings, isHydrated, mealLikes, savedFoods]);
+  }, [isHydrated, mealLikes, savedFoods]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -287,6 +282,25 @@ export default function HomePage() {
       });
     return () => controller.abort();
   }, []);
+
+  // The recipe likes live in the Data API: read them again each time the picks or Saved come up, so the buttons show
+  // what the database holds. A like still being saved keeps its choice until the save answers.
+  const showsRecipeLikes = view === "saved" || (view === "discover" && chat.length === 0);
+  useEffect(() => {
+    if (!showsRecipeLikes) return;
+    const controller = new AbortController();
+    void fetchRecipeLikes(RECOMMENDATION_USERNAME, controller.signal)
+      .then((likes) => {
+        if (!mountedRef.current) return;
+        setFoodRatings((current) => {
+          const ids = new Set([...Object.keys(current), ...Object.keys(likes)]);
+          return Object.fromEntries([...ids].map((id) => [id, { ...current[id], like: current[id]?.saving ? current[id].like : likes[id] }]));
+        });
+      })
+      // without the Data API the buttons still save; they show its likes again on the next load
+      .catch(() => {});
+    return () => controller.abort();
+  }, [showsRecipeLikes]);
 
   const navigate = useCallback((nextView: AppView) => {
     if (nextView === "meals") setMealShortlist(null);

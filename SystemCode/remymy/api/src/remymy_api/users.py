@@ -192,6 +192,19 @@ def fetch_user_history(
     ]
 
 
+def fetch_user_likes(connection: sqlite3.Connection, cache: Redis, username: str) -> dict[str, bool] | None:
+    """Whether the user liked each recipe or catalog food they rated, by its id, as their latest row for it says; None
+    for an unknown username."""
+    user_id = find_user_id(connection, cache, username)
+    if user_id is None:
+        return None
+    rows = connection.execute(
+        "SELECT recipe_id, liked FROM user_history WHERE user_id = ? ORDER BY timestamp, history_id", (user_id,)
+    ).fetchall()
+    # oldest first, so a later row of the same recipe overwrites an earlier one
+    return {row["recipe_id"]: bool(row["liked"]) for row in rows}
+
+
 def create_user(
     connection: sqlite3.Connection,
     cache: Redis,
