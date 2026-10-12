@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import logging
 import os
 import sqlite3
 from collections.abc import Iterable
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from ..schemas import CatalogFood
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_CATALOG_PATH = "/data/price_mapped_nutrients.csv"
 DEFAULT_CATALOG_DATABASE_PATH = "/state/remymy-catalog.db"
@@ -67,8 +69,7 @@ def food_from_row(row: sqlite3.Row) -> CatalogFood:
         values[column] = ast.literal_eval(values[column])
     return CatalogFood(**values)
 
-
-class RecommendRepository:
+class RecipeRepository:
     """The priced food catalog, read from its SQLite database.
 
     Creating one brings the database up to date with the catalog CSV first: a missing database is created, and the
@@ -155,4 +156,13 @@ class RecommendRepository:
             ).fetchall()
         return [food_from_row(row) for row in rows]
 
-recommend_repoistory = RecommendRepository()
+
+# The one repository the app shares, built from CATALOG_PATH / CATALOG_DATABASE_PATH when this module is first
+# imported. None when there is neither a catalog database nor a CSV to build it from, so that importing it never
+# fails: the recipe and user routes do not need the catalog.
+recipe_repository: RecipeRepository | None
+try:
+    recipe_repository = RecipeRepository()
+except FileNotFoundError as error:
+    logger.warning("%s", error)
+    recipe_repository = None
