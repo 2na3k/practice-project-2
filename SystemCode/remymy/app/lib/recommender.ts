@@ -153,6 +153,7 @@ const exclusionVariants = (value: string): string[] => {
 /**
  * Interpret a natural language turn into an evolving preference state.
  * Restrictive diet, time, and exclusion constraints accumulate by design.
+ * A clear request to eat meat explicitly relaxes a prior vegan/vegetarian diet.
  */
 export function interpretRequest(
   text: string,
@@ -168,7 +169,9 @@ export function interpretRequest(
     cuisine: current.cuisine || DEFAULT_PREFERENCES.cuisine,
   };
   const normalized = normalizeText(text);
+  if (/\bhalal\b/.test(normalized)) addExclusion(source.exclude, "halal");
 
+  const saysHalal = /\bhalal\b/.test(normalized);
   const saysVegan =
     /\bvegan\b|\bplant[- ]based\b|\bplant[- ]powered\b/.test(normalized) &&
     !/\b(?:not|no longer)\s+vegan\b/.test(normalized);
@@ -176,7 +179,21 @@ export function interpretRequest(
     /\bvegetarian\b|\bveggie\b|\bveggies\b|\bno\s+meats?\b|\bmeat[\s\-\u2013\u2014]*free\b|\bmeatfree\b|\bwithout\s+(?:any\s+)?meats?\b|\b(?:avoid|avoiding|exclude|excluding|skip|skipping)\s+(?:any\s+)?meats?\b|\bdon(?:t|'t)\s+(?:eat|want|like)\s+meats?\b|\bno\s+animal(?:s|\s+protein|\s+products?)?\b/.test(
       normalized,
     ) && !/\b(?:not|no longer)\s+vegetarian\b/.test(normalized);
-  if (saysVegan) source.diet = "vegan";
+  const explicitlyAllowsMeat =
+    /\b(?:not|no longer)\s+(?:vegan|vegetarian)\b|\b(?:lots? of|a lot of|more|extra)\s+(?:meat|beef|chicken|turkey|pork)\b|\b(?:want|craving|give me|get me|with)\s+(?:some\s+|a\s+)?(?:meat|beef|chicken|turkey|pork)\b/.test(
+      normalized,
+    );
+  if (explicitlyAllowsMeat && current.diet !== "halal") {
+    source.diet = "any";
+    source.exclude = source.exclude.filter(
+      (exclusion) => canonicalExclude(exclusion) !== "meat",
+    );
+  } else if (saysVegan) {
+    source.diet = "vegan";
+    if (saysHalal || current.diet === "halal") addExclusion(source.exclude, "halal");
+  } else if (saysHalal && current.diet === "vegan") {
+    addExclusion(source.exclude, "halal");
+  } else if (saysHalal) source.diet = "halal";
   else if (saysVegetarian && source.diet === "any") source.diet = "vegetarian";
 
   const timePatterns = [
@@ -201,7 +218,9 @@ export function interpretRequest(
     source.maxMinutes = Math.min(source.maxMinutes, 20);
   }
 
-  if (
+  if (/\b(?:lots? of|a lot of|more|extra)\s+(?:meat|beef|chicken|turkey|pork)\b/.test(normalized))
+    source.goal = "protein";
+  else if (
     /\b(?:high|higher|more|lots of|protein[- ]rich)\s+protein\b|\bprotein[- ]packed\b|\bprotein\b/.test(
       normalized,
     )
@@ -358,6 +377,7 @@ export function recommendMeals(
     if (meal.minutes > effective.maxMinutes) return false;
     if (effective.diet === "vegan" && !isVegan(meal)) return false;
     if (effective.diet === "vegetarian" && !isVegetarian(meal)) return false;
+    if (effective.diet === "halal" && !isVegan(meal)) return false;
     return !effective.exclude.some((exclusion) =>
       containsExcluded(meal, exclusion),
     );
@@ -370,6 +390,8 @@ export function recommendMeals(
     if (effective.diet === "vegan") reasons.push("Fits your vegan preference.");
     else if (effective.diet === "vegetarian")
       reasons.push("Fits your vegetarian preference.");
+    else if (effective.diet === "halal")
+      reasons.push("Vegan-tagged demo candidate; halal ingredients and certification are not verified.");
     reasons.push(
       `${meal.minutes} min, within your ${effective.maxMinutes}-minute limit.`,
     );

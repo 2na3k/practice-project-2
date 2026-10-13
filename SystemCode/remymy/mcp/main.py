@@ -1,9 +1,16 @@
+import ast
+import csv
+import heapq
 import json
 import logging
 import os
 import time
+import re
+import unicodedata
 import urllib.error
 import urllib.request
+
+from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
@@ -19,6 +26,15 @@ logger = logging.getLogger("remymy.mcp")
 
 mcp = MCPServer("Remymy MCP")
 
+MEAT_TERMS = ("beef", "bison", "veal", "pork", "bacon", "ham", "prosciutto", "lard", "tallow", "chicken", "turkey", "duck", "lamb", "mutton", "venison", "sausage", "meat")
+SEAFOOD_TERMS = ("fish", "salmon", "tuna", "anchovy", "sardine", "cod", "shrimp", "prawn", "shellfish", "crab", "lobster", "oyster", "mussel", "clam", "scallop", "squid", "octopus", "fish sauce", "oyster sauce")
+DAIRY_TERMS = ("milk", "cheese", "whey", "casein", "butter", "ghee", "cream", "yogurt", "yoghurt", "parmesan", "mozzarella", "feta", "cheddar", "rennet")
+EGG_TERMS = ("egg", "eggs", "albumin", "mayonnaise")
+VEGAN_EXTRA_TERMS = ("honey", "gelatin", "collagen", "bone broth", "chicken broth", "beef broth", "fish broth")
+HALAL_BLOCKED_TERMS = ("pork", "bacon", "ham", "prosciutto", "lard", "wine", "beer", "rum", "brandy", "cognac", "bourbon", "whiskey", "vodka", "gin", "tequila", "sherry", "port", "vermouth", "liqueur", "sake", "mirin", "alcohol", "gelatin", "collagen", "blood", "animal rennet")
+PLANT_ALTERNATIVE = re.compile(r"\b(?:vegan|plant based|non dairy|dairy free)\b")
+PLANT_MILK = re.compile(r"\b(?:coconut|almond|oat|soy|rice|cashew|hemp|pea|hazelnut|macadamia) milk\b")
+
 
 @mcp.tool()
 def say_hello(name: str = "there") -> str:
@@ -26,6 +42,157 @@ def say_hello(name: str = "there") -> str:
     clean_name = name.strip() or "there"
     logger.debug("say_hello for %r.", clean_name)
     return f"Hello, {clean_name}! Welcome to Remymy."
+
+
+@mcp.tool()
+def recommend_meals(preferences: dict, query: str = "", limit: int = 6) -> str:
+    """Find real Food.com recipes, enforce diet/time exclusions, then model-rank them."""
+
+    if not isinstance(preferences, dict) or not isinstance(query, str) or len(query) > 2000:
+        raise ValueError("invalid recommendation input")
+    diet = preferences.get("diet", "any")
+    max_minutes = preferences.get("maxMinutes", 30)
+    goal = preferences.get("goal", "balanced")
+    exclusions = preferences.get("exclude", [])
+    requested_cuisine_raw = str(preferences.get("cuisine", "any"))
+    if diet not in {"any", "vegetarian", "vegan", "halal"}:
+        raise ValueError("invalid diet preference")
+    if not isinstance(max_minutes, (int, float)) or not 1 <= max_minutes <= 90:
+        raise ValueError("invalid time preference")
+    if goal not in {"balanced", "protein", "light"} or not isinstance(exclusions, list) or len(exclusions) > 24 or not all(isinstance(item, str) and len(item) <= 80 for item in exclusions):
+        raise ValueError("invalid meal preferences")
+
+    catalog = Path(os.getenv("RECIPE_CATALOG_PATH", Path(__file__).resolve().parent.parent / "data/raw/food-com/RAW_recipes.csv"))
+    if not catalog.is_file():
+        raise RuntimeError(f"Recipe catalog is missing: {catalog}")
+
+    def normalize(value: str) -> str:
+        value = unicodedata.normalize("NFD", value.lower())
+        value = "".join(char for char in value if unicodedata.category(char) != "Mn")
+        return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+    requested_cuisine = normalize(requested_cuisine_raw)
+    if not isinstance(limit, int) or not 1 <= limit <= 12:
+        raise ValueError("limit must be between 1 and 12")
+    stop_words = {"the", "and", "with", "for", "something", "meal", "meals", "food", "please", "suggest", "recommend", "ideas", "some", "under", "within", "minutes", "minute", "vegan", "vegetarian", "halal", "recipe", "recipes"}
+    tokens = [word for word in normalize(query).split() if len(word) > 2 and word not in stop_words]
+    exclusion_terms = set()
+    aliases = {"meat": set(MEAT_TERMS), "dairy": set(DAIRY_TERMS), "seafood": set(SEAFOOD_TERMS)}
+    for exclusion in exclusions:
+        normalized = normalize(exclusion)
+        exclusion_terms.update(aliases.get(normalized, {normalized}))
+    halal_requested = diet == "halal" or "halal" in {normalize(item) for item in exclusions} or "halal" in normalize(query).split()
+    exclusion_terms.discard("halal")
+
+    def has_any_term(ingredients: list[str], terms: tuple[str, ...]) -> bool:
+        for ingredient in ingredients:
+            text = normalize(ingredient)
+            if PLANT_ALTERNATIVE.search(text):
+                continue
+            for term in terms:
+                normalized_term = normalize(term)
+                if normalized_term == "milk" and PLANT_MILK.search(text):
+                    continue
+                if re.search(rf"\b{re.escape(normalized_term)}\b", text):
+                    return True
+        return False
+
+    candidates = []
+    meal_courses = {"main dish", "lunch", "dinner"}
+    if "breakfast" in tokens:
+        meal_courses.add("breakfast")
+    cuisine_tags = {"italian", "mexican", "chinese", "japanese", "korean", "thai", "indian", "greek", "french", "mediterranean", "middle eastern", "american", "canadian"}
+    with catalog.open(newline="", encoding="utf-8") as source:
+        for row in csv.DictReader(source):
+            try:
+                recipe_id = int(row["id"])
+                minutes = int(row["minutes"])
+                tags = [normalize(tag) for tag in ast.literal_eval(row["tags"])]
+                ingredients = [str(item) for item in ast.literal_eval(row["ingredients"])]
+                nutrition = ast.literal_eval(row["nutrition"])
+            except (ValueError, TypeError, SyntaxError, KeyError):
+                continue
+            if minutes < 1 or minutes > max_minutes:
+                continue
+            tagged_vegetarian = bool({"vegetarian", "vegan"}.intersection(tags))
+            if diet == "vegetarian" and not tagged_vegetarian:
+                continue
+            if (diet == "vegan" or halal_requested) and "vegan" not in tags:
+                continue
+            if (diet == "vegan" or halal_requested) and has_any_term(ingredients, (*MEAT_TERMS, *SEAFOOD_TERMS, *DAIRY_TERMS, *EGG_TERMS, *VEGAN_EXTRA_TERMS)):
+                continue
+            if (diet == "vegetarian" or halal_requested) and has_any_term(ingredients, (*MEAT_TERMS, *SEAFOOD_TERMS)):
+                continue
+            if halal_requested and has_any_term(ingredients, HALAL_BLOCKED_TERMS):
+                continue
+            if not meal_courses.intersection(tags):
+                continue
+            ingredient_text = normalize(" ".join(ingredients))
+            tag_text = " ".join(tags)
+            if any(re.search(rf"\b{re.escape(term)}\b", ingredient_text) for term in exclusion_terms if term):
+                continue
+            if requested_cuisine != "any" and requested_cuisine not in tag_text:
+                continue
+            title = row["name"].strip()
+            description = row.get("description", "").strip()
+            searchable = normalize(" ".join([title, description, ingredient_text, tag_text]))
+            matched = sum(token in searchable for token in tokens)
+            content_score = matched / len(tokens) if tokens else 0.5
+            if goal == "light" and nutrition:
+                content_score = 0.7 * content_score + 0.3 * max(0.0, 1 - float(nutrition[0]) / 1500)
+            elif goal == "protein" and len(nutrition) > 4:
+                content_score = 0.7 * content_score + 0.3 * min(float(nutrition[4]) / 100, 1.0)
+            content_score = max(0.0, min(1.0, content_score))
+            if tokens and not matched:
+                continue
+            try:
+                calories = round(float(nutrition[0]))
+                protein = round(float(nutrition[4]) / 2)
+                steps = [str(step) for step in ast.literal_eval(row["steps"])][:20]
+            except (ValueError, TypeError, SyntaxError, IndexError, KeyError):
+                calories, protein, steps = 0, 0, []
+            recipe_tags = [tag.replace("-", " ") for tag in tags if tag not in {"time-to-make", "course", "main-ingredient", "preparation", "occasion", "dietary"}][:8]
+            cuisine = next((tag.replace("-", " ").title() for tag in tags if tag in cuisine_tags), "Global")
+            meal = {
+                "id": f"foodcom:{recipe_id}",
+                "title": title,
+                "description": description[:1000],
+                "cuisine": cuisine,
+                "minutes": minutes,
+                "calories": calories,
+                "protein": protein,
+                "tags": recipe_tags,
+                "ingredients": ingredients[:40],
+                "steps": steps,
+                "image": "",
+                "color": ["#dcefe7", "#f8e5c2", "#f4d8c5", "#f5e8bd"][recipe_id % 4],
+            }
+            entry = (content_score, -recipe_id, recipe_id, meal)
+            if len(candidates) < 1000:
+                heapq.heappush(candidates, entry)
+            elif entry > candidates[0]:
+                heapq.heapreplace(candidates, entry)
+
+    if not candidates:
+        return "[]"
+    candidates.sort(key=lambda item: (-item[0], item[2]))
+    scores = {recipe_id: score for score, _, recipe_id, _ in candidates}
+    meals = {recipe_id: meal for _, _, recipe_id, meal in candidates}
+    ranked = rank_foodcom_meals(list(meals), content_scores=[scores[recipe_id] for recipe_id in meals], limit=limit)
+    recommendations = []
+    for item in ranked["recommendations"]:
+        meal = meals.get(item["recipe_id"])
+        if meal is None:
+            continue
+        reasons = ["Returned by Remymy's Food.com MCP recommender.", f"{meal['minutes']} min, within your {max_minutes}-minute limit."]
+        if diet == "vegan":
+            reasons.append("Passed the source vegan tag and ingredient screen; verify the source recipe for omissions.")
+        elif diet == "vegetarian":
+            reasons.append("Tagged vegetarian by the source catalog and screened for meat and seafood ingredients.")
+        if halal_requested:
+            reasons.append("Passed vegan-tag and listed-ingredient screens; not halal-certified. Verify source ingredients and cross-contamination.")
+        recommendations.append({"meal": meal, "score": item["score"], "reasons": reasons})
+    return json.dumps(recommendations)
 
 
 @mcp.tool()

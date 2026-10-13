@@ -20,6 +20,17 @@ describe("interpretRequest", () => {
     });
   });
 
+  it("carries halal and combined vegan-halal constraints into MCP preferences", () => {
+    const halal = interpretRequest("halal dinner");
+    const later = interpretRequest("make it quick", halal);
+    const veganHalal = interpretRequest("vegan halal dinner");
+
+    expect(halal.diet).toBe("halal");
+    expect(later.diet).toBe("halal");
+    expect(veganHalal.diet).toBe("vegan");
+    expect(veganHalal.exclude).toContain("halal");
+  });
+
   it("carries restrictive choices into a later conversational turn", () => {
     const firstTurn = interpretRequest("vegetarian meals under 25 minutes");
     const secondTurn = interpretRequest(
@@ -49,6 +60,17 @@ describe("interpretRequest", () => {
     expect(interpretRequest("Plant-powered").diet).toBe("vegan");
     expect(interpretRequest("Protein please").goal).toBe("protein");
     expect(interpretRequest("Make it quicker").maxMinutes).toBe(20);
+  });
+
+  it("lets an explicit meat request override a persisted plant-only diet", () => {
+    const vegan: Preferences = { ...DEFAULT_PREFERENCES, diet: "vegan", exclude: ["meat"] };
+    const preferences = interpretRequest("get me a good meal with a lot of meat", vegan);
+    const recommendations = recommendMeals(preferences, "a lot of meat");
+
+    expect(preferences).toMatchObject({ diet: "any", goal: "protein" });
+    expect(preferences.exclude).not.toContain("meat");
+    expect(recommendations.length).toBeGreaterThan(0);
+    expect(recommendations[0]?.meal.tags).not.toEqual(expect.arrayContaining(["vegan"]));
   });
 });
 

@@ -136,3 +136,6 @@ service-account*.json
 
 # user added
 docs/drafts
+
+# Local Codex artifacts
+.codex-remymy/

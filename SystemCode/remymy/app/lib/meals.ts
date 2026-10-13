@@ -21,7 +21,7 @@ export type Meal = {
 };
 
 export type Preferences = {
-  diet: "any" | "vegetarian" | "vegan";
+  diet: "any" | "vegetarian" | "vegan" | "halal";
   maxMinutes: number;
   exclude: string[];
   goal: "balanced" | "protein" | "light";
@@ -40,7 +40,7 @@ const image = (photoId: string): string =>
   `https://images.unsplash.com/${photoId}?auto=format&fit=crop&w=1200&q=85`;
 
 export const MEAL_DATA_NOTE =
-  "Nutrition and timing are curated demo estimates. Adjust for your ingredients and portions.";
+  "Recipe timing and nutrition are estimates; verify them against the source recipe and your portions.";
 
 export const MEALS: Meal[] = [
   {

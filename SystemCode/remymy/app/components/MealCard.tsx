@@ -74,7 +74,7 @@ export function MealCard({
           </span>
         </div>
         <p className="meal-card-disclaimer" title={MEAL_DATA_NOTE}>
-          Nutrition and timing are demo estimates.
+          Source recipe timing and nutrition may vary by portion.
         </p>
         <button className="meal-card-title" onClick={() => onOpen(meal)}>
           {meal.title}

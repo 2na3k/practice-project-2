@@ -2341,10 +2341,24 @@ h1.workspace-title { font-size:18px; letter-spacing:-.3px; line-height:1.2; }
 .chat-meal-thumb { display:grid; place-items:center; width:39px; height:39px; border-radius:10px; flex-shrink:0; color:#708b56; }
 .chat-meal-info { flex:1; min-width:0; }
 .chat-pending { display:flex; align-items:center; gap:8px; color:#7c8c69; font-size:12px; }
+.agent-stages { max-width:620px; margin:5px 0 18px; border:1px solid #dfe5d6; border-radius:15px; background:#fbfcf7; overflow:hidden; }
+.agent-stages-heading { display:flex; justify-content:space-between; align-items:center; padding:10px 13px; border-bottom:1px solid #e8ecdf; color:#68775d; font-size:9px; font-weight:700; letter-spacing:1.35px; text-transform:uppercase; }
+.agent-live { display:inline-flex; align-items:center; gap:6px; color:#b34c2c; letter-spacing:.8px; }
+.agent-live>span { width:6px; height:6px; border-radius:50%; background:var(--orange); box-shadow:0 0 0 4px #e96a431a; }
+.agent-stages ol { list-style:none; margin:0; padding:7px 13px 9px; }
+.agent-stage { position:relative; display:grid; grid-template-columns:22px 1fr; gap:8px; min-height:45px; padding:8px 0; color:#687365; }
+.agent-stage:not(:last-child)::after { content:""; position:absolute; left:9px; top:31px; bottom:-8px; width:1px; background:#dfe5d6; }
+.agent-stage-marker { position:relative; z-index:1; width:19px; height:19px; display:grid; place-items:center; border:1px solid #d9e0cf; border-radius:50%; background:#fff; color:#89947e; }
+.agent-stage strong { display:block; font-family:'Outfit',sans-serif; font-size:12px; line-height:1.25; font-weight:600; color:#596754; }
+.agent-stage small { display:block; margin-top:3px; color:#899083; font-size:10px; line-height:1.4; }
+.agent-stage.is-complete .agent-stage-marker { border-color:#b9cba8; background:#e7efe0; color:#527048; }
+.agent-stage.is-active .agent-stage-marker { border-color:#efb8a5; background:#fff4ed; color:var(--orange); }
+.agent-stage.is-active strong { color:#364d3e; }
+.agent-stage.is-error .agent-stage-marker { border-color:#e5b9ae; background:#fff0eb; color:#a64c32; }
 .chat-retry { display:flex; align-items:center; gap:6px; font-size:11px; color:#a05235; padding:8px 0; }
 .chat-meal-list>.shortlist-link { padding:12px 15px; background:#f7f9f1; border-top:1px solid #e5ebdb; }
 .connection-load-note { color:#8b977d; font-size:10px; }
-@media(max-width:650px){h1.workspace-title{font-size:14px}.workspace-header .eyebrow{font-size:6px;letter-spacing:.7px;margin-bottom:5px}.chat-meal-thumb{height:33px;width:33px;border-radius:8px}}
+@media(max-width:650px){h1.workspace-title{font-size:14px}.workspace-header .eyebrow{font-size:6px;letter-spacing:.7px;margin-bottom:5px}.chat-meal-thumb{height:33px;width:33px;border-radius:8px}.agent-stages{margin-bottom:14px}.agent-stages-heading{padding:9px 11px}.agent-stages ol{padding-inline:11px}.agent-stage{grid-template-columns:20px 1fr;gap:7px;min-height:42px}.agent-stage strong{font-size:11px}.agent-stage small{font-size:9px}}
 @media(max-width:650px){.recipe-search-row{grid-template-columns:1fr;gap:8px}.recipe-search-row span{justify-self:start}.recipe-pagination{gap:10px}.recipe-pagination button{font-size:10px}.recipe-card-top{height:120px}}
 @media(max-width:800px){.for-you-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.for-you{padding:16px;margin-bottom:22px;border-radius:17px}.for-you-title{font-size:17px}.for-you .eyebrow{font-size:7px}.for-you-item{padding:10px 11px}.for-you-name{font-size:12px}.for-you-score{font-size:9px}}
