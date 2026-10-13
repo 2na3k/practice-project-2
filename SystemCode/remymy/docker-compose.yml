@@ -14,13 +14,14 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
       MCP_URL: http://mcp:8000/mcp
-      DATA_API_URL: http://localhost:8002
+      # Inside the Compose network the API is "api"; localhost would be this
+      # container itself.
+      DATA_API_URL: http://api:8002
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
+    # Only the Data API: the app never calls mcp or models directly.
     depends_on:
-      mcp:
-        condition: service_healthy
       api:
         condition: service_healthy
     networks:
@@ -81,7 +82,11 @@ services:
     networks:
       - remymy
 
+  # mcp and models need files that are not in the repository
+  # (data/raw/food-com/RAW_recipes.csv and data/models/$MODEL_FILE), so they
+  # only start with --profile recommender. start-all.sh adds it when both exist.
   mcp:
+    profiles: [recommender]
     build:
       context: ./mcp
       dockerfile: Dockerfile
@@ -105,6 +110,7 @@ services:
       - remymy
 
   models:
+    profiles: [recommender]
     build:
       context: ./models
       dockerfile: Dockerfile
@@ -155,7 +161,7 @@ services:
       langfuse-clickhouse:
         condition: service_healthy
     environment: &langfuse-worker-env
-      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3030}
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:${LANGFUSE_PORT:-3030}}
       DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-postgres}@langfuse-postgres:5432/postgres
       SALT: ${LANGFUSE_SALT:-remymy-nonprod-salt}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-bc154720b48e07c4e33dfc5d4e65c93ef7a63cd1a947094b0e95be0f043af4ef}
@@ -192,7 +198,7 @@ services:
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-remymy-nonprod-nextauth-secret}
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://127.0.0.1:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://127.0.0.1:${MINIO_PORT:-9090}
       LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_INIT_ORG_ID: remymy
       LANGFUSE_INIT_ORG_NAME: Remymy
@@ -226,7 +232,7 @@ services:
     environment:
       PORT: 3030
       LANGFUSE_UPSTREAM: http://langfuse-web:3000
-      LANGFUSE_PUBLIC_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3030}
+      LANGFUSE_PUBLIC_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:${LANGFUSE_PORT:-3030}}
       LANGFUSE_LOCAL_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-remymy@example.com}
       LANGFUSE_LOCAL_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-remymylocal}
     healthcheck:
@@ -258,7 +264,9 @@ services:
       - remymy
 
   langfuse-minio:
-    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    # MinIO no longer publishes free images (quay.io and Docker Hub both refuse
+    # anonymous pulls), so this is Chainguard's build, pinned to one digest.
+    image: cgr.dev/chainguard/minio@sha256:6a1d0b45c8669726bba580ced0bfa4cb9fdeed1ed636dfabd81d1577beb6937b
     restart: unless-stopped
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
@@ -266,11 +274,12 @@ services:
       MINIO_ROOT_USER: ${LANGFUSE_MINIO_USER:-minio}
       MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
     ports:
-      - "127.0.0.1:9090:9000"
+      - "127.0.0.1:${MINIO_PORT:-9090}:9000"
     volumes:
       - langfuse-minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      # The image has no curl or wget, but its sh is bash, which can open TCP.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /minio/health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && read -r status <&3 && [[ $$status == *' 200'* ]]"]
       interval: 5s
       timeout: 5s
       retries: 8

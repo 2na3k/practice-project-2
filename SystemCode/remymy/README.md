@@ -40,6 +40,13 @@ Or from this directory:
 docker compose --env-file .env.nonprod up --build
 ```
 
+Shortcut: `./start-all.sh` does the build and start, moves any port that is
+already in use to the next free one, opens the app when everything is healthy,
+and follows the logs. Press Ctrl+C to stop it. It starts `models` and `mcp`
+(the `recommender` profile) only when `data/raw/food-com/RAW_recipes.csv` and
+`data/models/$MODEL_FILE` exist, since neither is in the repository. To start
+them by hand, add `--profile recommender` to the commands above.
+
 Check the resolved environment and Compose configuration without starting containers:
 
 ```bash
