@@ -14,6 +14,14 @@ export type RecipeDetail = {
   quality_status: string;
 };
 
+// One row of a user's history from the Data API: whether they liked a recipe they cooked.
+export type RecipeRating = {
+  user_id: number;
+  recipe_id: string;
+  like: boolean;
+  timestamp: string;
+};
+
 export type RecipePage = {
   items: RecipeSummary[];
   total: number;
@@ -54,12 +62,31 @@ export function parseRecipeDetail(value: unknown): RecipeDetail {
   return detail as RecipeDetail;
 }
 
+export function parseRecipeRating(value: unknown): RecipeRating {
+  if (!value || typeof value !== "object") throw new Error("Rating service returned an unexpected response.");
+  const rating = value as Partial<RecipeRating>;
+  if (typeof rating.user_id !== "number" || typeof rating.recipe_id !== "string" ||
+    typeof rating.like !== "boolean" || typeof rating.timestamp !== "string") {
+    throw new Error("Rating service returned an unexpected response.");
+  }
+  return rating as RecipeRating;
+}
+
 export function apiError(value: unknown, fallback: string): string {
   if (value && typeof value === "object" && "error" in value) {
     const error = (value as { error?: unknown }).error;
     if (typeof error === "string" && error.trim()) return error;
   }
   return fallback;
+}
+
+// The Data API answers errors as FastAPI does, {detail}; the app's own routes as {error}.
+export function dataApiError(value: unknown, fallback: string): string {
+  if (value && typeof value === "object" && "detail" in value) {
+    const detail = (value as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+  }
+  return apiError(value, fallback);
 }
 
 export async function fetchRecipePage(query: { q: string; limit: number; offset: number }, signal?: AbortSignal): Promise<RecipePage> {
@@ -75,4 +102,29 @@ export async function fetchRecipeDetail(id: string, signal?: AbortSignal): Promi
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(apiError(body, "This recipe could not be loaded."));
   return parseRecipeDetail(body);
+}
+
+// Adds whether the user liked the recipe to their history, through the app's rating route.
+export async function saveRecipeRating(id: string, username: string, like: boolean, signal?: AbortSignal): Promise<RecipeRating> {
+  const response = await fetch(`/api/recipes/${encodeURIComponent(id)}/rating`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username, like }),
+    cache: "no-store",
+    signal,
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(dataApiError(body, "Your rating could not be saved."));
+  return parseRecipeRating(body);
+}
+
+// Whether the user liked each recipe they rated, by id, as the Data API holds it.
+export async function fetchRecipeLikes(username: string, signal?: AbortSignal): Promise<Record<string, boolean>> {
+  const response = await fetch(`/api/users/${encodeURIComponent(username)}/likes`, { cache: "no-store", signal });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(dataApiError(body, "Your likes could not be loaded."));
+  if (!body || typeof body !== "object" || Array.isArray(body) || !Object.values(body).every((like) => typeof like === "boolean")) {
+    throw new Error("Likes service returned an unexpected response.");
+  }
+  return body as Record<string, boolean>;
 }

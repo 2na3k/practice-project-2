@@ -1,8 +1,8 @@
 """Recommend catalog recipes to a user: HNSW retrieval over item embeddings, then the GRU + cross-attention reranker.
 
-1. Index (once per model and catalog): every recipe of price_mapped_nutrients.csv is embedded by the reranker's
-   ItemEncoder, i.e. its product / adj / verb tokens concatenated with its standardized [price, nutrients], and the
-   embeddings go into an HNSW index with cosine distance.
+1. Index (once per model and catalog): every recipe of the catalog, the foods RecipeRepository reads from the
+   catalog database, is embedded by the reranker's ItemEncoder, i.e. its product / adj / verb tokens concatenated with
+   its standardized [price, nutrients], and the embeddings go into an HNSW index with cosine distance.
 2. Query: the user's representative embedding is the average of their history recipes' embeddings.
 3. Retrieval: HNSW returns the recipes closest to it by cosine similarity, the history's own recipes excluded, sorted
    by that similarity, most similar first.
@@ -19,16 +19,18 @@
    not fill the list. A candidate whose cosine to a pick is MAX_SIMILARITY or more is never picked, so the list can
    be shorter than top_k.
 
-Usage:
-    python model_inference_score_recommend.py build --catalog path/to/price_mapped_nutrients.csv
-    python model_inference_score_recommend.py recommend --catalog path/to/price_mapped_nutrients.csv \\
-        --user examples/retrieval_user.json
+Usage, from api/src:
+    python -m remymy_api.inference.model_inference_score_recommend build --catalog path/to/remymy-catalog.db
+    python -m remymy_api.inference.model_inference_score_recommend recommend --catalog path/to/remymy-catalog.db \\
+        --user path/to/retrieval_user.json
 """
 import argparse
-import ast
 import hashlib
 import json
+import logging
 import math
+import tempfile
+import time
 from pathlib import Path
 
 import hnswlib
@@ -39,12 +41,13 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 
-from model_inference_reranker_avgemb import (DEFAULT_ARTIFACTS, THRESHOLD, ItemEncoder, Reranker as BaseReranker,
-                                                     UserEncoder)
+from .model_inference_reranker_avgemb import (DEFAULT_ARTIFACTS, THRESHOLD, ItemEncoder, Reranker as BaseReranker,
+                                              UserEncoder)
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CATALOG = HERE / "input_stage2" / "price_mapped_nutrients.csv"
-DEFAULT_INDEX_DIR = HERE / "model_artifacts" / "retrieval_index"
+DEFAULT_INDEX_DIR = Path(tempfile.gettempdir()) / "remymy-retrieval-index"
 DEFAULT_USER = HERE / "examples" / "retrieval_user.json"
 TEXT_COLUMNS = ("product", "adj", "verb")
 # Reranker nutrient input key (NUTRIENT_INPUTS) → catalog column.
@@ -202,6 +205,8 @@ class Reranker(BaseReranker):
         self.model.load_state_dict(state)
         self.model.to(self.device).eval()
         self.tagger = tagger
+        logger.info("Loaded the windowed reranker from %s on %s (vocabulary %d tokens).", artifact_dir, self.device,
+                    len(self.token_lookup))
 
     def normalized_ratings(self, history):
         """History ratings as the GRU saw them in training (spec 2.3): centered on the mean of all of them, then
@@ -269,30 +274,12 @@ class Reranker(BaseReranker):
         return torch.sigmoid(logits).cpu()
 
 
-def load_catalog(path):
-    """price_mapped_nutrients.csv → recipes in the reranker's input format, in file order.
-
-    product / adj / verb are already NER output, so each phrase becomes one ingredient of "entities" and no tagging
-    is needed. total_price is 0 whenever an item is unpriced, so price is the sum of item_prices instead (as in
-    recipe_clustering.ipynb). Missing nutrients (sugars_g for 13% of rows) take the catalog median."""
-    frame = pd.read_csv(path)
-    nutrients = frame[list(CATALOG_NUTRIENTS.values())]
-    nutrients = nutrients.fillna(nutrients.median())
-    prices = frame["item_prices"].map(lambda value: float(sum(ast.literal_eval(value).values())))
-    recipes = []
-    for row, nutrient_row, price in zip(frame.to_dict("records"), nutrients.to_dict("records"), prices):
-        recipes.append({"fdc_id": int(row["fdc_id"]), "name": row["description"], "price": price,
-                        "nutrients": {key: float(nutrient_row[column]) for key, column in CATALOG_NUTRIENTS.items()},
-                        "entities": {field: [[phrase] for phrase in ast.literal_eval(row[field])]
-                                     for field in TEXT_COLUMNS}})
-    return recipes
-
-
-def fingerprint(*paths):
-    """sha256 over the files' bytes: the index is stale when the model or the catalog changes."""
+def fingerprint(*paths, data=b""):
+    """sha256 over the files' bytes and data: the index is stale when the model or the catalog changes."""
     digest = hashlib.sha256()
     for path in paths:
         digest.update(Path(path).read_bytes())
+    digest.update(data)
     return digest.hexdigest()
 
 
@@ -341,9 +328,14 @@ class RecipeIndex:
         """The saved index when it was built from the same model and catalog; otherwise a new one, saved."""
         meta_path = Path(index_dir) / "meta.json"
         if not rebuild and meta_path.exists() and json.loads(meta_path.read_text())["fingerprint"] == source_fingerprint:
+            logger.info("Reusing the HNSW index in %s: the model and the catalog are unchanged.", index_dir)
             return cls.load(index_dir)
+        reason = "rebuild asked for" if rebuild else "none saved" if not meta_path.exists() else "model or catalog changed"
+        started = time.perf_counter()
         built = cls.build(reranker, recipes)
         built.save(index_dir, source_fingerprint)
+        logger.info("Built the HNSW index over %d recipes in %.1fs (%s); saved to %s.", len(recipes),
+                    time.perf_counter() - started, reason, index_dir)
         return built
 
     def search(self, query, k, exclude=(), ef=HNSW_EF_SEARCH):
@@ -459,11 +451,14 @@ class RetrievalPipeline:
         self.user_states = {}  # user_id → windows and their GRU hidden states, from the last recommend call.
 
     @classmethod
-    def from_paths(cls, catalog=DEFAULT_CATALOG, artifacts=DEFAULT_ARTIFACTS, index_dir=DEFAULT_INDEX_DIR,
-                   rebuild=False, device=None):
+    def from_recipes(cls, recipes, artifacts=DEFAULT_ARTIFACTS, index_dir=DEFAULT_INDEX_DIR, rebuild=False,
+                     device=None):
+        """recipes in the reranker's input format, as inference.service.catalog_recipes makes them from the catalog."""
         reranker = Reranker(artifacts, device=device)
-        recipes = load_catalog(catalog)
-        source = fingerprint(Path(artifacts) / "model.pt", Path(artifacts) / "config.json", catalog)
+        # The catalog by what it holds, not by its database file's bytes: SQLite can rewrite a page without changing
+        # a food, and the API adds the CSV's new foods to that file on startup.
+        source = fingerprint(Path(artifacts) / "model.pt", Path(artifacts) / "config.json",
+                             data=json.dumps(recipes, sort_keys=True).encode())
         return cls(reranker, recipes, RecipeIndex.load_or_build(reranker, recipes, index_dir, source, rebuild))
 
     def resolve_history(self, history):
@@ -674,7 +669,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("command", choices=["build", "recommend"],
                         help="build: embed the catalog and save the HNSW index; recommend: score one user")
-    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG, help="price_mapped_nutrients.csv")
+    parser.add_argument("--catalog", type=Path,
+                        help="catalog database (default CATALOG_DATABASE_PATH); built from CATALOG_PATH if missing")
     parser.add_argument("--artifacts", type=Path, default=DEFAULT_ARTIFACTS,
                         help="folder holding the reranker's model.pt and config.json")
     parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR, help="where the index is saved")
@@ -693,8 +689,16 @@ def main():
     parser.add_argument("--show", type=int, default=20, help="rows printed per step")
     args = parser.parse_args()
 
-    pipeline = RetrievalPipeline.from_paths(args.catalog, args.artifacts, args.index_dir,
-                                            rebuild=args.rebuild or args.command == "build")
+    # Imported here: the service imports this module, and only the command line needs the repository.
+    from ..repository.recipe_repository import RecipeRepository, recipe_repository
+    from .service import catalog_recipes
+
+    repository = RecipeRepository(database_path=args.catalog) if args.catalog else recipe_repository
+    if repository is None:
+        parser.error("no catalog: pass --catalog, or set CATALOG_DATABASE_PATH or CATALOG_PATH")
+    recipes = catalog_recipes(repository.all_foods())
+    pipeline = RetrievalPipeline.from_recipes(recipes, args.artifacts, args.index_dir,
+                                              rebuild=args.rebuild or args.command == "build")
     if args.command == "build":
         print(f"Indexed {len(pipeline.recipes):,} recipes × {pipeline.recipe_index.embeddings.shape[1]} dims "
               f"in {args.index_dir}")

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const DEFAULT_DATA_API_URL = "http://api:8002";
+const DEFAULT_DATA_API_URL = "http://localhost:8002";
 
 export async function GET(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;

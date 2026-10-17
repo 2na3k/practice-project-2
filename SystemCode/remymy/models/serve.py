@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import logging
 import os
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -12,6 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hybrid import Candidate, HybridRanker, TokenMapper
 
+# One line per record with time, level and module, as in the Data API, at the level LOG_LEVEL names.
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+logging.basicConfig(
+    level=LOG_LEVEL if isinstance(logging.getLevelName(LOG_LEVEL), int) else "INFO",
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("remymy.models")
 
 class CandidateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -42,13 +51,20 @@ def ranker() -> HybridRanker:
     path = Path(os.getenv("MODEL_ARTIFACT_PATH", "/models/hybrid-foodcom.npz"))
     if path.is_dir():
         path = path / "hybrid-foodcom.npz"
-    return HybridRanker(path)
+    started = time.perf_counter()
+    loaded = HybridRanker(path)
+    logger.info("Loaded the hybrid ranker from %s in %.1fs.", path, time.perf_counter() - started)
+    return loaded
 
 
 @lru_cache(maxsize=1)
 def token_mapper() -> TokenMapper:
     vocab = os.getenv("TOKEN_VOCAB_PATH")
-    return TokenMapper(vocab if vocab and Path(vocab).is_file() else None)
+    if vocab and Path(vocab).is_file():
+        logger.info("Token map uses the vocabulary %s.", vocab)
+        return TokenMapper(vocab)
+    logger.warning("No token vocabulary at TOKEN_VOCAB_PATH=%r; the token map has no vocabulary.", vocab)
+    return TokenMapper(None)
 
 
 @app.get("/")
@@ -61,15 +77,19 @@ def health() -> dict[str, object]:
 @app.post("/v1/rank")
 def rank(request: RankRequest) -> dict[str, object]:
     candidates = [Candidate(**candidate.model_dump()) for candidate in request.candidates]
+    started = time.perf_counter()
+    recommendations = ranker().rank(
+        request.user_id,
+        candidates,
+        limit=request.limit,
+        collaborative_weight=request.collaborative_weight,
+        filter_seen=request.filter_seen,
+    )
+    logger.info("Ranked %d candidates for user %s, kept %d, in %.3fs.", len(candidates), request.user_id,
+                len(recommendations), time.perf_counter() - started)
     return {
         "user_id": request.user_id,
-        "recommendations": ranker().rank(
-            request.user_id,
-            candidates,
-            limit=request.limit,
-            collaborative_weight=request.collaborative_weight,
-            filter_seen=request.filter_seen,
-        ),
+        "recommendations": recommendations,
         "model": "bpr_matrix_factorization_hybrid_v1",
     }
 
@@ -81,6 +101,7 @@ def map_tokens(request: TokenRequest) -> dict[str, object]:
         if not isinstance(token_ids, list) or not all(isinstance(value, int) for value in token_ids):
             raise ValueError
     except (SyntaxError, ValueError):
+        logger.debug("Rejected token_ids that are not a list of integers: %r", request.token_ids)
         raise HTTPException(status_code=422, detail="token_ids must be a list of integers")
     mapper = token_mapper()
     return {"token_ids": token_ids, "tokens": mapper.tokens(token_ids), "decoded": mapper.text(token_ids)}

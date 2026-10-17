@@ -64,8 +64,22 @@ class UserHistory(BaseModel):
 
     user_id: int
     timestamp: datetime
-    rating: int | None = Field(default=None, ge=0, le=5)
+    like: bool
     recipe_id: str
+
+class HistoryItem(BaseModel):
+    """One row of a user's history as a client shows it: what they rated, its title and whether they liked it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe_id: str
+    # "recipe" for one of the recipe database, "food" for a recommended catalog food rated by its fdc_id
+    kind: Literal["recipe", "food"]
+    # None when its database no longer has it, or is unavailable
+    title: str | None
+    like: bool
+    timestamp: datetime
+
 
 class Ingredient(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -96,3 +110,41 @@ class RecommendationResponse(BaseModel):
 
     profile: UserBuyingProfile | None
     items: list[RecommendedRecipe]
+
+
+class ItemPrice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    price: float
+    # the pack size(s), in g / ml, of the listings the price was taken over
+    quantity: float | list[float] | None
+
+
+class CatalogFood(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fdc_id: int
+    description: str
+    product: list[str]
+    item_prices: dict[str, ItemPrice]
+    item_unit_prices: dict[str, float]
+    item_routes: dict[str, str]
+    matched_variations: dict[str, str]
+    unpriced_items: list[str]
+    priced_items: int
+    total_items: int
+    priced_share: float
+    items_without_unit_price: int
+    adj: list[str]
+    verb: list[str]
+    total_price: float
+    basket_per_100: float
+    protein_g: float | None
+    fat_g: float | None
+    carb_g: float | None
+    energy_kcal: float | None
+    fiber_g: float | None
+    sodium_mg: float | None
+    cholesterol_mg: float | None
+    satfat_g: float | None
+    sugars_g: float | None

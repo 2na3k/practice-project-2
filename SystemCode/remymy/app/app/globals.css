@@ -456,6 +456,68 @@ img {
 .recipe-open-button:hover {
   background: #dce9d8;
 }
+.like-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.like-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--paper);
+  color: var(--muted);
+}
+.like-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+/* the tick is always green and the cross always red-orange; the chosen one is filled */
+.like-button.is-like {
+  border-color: #bcd3ae;
+  background: #e8f2df;
+  color: #3f7a34;
+}
+.like-button.is-like:hover:not(:disabled) {
+  border-color: #3f7a34;
+  background: #d6e9c7;
+}
+.like-button.is-dislike {
+  border-color: #f2c1ad;
+  background: #fdeee7;
+  color: #d4492a;
+}
+.like-button.is-dislike:hover:not(:disabled) {
+  border-color: #d4492a;
+  background: #fbdccf;
+}
+.like-button.is-like.is-active {
+  border-color: #3f7a34;
+  background: #3f7a34;
+  color: #fff;
+}
+.like-button.is-dislike.is-active {
+  border-color: #d4492a;
+  background: #d4492a;
+  color: #fff;
+}
+.like-saving {
+  color: var(--muted);
+}
+.like-error {
+  flex-basis: 100%;
+  max-width: 220px;
+  margin-left: auto;
+  text-align: right;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--orange-dark);
+}
 .recipe-search-row {
   display: grid;
   grid-template-columns: auto minmax(220px, 1fr) auto;
@@ -2147,6 +2209,25 @@ img {
 .mcp-demo-button:hover { background:#e9f0e3; box-shadow:0 4px 12px rgba(57,91,68,.08); }
 .mcp-demo-result { max-width:100%; color:#47745f; font-size:11px; text-align:center; }
 .mcp-demo-result.is-error { color:#b34d2d; }
+.for-you { margin-bottom:30px; padding:20px 22px; border:1px solid #e2e7d8; border-radius:20px; background:#fffefa; }
+.for-you-header { display:flex; justify-content:space-between; align-items:flex-end; gap:12px 16px; flex-wrap:wrap; margin-bottom:15px; }
+.for-you .eyebrow { font-size:8px; letter-spacing:1.6px; margin-bottom:6px; }
+.for-you-title { display:flex; align-items:center; gap:8px; font-size:20px; letter-spacing:-.4px; line-height:1.2; color:#304331; }
+.for-you-title>svg { color:#839176; flex-shrink:0; }
+.for-you-caption { font-size:10px; color:#7b8670; margin-top:5px; }
+.for-you-profile { display:flex; flex-wrap:wrap; gap:6px; }
+.for-you-profile>span { font-size:10px; color:#5f7351; background:#eef2e6; border-radius:20px; padding:5px 10px; white-space:nowrap; }
+.for-you-profile>span:first-child { background:#fbece3; color:#a64f32; font-weight:600; }
+.for-you-list { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; }
+.for-you-item { display:flex; flex-direction:column; justify-content:space-between; gap:8px; min-width:0; padding:12px 14px; border:1px solid #edf0e4; border-radius:14px; background:#f9faf4; }
+.for-you-name { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; font-family:'Outfit',sans-serif; font-size:14px; font-weight:500; line-height:1.3; color:#304331; }
+.for-you-score { font-size:10px; color:#718061; }
+.for-you-item-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; }
+.for-you .like-button, .for-you .save-button { width:26px; height:26px; }
+.for-you-actions, .meal-card-actions { display:flex; align-items:center; flex-shrink:0; gap:5px; }
+.for-you-note { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:11px; line-height:1.6; color:#7c8c69; }
+.for-you-note.is-error { color:#a25236; }
+.for-you-note button { display:inline-flex; align-items:center; gap:5px; padding:4px 0; font-size:11px; font-weight:600; color:#a05235; text-decoration:underline; text-underline-offset:3px; }
 .chat-scroll { flex:1; min-height:0; overflow-y:auto; scrollbar-width:thin; scrollbar-color:#d7deca transparent; padding:33px 2px 15px; scroll-behavior:smooth; }
 .chat-messages { width:100%; max-width:790px; margin:0 auto; display:flex; flex-direction:column; gap:28px; }
 .chat-message { display:flex; align-items:flex-start; gap:12px; max-width:100%; }
@@ -2176,7 +2257,9 @@ img {
 .chat-meal-row img { width:47px; height:47px; object-fit:cover; border-radius:10px; flex-shrink:0; }
 .chat-meal-row strong { display:block; font-family:'Outfit',sans-serif; font-size:15px; font-weight:500; }
 .chat-meal-row small { display:block; font-size:10px; color:#718061; margin-top:4px; }
-.chat-meal-row>svg { margin-left:auto; color:#8e9b7f; }
+.chat-meal-open { display:flex; align-items:center; gap:12px; flex:1; min-width:0; text-align:left; }
+.chat-meal-open>svg { margin-left:auto; flex-shrink:0; color:#8e9b7f; }
+.chat-meal-row .like-buttons { flex-shrink:0; }
 .shortlist-link { display:inline-flex; align-items:center; gap:8px; color:#a64f32; font-size:11px; font-weight:600; padding:12px 0 3px; }
 .chat-composer-dock { width:100%; flex-shrink:0; padding:15px 0 21px; background:var(--cream); border-top:1px solid #edeee5; }
 .chat-composer-dock .composer-wrap { max-width:790px; margin:0 auto; }
@@ -2277,3 +2360,28 @@ h1.workspace-title { font-size:18px; letter-spacing:-.3px; line-height:1.2; }
 .connection-load-note { color:#8b977d; font-size:10px; }
 @media(max-width:650px){h1.workspace-title{font-size:14px}.workspace-header .eyebrow{font-size:6px;letter-spacing:.7px;margin-bottom:5px}.chat-meal-thumb{height:33px;width:33px;border-radius:8px}.agent-stages{margin-bottom:14px}.agent-stages-heading{padding:9px 11px}.agent-stages ol{padding-inline:11px}.agent-stage{grid-template-columns:20px 1fr;gap:7px;min-height:42px}.agent-stage strong{font-size:11px}.agent-stage small{font-size:9px}}
 @media(max-width:650px){.recipe-search-row{grid-template-columns:1fr;gap:8px}.recipe-search-row span{justify-self:start}.recipe-pagination{gap:10px}.recipe-pagination button{font-size:10px}.recipe-card-top{height:120px}}
+@media(max-width:800px){.for-you-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.for-you{padding:16px;margin-bottom:22px;border-radius:17px}.for-you-title{font-size:17px}.for-you .eyebrow{font-size:7px}.for-you-item{padding:10px 11px}.for-you-name{font-size:12px}.for-you-score{font-size:9px}}
+.history-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; border:1px solid #e1e6d6; border-radius:16px; overflow:hidden; background:#fffefb; }
+.history-item { display:flex; align-items:center; gap:12px; padding:13px 16px; border-bottom:1px solid #edf0e4; }
+.history-item:last-child { border-bottom:0; }
+.history-icon { display:grid; place-items:center; width:34px; height:34px; flex-shrink:0; border-radius:10px; background:#eef3e8; color:#5f7456; }
+.history-info { flex:1; min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:3px; }
+.history-title { padding:0; overflow-wrap:anywhere; text-align:left; font-family:'Outfit',sans-serif; font-size:15px; font-weight:500; line-height:1.3; color:#304331; }
+button.history-title:hover { color:var(--orange-dark); }
+.history-info small { font-size:10px; color:#718061; }
+.history-like { display:inline-flex; align-items:center; flex-shrink:0; gap:4px; padding:5px 10px; border-radius:20px; font-size:11px; font-weight:600; }
+.history-like.is-like { background:#e8f2df; color:#3f7a34; }
+.history-like.is-dislike { background:#fdeee7; color:#d4492a; }
+button.for-you-name { padding:0; text-align:left; }
+button.for-you-name:hover { color:var(--orange-dark); }
+.catalog-descriptors { margin-top:14px; }
+.catalog-ingredients li { align-items:flex-start; }
+.catalog-ingredients li > span { display:flex; flex-direction:column; gap:2px; }
+.catalog-ingredients small { font-size:11px; color:#7b8670; }
+.catalog-nutrients { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; margin:0; }
+.catalog-nutrients > div { display:flex; justify-content:space-between; gap:10px; padding:9px 12px; border-radius:12px; background:#f6f8f0; }
+.catalog-nutrients dt { font-size:12px; color:#6f7a64; }
+.catalog-nutrients dd { margin:0; font-size:12px; font-weight:600; color:#304331; }
+.catalog-detail-modal .detail-title-row { align-items:flex-start; }
+

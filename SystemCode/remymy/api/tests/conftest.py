@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
-import time
-from collections.abc import Callable
-from types import SimpleNamespace
+from collections.abc import Callable, Mapping
 
 import pytest
 import redis
 
-from remymy_api import jobs, main
+from remymy_api import main
+from remymy_api.history import History
+from remymy_api.recipe import Recipe
 
 
 class FakeCache:
@@ -23,6 +22,12 @@ class FakeCache:
             raise redis.ConnectionError("down")
         self.reads.append(key)
         return self.store.get(key)
+
+    def ttl(self, key: str) -> int:
+        if self.down:
+            raise redis.ConnectionError("down")
+        # as Redis answers: -2 for a missing key, -1 for one without an expiry
+        return -2 if key not in self.store else (self.ttls.get(key) or -1)
 
     def set(self, key: str, value: object, ex: int | None = None) -> None:
         if self.down:
@@ -41,41 +46,28 @@ def cache(monkeypatch) -> FakeCache:
     return fake
 
 
-class FakeQueue:
+class FakeRecommender:
+    """Stands in for inference.service.Recommender, recording what each recommend call was given."""
+
     def __init__(self) -> None:
-        self.jobs: list[dict] = []
-        self.handler: Callable[[dict], dict | None] = lambda payload: None
-        self.down = False
+        self.handler: Callable[[History, Mapping[str, Recipe], int], list[dict]] = (
+            lambda history, recipes, top_k: []
+        )
+        self.calls: list[dict] = []
 
-    def lpush(self, key: str, value: str) -> None:
-        if self.down:
-            raise redis.ConnectionError("down")
-        assert key == jobs.QUEUE_KEY
-        self.jobs.append(json.loads(value))
+    def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int) -> list[dict]:
+        self.calls.append({"history": history, "recipes": recipes, "top_k": top_k})
+        return self.handler(history, recipes, top_k)
 
-    def blpop(self, keys: list[str], timeout: float) -> tuple[bytes, bytes] | None:
-        job = self.jobs[-1]
-        assert keys == [jobs.RESULT_KEY_PREFIX + job["id"]]
-        reply = self.handler(job["payload"])
-        return None if reply is None else (keys[0].encode(), json.dumps(reply).encode())
 
-    @property
-    def payloads(self) -> list[dict]:
-        return [job["payload"] for job in self.jobs]
-
-    def close(self) -> None:
-        pass
+@pytest.fixture(autouse=True)
+def no_model(monkeypatch) -> None:
+    """No test loads the real model and catalog unless it asks for them."""
+    monkeypatch.setattr(main, "load_recommender", lambda: None)
 
 
 @pytest.fixture
-def queue(monkeypatch) -> FakeQueue:
-    fake = FakeQueue()
-    monkeypatch.setattr(main, "connect_queue", lambda: fake)
+def recommender(monkeypatch) -> FakeRecommender:
+    fake = FakeRecommender()
+    monkeypatch.setattr(main, "load_recommender", lambda: fake)
     return fake
-
-
-@pytest.fixture
-def sleeps(monkeypatch) -> list[float]:
-    recorded: list[float] = []
-    monkeypatch.setattr(jobs, "time", SimpleNamespace(time=time.time, sleep=recorded.append))
-    return recorded

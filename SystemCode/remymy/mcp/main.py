@@ -2,7 +2,9 @@ import ast
 import csv
 import heapq
 import json
+import logging
 import os
+import time
 import re
 import unicodedata
 import urllib.error
@@ -14,6 +16,13 @@ from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+# One line per record with time, level and module, as in the Data API, at the level LOG_LEVEL names.
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+logging.basicConfig(
+    level=LOG_LEVEL if isinstance(logging.getLevelName(LOG_LEVEL), int) else "INFO",
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("remymy.mcp")
 
 mcp = MCPServer("Remymy MCP")
 
@@ -31,6 +40,7 @@ PLANT_MILK = re.compile(r"\b(?:coconut|almond|oat|soy|rice|cashew|hemp|pea|hazel
 def say_hello(name: str = "there") -> str:
     """Say hello to someone."""
     clean_name = name.strip() or "there"
+    logger.debug("say_hello for %r.", clean_name)
     return f"Hello, {clean_name}! Welcome to Remymy."
 
 
@@ -223,11 +233,17 @@ def rank_foodcom_meals(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            return json.loads(response.read().decode("utf-8"))
+            ranked = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        logger.warning("Ranking %d candidates for user %s at %s failed: %s", len(candidate_recipe_ids), user_id,
+                       endpoint, exc)
         raise RuntimeError("Remymy's ranking service is unavailable") from exc
+    logger.info("Ranked %d candidates for user %s in %.2fs.", len(candidate_recipe_ids), user_id,
+                time.perf_counter() - started)
+    return ranked
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -236,6 +252,8 @@ async def health(_request: Request) -> JSONResponse:
 
 
 if __name__ == "__main__":
+    logger.info("Starting the MCP service on port %s; ranking through %s.", os.getenv("PORT", "8000"),
+                os.getenv("MODEL_URL", "http://localhost:8001"))
     mcp.run(
         transport="streamable-http",
         host=os.getenv("HOST", "0.0.0.0"),

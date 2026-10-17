@@ -19,13 +19,17 @@ import ast
 import csv
 import hashlib
 import json
+import logging
+import os
 import re
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+logger = logging.getLogger("migrations.ingest_food_data")
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -607,6 +611,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A no-op when bootstrap.py has set logging up already; the format matches the API's (remymy_api.logs).
+    level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    logging.basicConfig(level=level if isinstance(logging.getLevelName(level), int) else "INFO",
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args(argv or sys.argv[1:])
     if not args.recipes.is_file():
         raise SystemExit(f"Recipe source does not exist: {args.recipes}")
@@ -618,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
         args.output.unlink()
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
+    started = time.perf_counter()
+    logger.info("Hashing the sources %s and %s.", args.recipes, args.fdc_dir)
     recipe_hash = sha256_file(args.recipes)
     fdc_hash = sha256_directory(args.fdc_dir, FDC_SCHEMA_FILES)
     retrieved_at = now_iso()
@@ -629,12 +639,20 @@ def main(argv: list[str] | None = None) -> int:
     connection.execute("INSERT INTO source_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (recipe_snapshot, "open-recipes-13k", recipe_hash, str(args.recipes), recipe_hash, "CC BY-SA 3.0 (as stated by source; verify scraped-content rights)", retrieved_at, 0, schema_hash()))
     connection.execute("INSERT INTO source_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (fdc_snapshot, "fooddata-central-foundation", args.fdc_release, str(args.fdc_dir), fdc_hash, "USDA FoodData Central; see source release terms", retrieved_at, 0, schema_hash()))
     with connection:
+        logger.info("Ingesting recipes from %s.", args.recipes)
         recipe_count = insert_recipes(connection, recipe_snapshot, args.recipes)
+        logger.info("Ingested %d recipes; ingesting FoodData Central tables from %s.", recipe_count, args.fdc_dir)
         fdc_counts = insert_fdc(connection, fdc_snapshot, args.fdc_dir)
+        logger.info("Ingested FoodData Central rows: %s.", ", ".join(f"{table} {count}" for table, count in
+                                                                    sorted(fdc_counts.items())))
         fts_created = create_fts(connection)
+        if not fts_created:
+            logger.warning("This SQLite has no FTS5, so the full-text recipe index was not created.")
         connection.execute("UPDATE source_snapshot SET row_count = ? WHERE snapshot_id = ?", (recipe_count, recipe_snapshot))
         connection.execute("UPDATE source_snapshot SET row_count = ? WHERE snapshot_id = ?", (fdc_counts.get("food", 0), fdc_snapshot))
     connection.close()
+    logger.info("Wrote %s in %.1fs.", args.output, time.perf_counter() - started)
+    # The summary is the command's output, so it stays on stdout rather than in the log.
     print(json.dumps({"output": str(args.output), "recipe_snapshot": recipe_snapshot, "fdc_snapshot": fdc_snapshot, "recipes": recipe_count, "fdc": fdc_counts, "fts5": fts_created}, indent=2, sort_keys=True))
     return 0
 

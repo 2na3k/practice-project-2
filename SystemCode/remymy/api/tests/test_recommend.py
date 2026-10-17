@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-import threading
-import time
-from collections.abc import Callable
 from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
-from remymy_api import jobs, recommend
-from remymy_api.main import app
+from remymy_api import main, recommend, users
+from remymy_api.main import app, load_recommender
+from remymy_api.recipe import Recipe
+from remymy_api.schemas import Ingredient
 from remymy_api.users import add_history, create_user, init_user_database, open_user_database
 
 
@@ -30,31 +30,32 @@ RECOMMENDED = [
 ]
 
 
-def answer(payload: dict) -> dict:
-    matched = [
-        [CATALOG[text] for text in dict.fromkeys(entry["ingredients"]) if text in CATALOG]
-        for entry in payload["history"]
-    ]
-    return {"result": {"ingredients": matched, "items": RECOMMENDED if any(matched) else []}}
+class FakeRepository:
+    """Stands in for the shared recipe_repository: an ingredient line matches the CATALOG food it names exactly."""
+
+    def __init__(self) -> None:
+        self.digested: list[str] = []
+
+    def digest(self, recipe_id: str, lines: list[str]) -> Recipe:
+        self.digested.append(recipe_id)
+        return Recipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
+
+    def food(self, fdc_id: int) -> dict | None:
+        found = next((food for food in CATALOG.values() if food["fdc_id"] == fdc_id), None)
+        if found is None:
+            # a recommended food, as the groceries panel rates it
+            found = next(({"fdc_id": item["fdc_id"], "name": item["name"], "price": item["price"], "nutrient_values": {}}
+                          for item in RECOMMENDED if item["fdc_id"] == fdc_id), None)
+        return found
+
+    def digest_food(self, food_id: str) -> Recipe:
+        self.digested.append(food_id)
+        food = self.food(int(food_id))
+        return Recipe(food_id, [] if food is None else [Ingredient(**food)])
 
 
-def failing(times: int) -> Callable[[dict], dict | None]:
-    remaining = [times]
-
-    def handler(payload: dict) -> dict | None:
-        if remaining[0] > 0:
-            remaining[0] -= 1
-            return None
-        return answer(payload)
-
-    return handler
-
-
-def wait_until(condition: Callable[[], bool], seconds: float = 5) -> None:
-    deadline = time.monotonic() + seconds
-    while not condition():
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+def answer(history, recipes, top_k: int) -> list[dict]:
+    return RECOMMENDED if any(recipes[entry.recipe_id].ingredients for entry in history) else []
 
 
 @pytest.fixture
@@ -92,15 +93,24 @@ def stores(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def models(queue, sleeps):
-    queue.handler = answer
-    return queue
+def repository(monkeypatch) -> FakeRepository:
+    fake = FakeRepository()
+    monkeypatch.setattr(recommend, "recipe_repository", fake)
+    # add_history looks a rated catalog food up in it
+    monkeypatch.setattr(users, "recipe_repository", fake)
+    return fake
+
+
+@pytest.fixture
+def models(recommender, repository):
+    recommender.handler = answer
+    return recommender
 
 
 def seed_alice(stores, cache) -> int:
     alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", rating=4)
-    add_history(stores, alice.id, "openrecipes:2")
+    add_history(stores, alice.id, "openrecipes:1", like=True)
+    add_history(stores, alice.id, "openrecipes:2", like=False)
     return alice.id
 
 
@@ -123,21 +133,54 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
     }
     assert [item["id"] for item in body["items"]] == ["167516", "175237"]
 
-    today = datetime.now(timezone.utc).date().isoformat()
-    assert models.payloads == [
-        {
-            "user_id": alice,
-            "history": [
-                {"rating": None, "date": today, "ingredients": ["apple"]},
-                {"rating": 4, "date": today, "ingredients": ["tomatoes", "salt", "salt", "water"]},
-            ],
-            "top_k": recommend.MAX_TOP_K,
-        },
+    (call,) = models.calls
+    assert call["top_k"] == recommend.MAX_TOP_K
+    history = call["history"]
+    assert history.user_id == alice
+    # oldest first, each recipe's lines matched once ("salt" twice, "water" to nothing)
+    assert [(entry.recipe_id, entry.like) for entry in history] == [
+        ("openrecipes:1", True), ("openrecipes:2", False),
     ]
+    recipes = call["recipes"]
+    assert [[ingredient.fdc_id for ingredient in recipes[entry.recipe_id].ingredients] for entry in history] == [
+        [1, 2], [3],
+    ]
+    today = datetime.now(timezone.utc).date()
+    assert all(entry.timestamp.date() == today for entry in history)
 
     cached = json.loads(cache.store[f"recommendations:{alice}"])
     assert len(cached["items"]) == 3
     assert cache.ttls[f"recommendations:{alice}"] == 86400
+
+
+def test_rating_a_recipe_again_changes_its_like(stores, models, repository, cache):
+    alice = create_user(stores, cache, "alice")
+    add_history(stores, alice.id, "openrecipes:1", like=False)
+    add_history(stores, alice.id, "openrecipes:1", like=True)
+
+    with TestClient(app) as client:
+        response = client.get("/api/recommend/alice")
+
+    assert response.status_code == 200
+    (call,) = models.calls
+    assert [(entry.recipe_id, entry.like) for entry in call["history"]] == [("openrecipes:1", True)]
+    assert repository.digested == ["openrecipes:1"]
+    # tomatoes 2.0 and salt 1.0
+    assert response.json()["profile"]["avg_price"] == pytest.approx(1.5)
+
+
+def test_a_rated_grocery_goes_to_the_model_as_itself(stores, models, repository, cache):
+    alice = create_user(stores, cache, "alice")
+    # "Apples, raw" of CATALOG, by its fdc_id, as the groceries panel rates it
+    add_history(stores, alice.id, "3", like=True)
+
+    with TestClient(app) as client:
+        response = client.get("/api/recommend/alice")
+
+    (call,) = models.calls
+    assert [(entry.recipe_id, entry.like) for entry in call["history"]] == [("3", True)]
+    assert [ingredient.fdc_id for ingredient in call["recipes"]["3"].ingredients] == [3]
+    assert response.json()["profile"]["avg_price"] == pytest.approx(3.0)
 
 
 def test_later_requests_are_served_from_the_cache(stores, models, cache):
@@ -147,7 +190,7 @@ def test_later_requests_are_served_from_the_cache(stores, models, cache):
         first = client.get("/api/recommend/alice", params={"top_k": 1}).json()
         second = client.get("/api/recommend/alice", params={"top_k": 3}).json()
 
-    assert len(models.payloads) == 1
+    assert len(models.calls) == 1
     assert [item["id"] for item in first["items"]] == ["167516"]
     assert [item["id"] for item in second["items"]] == ["167516", "175237", "168516"]
     assert second["profile"] == first["profile"]
@@ -164,7 +207,7 @@ def test_user_lookup_goes_to_redis_before_the_database(stores, models, cache):
     assert cache.reads[0] == "user:alice"
     assert cache.store["user:alice"] == str(alice).encode()
     assert cache.ttls["user:alice"] == 86400
-    assert len(models.payloads) == 1
+    assert len(models.calls) == 1
 
 
 def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
@@ -172,19 +215,19 @@ def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
         response = client.get("/api/recommend/nobody")
 
     assert response.json() == {"profile": None, "items": []}
-    assert models.payloads == []
+    assert models.calls == []
     assert cache.store == {}
 
 
 def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache):
     bob = create_user(stores, cache, "bob")
-    add_history(stores, bob.id, "openrecipes:3", rating=5)
+    add_history(stores, bob.id, "openrecipes:3", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/bob")
 
     assert response.json() == {"profile": None, "items": []}
-    assert len(models.payloads) == 1
+    assert len(models.calls) == 1
     assert f"recommendations:{bob.id}" in cache.store
 
 
@@ -198,135 +241,90 @@ def test_redis_down_still_answers_from_the_model(stores, models, cache):
 
     assert first.status_code == second.status_code == 200
     assert len(first.json()["items"]) == 3
-    assert len(models.payloads) == 2
+    assert len(models.calls) == 2
 
 
-def test_timeouts_are_retried_with_exponential_backoff(stores, models, sleeps, cache):
+def test_a_computed_recommendation_is_logged_and_a_cache_hit_at_debug(stores, models, cache, caplog):
     alice = seed_alice(stores, cache)
-    models.handler = failing(3)
 
-    with TestClient(app) as client:
-        response = client.get("/api/recommend/alice")
+    with caplog.at_level(logging.DEBUG, logger="remymy_api"):
+        with TestClient(app) as client:
+            client.get("/api/recommend/alice")
+            client.get("/api/recommend/alice")
 
-    assert response.status_code == 200
-    assert len(models.jobs) == 4
-    assert sleeps == [0.5, 1.0, 2.0]
-    assert f"recommendations:{alice}" in cache.store
+    routes = [record for record in caplog.records if record.name == "remymy_api.routes"]
+    computed = [record for record in routes if record.levelno == logging.INFO]
+    assert len(computed) == 1
+    assert computed[0].getMessage().startswith(f"Recommended 3 foods for user {alice} from 2 history recipes in ")
+    assert [record.getMessage() for record in routes if record.levelno == logging.DEBUG] == [
+        f"Recommendations for user {alice} served from the cache."
+    ]
 
 
-def test_every_job_has_a_deadline_and_its_own_reply_key(stores, models, cache):
+def test_redis_failures_are_logged_as_warnings(stores, models, cache, caplog):
     seed_alice(stores, cache)
-    models.handler = failing(1)
+    cache.down = True
 
-    before = time.time()
     with TestClient(app) as client:
         client.get("/api/recommend/alice")
 
-    first, second = models.jobs
-    assert first["id"] != second["id"]
-    assert before < first["deadline"] <= time.time() + jobs.DEFAULT_RESULT_TIMEOUT_SECONDS
+    warnings = [record.getMessage() for record in caplog.records
+                if record.name == "remymy_api.cache" and record.levelno == logging.WARNING]
+    assert "Redis read of user:alice failed: down" in warnings
+    assert any(message.startswith("Redis write of recommendations:") for message in warnings)
 
 
-def test_five_failures_answer_503_and_retry_in_the_background_until_cached(stores, models, sleeps, cache):
+def test_without_a_catalog_the_api_starts_and_recommendations_are_503(stores, cache, monkeypatch):
+    # what recipe_repository is when neither a catalog database nor a CSV was there on import
+    monkeypatch.setattr(main, "recipe_repository", None)
+    monkeypatch.setattr(main, "load_recommender", load_recommender)
     alice = seed_alice(stores, cache)
-    models.handler = failing(jobs.MAX_ATTEMPTS)
 
     with TestClient(app) as client:
-        client.app.state.retries.interval = 0.01
-        response = client.get("/api/recommend/alice")
-
-        assert response.status_code == 503
-        assert response.json() == {
-            "detail": "Recommendations are unavailable right now; they will be retried in the background."
-        }
-        assert response.headers["Retry-After"] == "0"
-        assert sleeps[:4] == [0.5, 1.0, 2.0, 4.0]
-
-        wait_until(lambda: f"recommendations:{alice}" in cache.store)
-        wait_until(lambda: not client.app.state.retries.pending)
-        assert len(models.jobs) == jobs.MAX_ATTEMPTS + 1
-
-        cached = client.get("/api/recommend/alice")
-
-    assert cached.status_code == 200
-    assert len(cached.json()["items"]) == 3
-    assert len(models.jobs) == jobs.MAX_ATTEMPTS + 1
-
-
-def test_background_retry_keeps_going_while_the_cache_is_down(stores, models, cache):
-    alice = seed_alice(stores, cache)
-    models.handler = failing(jobs.MAX_ATTEMPTS)
-
-    with TestClient(app) as client:
-        client.app.state.retries.interval = 0.01
-        cache.down = True
-        assert client.get("/api/recommend/alice").status_code == 503
-
-        wait_until(lambda: len(models.jobs) >= jobs.MAX_ATTEMPTS + 3)
-        assert client.app.state.retries.pending == {alice}
-        cache.down = False
-
-        wait_until(lambda: f"recommendations:{alice}" in cache.store)
-        wait_until(lambda: not client.app.state.retries.pending)
-
-
-def test_only_one_background_retry_runs_per_user(stores, models, cache):
-    alice = seed_alice(stores, cache)
-    models.handler = lambda payload: None
-
-    with TestClient(app) as client:
-        retries = client.app.state.retries
-        retries.interval = 60
-        assert client.get("/api/recommend/alice").status_code == 503
-        assert client.get("/api/recommend/alice").status_code == 503
-
-        assert retries.pending == {alice}
-        assert len([thread for thread in threading.enumerate() if thread.name == f"retry-{alice}"]) == 1
-
-    assert retries.stopped.is_set()
-
-
-def test_unreachable_queue_is_503_and_not_cached(stores, models, sleeps, cache):
-    alice = seed_alice(stores, cache)
-    models.down = True
-
-    with TestClient(app) as client:
-        client.app.state.retries.interval = 60
+        assert client.get("/health").status_code == 200
         response = client.get("/api/recommend/alice")
 
     assert response.status_code == 503
-    assert sleeps == [0.5, 1.0, 2.0, 4.0]
     assert f"recommendations:{alice}" not in cache.store
 
 
-def test_rejected_job_is_502_without_retries(stores, models, sleeps, cache):
+def test_the_recommender_is_built_on_the_shared_repository(monkeypatch):
+    from remymy_api.inference import service
+
+    shared = object()
+    monkeypatch.setattr(main, "recipe_repository", shared)
+    monkeypatch.setattr(service.Recommender, "load", classmethod(lambda cls, repository: repository))
+    assert load_recommender() is shared
+
+
+def test_a_disliked_pick_leaves_the_cached_recommendations(stores, models, repository, cache):
     alice = seed_alice(stores, cache)
-    models.handler = lambda payload: {"error": "history: too long", "retryable": False}
+    key = f"recommendations:{alice}"
 
     with TestClient(app) as client:
-        response = client.get("/api/recommend/alice")
-        pending = set(client.app.state.retries.pending)
+        first = client.get("/api/recommend/alice", params={"top_k": 3}).json()
+        # the cached entry has been there a while
+        cache.ttls[key] = 1234
+        disliked = client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": False})
+        liked = client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
+        second = client.get("/api/recommend/alice", params={"top_k": 3}).json()
 
-    assert response.status_code == 502
-    assert response.json() == {"detail": "The recommendation model rejected the request."}
-    assert len(models.jobs) == 1
-    assert sleeps == []
-    assert pending == set()
-    assert f"recommendations:{alice}" not in cache.store
+    assert disliked.status_code == liked.status_code == 200
+    assert [item["id"] for item in first["items"]] == ["167516", "175237", "168516"]
+    # served from the cache without the disliked one; the liked one stays
+    assert [item["id"] for item in second["items"]] == ["167516", "168516"]
+    assert len(models.calls) == 1
+    assert cache.ttls[key] == 1234
+    assert second["profile"] == first["profile"]
 
 
-def test_model_errors_are_retried(stores, models, sleeps, cache):
-    seed_alice(stores, cache)
-    calls = []
-
-    def flaky(payload: dict) -> dict:
-        calls.append(payload)
-        return {"error": "RuntimeError('boom')", "retryable": True} if len(calls) == 1 else answer(payload)
-
-    models.handler = flaky
+def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache):
+    alice = seed_alice(stores, cache)
+    cache.down = True
 
     with TestClient(app) as client:
-        response = client.get("/api/recommend/alice")
+        response = client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": False})
 
     assert response.status_code == 200
-    assert sleeps == [0.5]
+    assert response.json()["like"] is False
+

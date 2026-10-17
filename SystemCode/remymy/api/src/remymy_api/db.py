@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -7,6 +8,7 @@ from urllib.parse import quote
 
 from fastapi import HTTPException
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_PATH = "/data/remymy-food.db"
 REQUIRED_TABLES = {"recipe", "recipe_ingredient", "recipe_instruction"}
@@ -17,10 +19,11 @@ def database_path() -> Path:
 
 
 def open_database() -> sqlite3.Connection:
-    """Open a valid recipe database or raise a generic, non-leaky 503."""
+    """Open a valid recipe database or raise a generic, non-leaky 503. The reason goes to the log, not the caller."""
 
     path = database_path()
     if not path.is_file():
+        logger.warning("No recipe database at %s.", path)
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     try:
         # The API database is mounted read-only and is produced completely
@@ -44,11 +47,13 @@ def open_database() -> sqlite3.Connection:
         }
         if tables != REQUIRED_TABLES:
             connection.close()
+            logger.warning("Recipe database %s lacks table(s) %s.", path, ", ".join(sorted(REQUIRED_TABLES - tables)))
             raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
         return connection
     except HTTPException:
         raise
     except (OSError, sqlite3.Error):
+        logger.exception("Could not open the recipe database %s.", path)
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
 
 
