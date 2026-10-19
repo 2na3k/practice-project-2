@@ -50,9 +50,13 @@ NAME_FIRST = re.compile(rf"\b(?P<name>{_NAME})\s*[:=]?\s*{_NUMBER}\s*{_UNIT}?\b"
 PRICE = re.compile(r"(?:\$|\bs\$)\s*(?P<num>\d+(?:\.\d+)?)|(?P<num2>\d+(?:\.\d+)?)\s*(?:sgd|dollars?)\b", re.I)
 PER_100G = re.compile(r"\bper\s+100\s*g\b", re.I)
 
-nltk.download("stopwords", quiet=True)
+try:
+    _ENGLISH = stopwords.words("english")
+except LookupError:  # download only when missing: nltk.download checks its index online on every call
+    nltk.download("stopwords", quiet=True)
+    _ENGLISH = stopwords.words("english")
 # 3_process_price.ipynb's STOP_WORDS: NLTK's English list without single letters and negations.
-STOP_WORDS = {w for w in stopwords.words("english") if len(w) > 1} - {"no", "nor", "not"}
+STOP_WORDS = {w for w in _ENGLISH if len(w) > 1} - {"no", "nor", "not"}
 
 
 def _convert(value, unit, column):
@@ -190,36 +194,52 @@ def iter_queries(args):
         yield line.strip()
 
 
-def lookup_item(fdc_id, args):
-    """A training food from the premade lookup, with any nutrient flags applied on top."""
-    lookup = load_fdc_lookup(getattr(args, "lookup", DEFAULT_LOOKUP))
-    if not lookup:
-        raise ValueError(f"no fdc_id lookup at {getattr(args, 'lookup', DEFAULT_LOOKUP)}; run build_fdc_lookup.py")
-    if fdc_id not in lookup:
-        raise ValueError(f"fdc_id {fdc_id} is not a training food")
-    food = json.loads(json.dumps(lookup[fdc_id]))  # deep copy: the cached lookup stays as built
-    for column in NUTRIENT_COLS:
-        if getattr(args, column, None) is not None:
-            food["nutrients"][column] = getattr(args, column)
-    if getattr(args, "price", None) is not None:
-        food["price"], food["price_interval"] = args.price, [args.price, args.price]
+class UnknownFood(LookupError):
+    """An fdc_id that is not a training food in the lookup."""
+
+
+class EmptyQuery(ValueError):
+    """A query with no food description left once its amounts are taken out."""
+
+
+def lookup_item(fdc_id, nutrients=None, price=None, lookup=DEFAULT_LOOKUP):
+    """A training food from the premade lookup, with the given nutrients and price applied on top.
+    FileNotFoundError without a lookup file, UnknownFood for an fdc_id it does not hold."""
+    foods = load_fdc_lookup(lookup)
+    if not foods:
+        raise FileNotFoundError(f"no fdc_id lookup at {lookup}; run build_fdc_lookup.py")
+    if fdc_id not in foods:
+        raise UnknownFood(f"fdc_id {fdc_id} is not a training food")
+    food = json.loads(json.dumps(foods[fdc_id]))  # deep copy: the cached lookup stays as built
+    food["nutrients"].update({c: v for c, v in (nutrients or {}).items() if v is not None})
+    if price is not None:
+        food["price"], food["price_interval"] = price, [price, price]
     return {"fdc_id": fdc_id, **food}
 
 
-def build_item(query, args, extractor):
+def build_item(query, extractor, nutrients=None, terms=None, price=None, lookup=DEFAULT_LOOKUP):
     """The model input of one query: description, product / adj / verb, nutrients (None = unknown) and price.
-    A query that is an fdc_id ("167516", "fdc:167516") is looked up instead."""
+    `nutrients` ({column: value}), `terms` ({"product" / "adj" / "verb": [...]}) and `price` override what the query
+    holds; None values are ignored. A query that is an fdc_id ("167516", "fdc:167516") is looked up instead.
+    EmptyQuery when no description is left once the amounts are taken out."""
+    nutrients = {c: v for c, v in (nutrients or {}).items() if v is not None}
+    given = {field: value for field, value in (terms or {}).items() if value}
     fdc = FDC_QUERY.fullmatch(query.strip())
     if fdc:
-        return lookup_item(int(fdc[1]), args)
-    description, nutrients, price = parse_query(query)
+        return lookup_item(int(fdc[1]), nutrients, price, lookup)
+    description, parsed, parsed_price = parse_query(query)
     if not description:
-        raise ValueError(f"no food description left in {query!r} after removing the nutrient amounts")
-    for column in NUTRIENT_COLS:
-        if getattr(args, column, None) is not None:
-            nutrients[column] = getattr(args, column)
-    given = {field: getattr(args, field) for field in ("product", "adj", "verb") if getattr(args, field, None)}
-    terms = extractor(description) if len(given) < 3 else {}
-    return {"description": description, **terms, **given,
-            "nutrients": {column: nutrients.get(column) for column in NUTRIENT_COLS},
-            "price": getattr(args, "price", None) if getattr(args, "price", None) is not None else price}
+        raise EmptyQuery(f"no food description left in {query!r} after removing the nutrient amounts")
+    parsed.update(nutrients)
+    extracted = extractor(description) if len(given) < 3 else {}
+    return {"description": description, **extracted, **given,
+            "nutrients": {column: parsed.get(column) for column in NUTRIENT_COLS},
+            "price": price if price is not None else parsed_price}
+
+
+def item_from_args(query, args, extractor):
+    """build_item with the flags of add_query_arguments (and --price, where a script has it) as overrides."""
+    return build_item(query, extractor,
+                      nutrients={column: getattr(args, column, None) for column in NUTRIENT_COLS},
+                      terms={field: getattr(args, field, None) for field in ("product", "adj", "verb")},
+                      price=getattr(args, "price", None), lookup=getattr(args, "lookup", DEFAULT_LOOKUP))

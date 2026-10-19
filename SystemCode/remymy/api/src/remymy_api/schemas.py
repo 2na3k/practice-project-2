@@ -148,3 +148,52 @@ class CatalogFood(BaseModel):
     cholesterol_mg: float | None
     satfat_g: float | None
     sugars_g: float | None
+
+
+NutrientName = Literal["protein_g", "fat_g", "carb_g", "energy_kcal", "fiber_g", "sodium_mg", "cholesterol_mg",
+                       "satfat_g", "sugars_g"]
+
+
+class ClassifyRequest(BaseModel):
+    """A food to tag with recipe classes. Nutrients are per 100 g, as in the training data; any left out take the
+    training medians."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"query": "Grilled chicken breast, skinless, 165 kcal, 31g protein, 3.6g fat, 74mg sodium"},
+        {"query": "Waffles, buttermilk, frozen, ready-to-heat", "nutrients": {"energy_kcal": 273, "sugars_g": 4.3}},
+        {"query": "fdc:167516"},
+    ]})
+
+    # a FoodData Central style description; amounts like "31g protein" or "protein: 31g" in it are read as nutrients,
+    # and a bare fdc_id ("167516" / "fdc:167516") looks up a training food instead
+    query: str = Field(min_length=1, max_length=500)
+    # override the amounts written in the query
+    nutrients: dict[NutrientName, float] = Field(default_factory=dict)
+    # given terms skip GLiNER / stanza for that field
+    product: list[str] | None = Field(default=None, max_length=20)
+    adj: list[str] | None = Field(default=None, max_length=20)
+    verb: list[str] | None = Field(default=None, max_length=20)
+
+
+class FoodClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # set when the food was looked up by fdc_id
+    fdc_id: int | None = None
+    description: str
+    product: list[str]
+    adj: list[str]
+    verb: list[str]
+    # per 100 g; None = not given, so the model used the training median
+    nutrients: dict[str, float | None]
+    # the lowercased terms the encoder read, and how many of them it saw in training
+    terms: list[str]
+    known_terms: int
+    model: str
+    # `generic` is exclusive: a generic food has no other label
+    labels: list[str]
+    score_kind: Literal["probability", "vote share"]
+    # every label, highest first
+    scores: dict[str, float]
+    # the food's labels in the training data, for a food looked up by fdc_id
+    training_labels: list[str] | None = None

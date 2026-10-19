@@ -42,6 +42,26 @@ strings in position order.
 The API does not expose FoodData Central rows, raw source payloads, source
 records, quarantine rows, nutrition, or arbitrary SQL.
 
+### Recipe classification
+
+- `POST /api/classify` with `{ "query": "Grilled chicken breast, skinless, 165 kcal, 31g protein" }`
+  tags a food with recipe classes (`easy`, `breakfast`, `protein_centerpiece`, …; `generic` is
+  exclusive). Nutrients are per 100 g and may be written into the query or sent as
+  `nutrients: { "energy_kcal": 165 }`, which overrides the query; any left out take the training
+  medians. `product` / `adj` / `verb` lists skip term extraction for that field. A query that is
+  only an fdc_id (`"fdc:167516"`) looks up a training food. The response holds `labels`, `scores`
+  for every label, and the terms and nutrients the model used.
+- `GET /api/classify/{fdc_id}` classifies a training food from the fdc_id lookup and also returns
+  its `training_labels`.
+
+A query without a food description is `422`, an fdc_id that is not a training food `404`. The
+classifier loads at startup from `CLASSIFIER_ARTIFACT_DIR` (default `weights/recipe_classifier`)
+with the lookup at `FDC_LOOKUP_PATH` (default `weights/fdc_lookup.json`, written by
+`src/remymy_api/inference/build_fdc_lookup.py`). Its packages are in `requirements-classifier.txt`,
+not in the image: without them or the weights, both routes answer `503`. The first free-text
+query loads GLiNER and stanza (about 20 s, and stanza downloads its English model once); later
+queries take well under a second, one at a time.
+
 ## Database availability
 
 Set `DATABASE_PATH` to the ingested SQLite file. The container listens on port

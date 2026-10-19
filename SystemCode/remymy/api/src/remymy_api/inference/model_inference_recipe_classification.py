@@ -23,9 +23,9 @@ import torch
 from torch import nn
 
 try:
-    from .food_query import TermExtractor, add_query_arguments, build_item, iter_queries
+    from .food_query import TermExtractor, add_query_arguments, item_from_args, iter_queries
 except ImportError:  # run as a file
-    from food_query import TermExtractor, add_query_arguments, build_item, iter_queries
+    from food_query import TermExtractor, add_query_arguments, item_from_args, iter_queries
 
 # api/weights/recipe_classifier: recipe_classifier.pt, preprocessing.joblib and config.json as the notebook writes them.
 DEFAULT_ARTIFACTS = Path(__file__).resolve().parents[3] / "weights" / "recipe_classifier"
@@ -181,8 +181,8 @@ def main():
         print(f"model: {classifier.kind}")
     for query in iter_queries(args):
         try:
-            result = classifier.predict(build_item(query, args, extractor))
-        except ValueError as error:
+            result = classifier.predict(item_from_args(query, args, extractor))
+        except (ValueError, LookupError, OSError) as error:
             print(f"skipped: {error}")
             continue
         if args.json:

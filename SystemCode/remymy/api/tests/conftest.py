@@ -62,8 +62,9 @@ class FakeRecommender:
 
 @pytest.fixture(autouse=True)
 def no_model(monkeypatch) -> None:
-    """No test loads the real model and catalog unless it asks for them."""
+    """No test loads the real models and catalog unless it asks for them."""
     monkeypatch.setattr(main, "load_recommender", lambda: None)
+    monkeypatch.setattr(main, "load_classifier", lambda: None)
 
 
 @pytest.fixture

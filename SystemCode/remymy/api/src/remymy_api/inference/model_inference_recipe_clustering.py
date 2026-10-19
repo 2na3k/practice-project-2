@@ -23,10 +23,10 @@ from nltk.stem import WordNetLemmatizer
 import numpy as np
 
 try:
-    from .food_query import (DEFAULT_LOOKUP, NUTRIENT_COLS, TermExtractor, add_query_arguments, build_item,
+    from .food_query import (DEFAULT_LOOKUP, NUTRIENT_COLS, TermExtractor, add_query_arguments, item_from_args,
                              iter_queries, load_fdc_lookup)
 except ImportError:  # run as a file
-    from food_query import (DEFAULT_LOOKUP, NUTRIENT_COLS, TermExtractor, add_query_arguments, build_item,
+    from food_query import (DEFAULT_LOOKUP, NUTRIENT_COLS, TermExtractor, add_query_arguments, item_from_args,
                             iter_queries, load_fdc_lookup)
 
 # api/weights/recipe_clustering: recipe_clustering.joblib as the training notebook writes it. Neighbours are described
@@ -195,8 +195,8 @@ def main():
     extractor = TermExtractor()
     for query in iter_queries(args):
         try:
-            result = clusterer.predict(build_item(query, args, extractor), k=args.neighbours)
-        except ValueError as error:
+            result = clusterer.predict(item_from_args(query, args, extractor), k=args.neighbours)
+        except (ValueError, LookupError, OSError) as error:
             print(f"skipped: {error}")
             continue
         if args.json:

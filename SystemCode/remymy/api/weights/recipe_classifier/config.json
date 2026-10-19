@@ -1,0 +1,73 @@
+{
+  "label_cols": [
+    "advanced_gourmet",
+    "breakfast",
+    "crispy_crunchy",
+    "dessert_sweet_treat",
+    "easy",
+    "generic",
+    "hearty_filling",
+    "kid_friendly",
+    "one_pot_one_pan",
+    "protein_centerpiece",
+    "ready_to_eat",
+    "smoky_grilled",
+    "spicy",
+    "street_food_style",
+    "umami_rich",
+    "weeknight_dinner"
+  ],
+  "dropped_labels": [
+    "fusion_cuisine"
+  ],
+  "gate_label": "generic",
+  "chain_labels": [
+    "advanced_gourmet",
+    "breakfast",
+    "crispy_crunchy",
+    "dessert_sweet_treat",
+    "easy",
+    "hearty_filling",
+    "kid_friendly",
+    "one_pot_one_pan",
+    "protein_centerpiece",
+    "ready_to_eat",
+    "smoky_grilled",
+    "spicy",
+    "street_food_style",
+    "umami_rich",
+    "weeknight_dinner"
+  ],
+  "chain_order": [
+    4,
+    5,
+    8,
+    6,
+    9,
+    13,
+    10,
+    2,
+    1,
+    14,
+    12,
+    7,
+    3,
+    0,
+    11
+  ],
+  "term_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "term_revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+  "random_state": 42,
+  "test_size": 0.2,
+  "lr_C": 0.1,
+  "encoder_epochs": 20,
+  "encoder_lr": 0.001,
+  "nutrient_umap_components": 6,
+  "umap_transform": "one row at a time",
+  "test_metrics": {
+    "micro_f1": 0.8024257899776572,
+    "macro_f1": 0.7412576907639956,
+    "hamming_loss": 0.05350968188105117,
+    "exact_match": 0.5583218072844629
+  }
+}

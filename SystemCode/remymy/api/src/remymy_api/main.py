@@ -28,6 +28,24 @@ def load_recommender():
     return recommender
 
 
+def load_classifier():
+    """The recipe classifier, or None when its weights or packages are missing (the classify routes then answer 503).
+    Its packages (requirements-classifier.txt) are not in the API image, so it is optional."""
+    started = time.perf_counter()
+    try:
+        from .inference.classification_service import FoodClassifier, classifier_dir
+
+        if not classifier_dir().is_dir():
+            logger.warning("No classifier weights at %s; classification answers 503.", classifier_dir())
+            return None
+        classifier = FoodClassifier.load()
+    except ImportError as error:
+        logger.warning("The classifier's packages are not installed (%s); classification answers 503.", error)
+        return None
+    logger.info("Classifier ready in %.1fs.", time.perf_counter() - started)
+    return classifier
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting the API.")
@@ -35,7 +53,10 @@ async def lifespan(app: FastAPI):
     # with SEED_DEMO_USER, this also injects the demo user
     init_user_database()
     app.state.recommender = load_recommender()
-    logger.info("API ready; recommendations %s.", "on" if app.state.recommender else "off (no catalog)")
+    app.state.classifier = load_classifier()
+    logger.info("API ready; recommendations %s, classification %s.",
+                "on" if app.state.recommender else "off (no catalog)",
+                "on" if app.state.classifier else "off")
     try:
         yield
     finally:

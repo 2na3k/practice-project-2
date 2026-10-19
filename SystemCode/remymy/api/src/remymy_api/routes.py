@@ -9,10 +9,13 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from .db import close_database, open_database, split_preview
 from .cache import drop_recommendation, read_recommendations, write_recommendations
+from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
 from .repository.recipe_repository import is_food_id, recipe_repository
 from .schemas import (
     CatalogFood,
+    ClassifyRequest,
+    FoodClassification,
     HealthResponse,
     HistoryItem,
     Preferences,
@@ -209,6 +212,62 @@ def get_recommendation(
         logger.debug("Recommendations for user %d served from the cache.", user_id)
 
     return recommendations.model_copy(update={"items": recommendations.items[:top_k]})
+
+def loaded_classifier(request: Request):
+    classifier = request.app.state.classifier
+    if classifier is None:
+        raise HTTPException(status_code=503, detail="Classification is unavailable: the classifier is not loaded.")
+    return classifier
+
+
+def food_classification(result: dict) -> FoodClassification:
+    """RecipeClassifier.predict's result → the response, with the training labels of a looked-up food."""
+    item = result["item"]
+    return FoodClassification(
+        fdc_id=item.get("fdc_id"), description=item["description"],
+        product=item["product"], adj=item["adj"], verb=item["verb"], nutrients=item["nutrients"],
+        terms=result["terms"], known_terms=result["known_terms"], model=result["model"], labels=result["labels"],
+        score_kind=result["score_kind"], scores=result["scores"],
+        training_labels=item.get("training", {}).get("labels"),
+    )
+
+
+def classify_or_raise(classify, *args) -> FoodClassification:
+    started = time.perf_counter()
+    try:
+        result = classify(*args)
+    except UnknownFood as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except EmptyQuery as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    except FileNotFoundError:
+        logger.exception("The fdc_id lookup is missing.")
+        raise HTTPException(status_code=503, detail="Food lookup is unavailable.")
+    logger.info("Classified %r as %s in %.2fs.", result["item"]["description"], result["labels"],
+                time.perf_counter() - started)
+    return food_classification(result)
+
+
+@router.post("/api/classify", response_model=FoodClassification, tags=["classification"])
+def classify_food(body: ClassifyRequest, request: Request) -> FoodClassification:
+    """Tag a food with recipe classes (the gated classifier chain of recipe_classification.ipynb). The query is a
+    food description, optionally with nutrients per 100 g written into it; product / adj / verb terms are extracted
+    from it unless given. The first free-text query loads the extraction models, so it is slow."""
+    classifier = loaded_classifier(request)
+    terms = {"product": body.product, "adj": body.adj, "verb": body.verb}
+    return classify_or_raise(classifier.classify, body.query, body.nutrients, terms)
+
+
+@router.get("/api/classify/{fdc_id}", response_model=FoodClassification, tags=["classification"])
+def classify_training_food(
+    fdc_id: Annotated[int, Path(openapi_examples={"waffles": {"summary": "Waffles, buttermilk", "value": 167516}})],
+    request: Request,
+) -> FoodClassification:
+    """Tag a training food, looked up by fdc_id, with recipe classes; `training_labels` holds its labels in the
+    training data for comparison."""
+    classifier = loaded_classifier(request)
+    return classify_or_raise(classifier.classify_fdc, fdc_id)
+
 
 @router.get("/api/users/{username}", response_model=User, tags=["users"])
 def get_user(username: str) -> User:
