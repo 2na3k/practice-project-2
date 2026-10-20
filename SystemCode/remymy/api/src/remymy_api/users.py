@@ -1,3 +1,6 @@
+"""The users database's schema, migration and demo user, and what the user routes need beyond UserRepository: whether
+a rated id is a recipe or a catalog food, and the titles of the ids a history holds. Reading and writing users and
+their history is repository.user_repository.UserRepository's, through the ORM."""
 from __future__ import annotations
 
 import logging
@@ -6,17 +9,17 @@ import sqlite3
 from collections.abc import Iterable
 
 from fastapi import HTTPException
-from redis import Redis
 
-from .cache import read_user_id, write_user_id
 from .db import close_database, open_database, user_database_path, users_engine
 from .models import create_tables
-from .repository.recipe_repository import is_food_id, recipe_repository
-from .schemas import Preferences, User, UserHistory
+from .repository.recipe_repository import RecipeRepository, is_food_id
+from .repository.user_repository import UserRepository
+from .schemas import UserHistory
 
 logger = logging.getLogger(__name__)
 
-# The tables written with SQL here. The ORM's tables (models.py) are created after them, by create_tables.
+# The tables created with SQL here, for their JSON checks and triggers; the ORM maps them (models.AppUser,
+# models.UserHistoryEntry). The tables only the ORM defines are created after them, by create_tables.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_user (
   user_id     INTEGER PRIMARY KEY,
@@ -122,6 +125,7 @@ def demo_enabled() -> bool:
 
 
 def open_user_database() -> sqlite3.Connection:
+    """A plain sqlite3 connection to the users database, for the SQL scripts above."""
     connection = sqlite3.connect(user_database_path())
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -147,88 +151,15 @@ def init_user_database() -> None:
     logger.info("Users database ready at %s.", user_database_path())
 
 
-def find_user_id(connection: sqlite3.Connection, cache: Redis, username: str) -> int | None:
-    user_id = read_user_id(cache, username)
-    if user_id is not None:
-        return user_id
-    row = connection.execute(
-        "SELECT user_id FROM app_user WHERE username = ?", (username,)
-    ).fetchone()
-    if row is None:
-        return None
-    write_user_id(cache, username, row["user_id"])
-    return row["user_id"]
 
-
-def username_exists(connection: sqlite3.Connection, cache: Redis, username: str) -> bool:
-    return find_user_id(connection, cache, username) is not None
-
-
-def fetch_user_history(
-    connection: sqlite3.Connection,
-    cache: Redis,
-    username: str,
-    limit: int = 50,
-) -> list[UserHistory]:
-    user_id = find_user_id(connection, cache, username)
-    if user_id is None:
-        return []
-    rows = connection.execute(
-        """
-        SELECT user_id, timestamp, liked, recipe_id
-        FROM user_history
-        WHERE user_id = ?
-        ORDER BY timestamp DESC, history_id DESC
-        LIMIT ?
-        """,
-        (user_id, limit),
-    ).fetchall()
-    return [
-        UserHistory(user_id=row["user_id"], timestamp=row["timestamp"], like=bool(row["liked"]),
-                    recipe_id=row["recipe_id"])
-        for row in rows
-    ]
-
-
-def fetch_user_likes(connection: sqlite3.Connection, cache: Redis, username: str) -> dict[str, bool] | None:
-    """Whether the user liked each recipe or catalog food they rated, by its id, as their latest row for it says; None
-    for an unknown username."""
-    user_id = find_user_id(connection, cache, username)
-    if user_id is None:
-        return None
-    rows = connection.execute(
-        "SELECT recipe_id, liked FROM user_history WHERE user_id = ? ORDER BY timestamp, history_id", (user_id,)
-    ).fetchall()
-    # oldest first, so a later row of the same recipe overwrites an earlier one
-    return {row["recipe_id"]: bool(row["liked"]) for row in rows}
-
-
-def create_user(
-    connection: sqlite3.Connection,
-    cache: Redis,
-    username: str,
-    preferences: Preferences | None = None,
-) -> User:
-    preferences = preferences or Preferences()
-    with connection:
-        (row,) = connection.execute(
-            "INSERT INTO app_user (username, preferences) VALUES (?, jsonb(?)) "
-            "RETURNING user_id",
-            (username, preferences.model_dump_json()),
-        ).fetchall()
-    write_user_id(cache, username, row["user_id"])
-    logger.info("Created user %r with id %d.", username, row["user_id"])
-    return User(id=row["user_id"], username=username, preferences=preferences)
-
-
-def item_titles(item_ids: Iterable[str]) -> dict[str, str]:
+def item_titles(item_ids: Iterable[str], catalog: RecipeRepository | None) -> dict[str, str]:
     """The title of each recipe among item_ids, from the recipe database, and of each catalog food, its description.
     An id neither holds, or whose database is unavailable, is left out."""
     ids = set(item_ids)
     titles: dict[str, str] = {}
     food_ids = [int(item_id) for item_id in ids if is_food_id(item_id)]
-    if food_ids and recipe_repository is not None:
-        titles.update({str(food.fdc_id): food.description for food in recipe_repository.foods_by_ids(food_ids)})
+    if food_ids and catalog is not None:
+        titles.update({str(food.fdc_id): food.description for food in catalog.foods_by_ids(food_ids)})
     recipe_ids = [item_id for item_id in ids if not is_food_id(item_id)]
     if recipe_ids:
         try:
@@ -246,10 +177,11 @@ def item_titles(item_ids: Iterable[str]) -> dict[str, str]:
     return titles
 
 
-def known_item(recipe_id: str) -> bool:
-    """Whether recipe_id is a recipe of the recipe database or, by its fdc_id, a food of the catalog."""
+def known_item(recipe_id: str, catalog: RecipeRepository | None) -> bool:
+    """Whether recipe_id is a recipe of the recipe database or, by its fdc_id, a food of the catalog (none without
+    one)."""
     if is_food_id(recipe_id):
-        return recipe_repository is not None and recipe_repository.food(int(recipe_id)) is not None
+        return catalog is not None and catalog.food(int(recipe_id)) is not None
     recipes = open_database()
     try:
         return recipes.execute("SELECT 1 FROM recipe WHERE recipe_id = ?", (recipe_id,)).fetchone() is not None
@@ -257,43 +189,15 @@ def known_item(recipe_id: str) -> bool:
         close_database(recipes)
 
 
-def add_history(
-    connection: sqlite3.Connection,
+def rate_item(
+    users: UserRepository,
+    catalog: RecipeRepository | None,
     user_id: int,
     recipe_id: str,
     like: bool,
 ) -> UserHistory:
-    """Record whether the user liked a recipe, or a catalog food by its fdc_id. One they rated before has its like
-    changed and dated now; anything else gets a new row."""
-    if not known_item(recipe_id):
+    """Record whether the user liked a recipe, or a catalog food by its fdc_id, in their history (UserRepository.
+    add_history). LookupError for an id that is neither."""
+    if not known_item(recipe_id, catalog):
         raise LookupError(f"Unknown recipe: {recipe_id}")
-
-    entry = _modify_history(connection, user_id, recipe_id, like)
-    if entry is None:
-        with connection:
-            (row,) = connection.execute(
-                "INSERT INTO user_history (user_id, liked, recipe_id) VALUES (?, ?, ?) "
-                "RETURNING timestamp",
-                (user_id, int(like), recipe_id),
-            ).fetchall()
-        entry = UserHistory(user_id=user_id, timestamp=row["timestamp"], like=like, recipe_id=recipe_id)
-    logger.debug("User %d %s recipe %s.", user_id, "liked" if like else "did not like", recipe_id)
-    return entry
-
-
-def _modify_history(
-    connection: sqlite3.Connection,
-    user_id: int,
-    recipe_id: str,
-    like: bool,
-) -> UserHistory | None:
-    """Change the like of the user's rows for the recipe and date them now; None when they have none."""
-    with connection:
-        rows = connection.execute(
-            "UPDATE user_history SET liked = ?, timestamp = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE user_id = ? AND recipe_id = ? RETURNING timestamp",
-            (int(like), user_id, recipe_id),
-        ).fetchall()
-    if not rows:
-        return None
-    return UserHistory(user_id=user_id, timestamp=rows[0]["timestamp"], like=like, recipe_id=recipe_id)
+    return users.add_history(user_id, recipe_id, like)

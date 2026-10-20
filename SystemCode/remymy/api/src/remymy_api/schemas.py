@@ -60,7 +60,8 @@ class User(BaseModel):
     preferences: Preferences = Field(default_factory=Preferences)
 
 class UserHistory(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # also read from the ORM's models.UserHistoryEntry
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     user_id: int
     timestamp: datetime
@@ -97,6 +98,16 @@ class UserBuyingProfile(BaseModel):
     avg_price: float
     avg_nutrient_values: dict[str, float]
 
+class ClusteringRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item: RecipeDetail
+
+class ClusteringResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    near_items: list[RecipeDetail]
+
 class RecommendedRecipe(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -104,13 +115,11 @@ class RecommendedRecipe(BaseModel):
     title: str
     score: float
 
-
 class RecommendationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile: UserBuyingProfile | None
     items: list[RecommendedRecipe]
-
 
 class ItemPrice(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -121,7 +130,8 @@ class ItemPrice(BaseModel):
 
 
 class CatalogFood(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # also read from the ORM's models.CatalogFoodRecord
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     fdc_id: int
     description: str

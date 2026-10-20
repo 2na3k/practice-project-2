@@ -10,8 +10,12 @@ and parameterized SQLite queries.
   response schemas. Request and response models (DTOs, Pydantic) are in
   `schemas.py`; SQLAlchemy ORM models are in `models.py`, with their `Base`,
   engine and `get_db` session dependency in `db.py`.
-- `src/remymy_api/repository/` reads the priced food catalog (see
-  [Catalog database](#catalog-database)).
+- `src/remymy_api/repository/` holds the repositories, each on a SQLAlchemy
+  session: `RecipeRepository` for the priced food catalog (see
+  [Catalog database](#catalog-database)) and `UserRepository` for users and
+  their history (see [Users database](#users-database)).
+  `src/remymy_api/dependencies.py` gives a route its repositories for the
+  request; tests swap them with `app.dependency_overrides`.
 - `src/remymy_api/inference/` runs the recommendation model in the API process:
   `service.py` is what the recommend route calls, over the catalog the
   repository serves; the two `model_inference_*` modules are the GRU +
@@ -84,39 +88,50 @@ newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
 recipe database; SQLite cannot enforce that across files, so `add_history`
 checks it in code.
 
-`app_user` and `user_history` are created and queried with SQL in `users.py`.
-The recipes users write themselves are SQLAlchemy ORM models (`models.py`):
+`UserRepository` (`src/remymy_api/repository/user_repository.py`) reads and
+writes users and their history through the ORM: `models.AppUser` (its
+`preferences` written with `jsonb()` and read with `json()`) and
+`models.UserHistoryEntry`. It looks a username up in Redis before the
+database, and each write commits its own transaction. `app_user` and
+`user_history` are still created by the SQL in `users.py` (`SCHEMA`), for the
+JSON checks and triggers on `preferences`; `users.py` also keeps the rating
+migration, the demo user, and `rate_item`, which checks a rated id is a recipe
+or a catalog food before `UserRepository.add_history` records it.
+
+The recipes users write themselves are ORM-only tables (`models.py`):
 `user_recipe` (ingredient and step lines as JSON arrays, a column per nutrient
 per 100 g) and `user_recipe_tag` (each tag and whether the classifier suggested
 it or the user added it). `create_tables` creates them on startup after the SQL
-schema; `AppUser` maps `app_user` for the foreign key and relationship without
-creating it. `POST /api/recipes` (body `UserRecipeCreate`, response
+schema. `POST /api/recipes` (body `UserRecipeCreate`, response
 `UserRecipeResponse`) is declared and answers `501` until it is implemented.
 
 ## Catalog database
 
 `RecipeRepository` (`src/remymy_api/repository/recipe_repository.py`)
 reads the priced food catalog from a third SQLite file,
-`CATALOG_DATABASE_PATH` (default `/state/remymy-catalog.db`), built from the
-catalog CSV at `CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`).
-Creating the repository creates the file and table if they are missing, reads
-the stored ids with `SELECT DISTINCT fdc_id`, and inserts only the CSV rows
-whose `fdc_id` is not among them; stored rows are not updated. Without the CSV
-an existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
+`CATALOG_DATABASE_PATH` (default `/state/remymy-catalog.db`), through the ORM
+(`models.CatalogFoodRecord`, on its own `CatalogBase`). On startup
+`init_catalog_database` brings it up to date with the catalog CSV at
+`CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`):
+`RecipeRepository.from_csv_to_db` creates the table if it is missing and
+inserts only the CSV rows whose `fdc_id` it does not hold; stored rows are not
+updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV an
+existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
 `foods_by_ids`, `food` and `search` (case-insensitive on the description), and
 `digest`, which turns a recipe's ingredient lines into a `Recipe`
 (`src/remymy_api/recipe.py`): the priced foods the lines match, each line
 normalized by `name_key` and looked up in the ingredient index, and the mean
-of their nutrients. The API builds that index at startup with
-`load_ingredient_index()`; otherwise the first `digest` builds it. The
+of their nutrients. The index is built once per catalog database and shared
+by every request's repository: the API builds it at startup with
+`load_ingredient_index()`, and inserting new foods drops it to be rebuilt. The
 recommend route puts the user's likes in their `History`
 (`src/remymy_api/history.py`) and digests each of its recipes once for the
 inference service.
 
-The app shares one instance, `recipe_repository` in the same module, created
-when the module is first imported; use it rather than creating another. It is
-`None` when there is neither a catalog database nor a CSV, so the import never
-fails. On startup the API hands it to the inference service, which loads the
+A route gets a repository on its request's session from
+`dependencies.get_recipe_repository`, or `None` when there is no catalog
+database (a missing file is not opened, so SQLite does not create it empty).
+On startup the API opens one for the inference service, which loads the
 model from `ARTIFACT_DIR` (default
 `weights/gru_xattn_reranker`) and builds the HNSW index over `all_foods()`. The
 index is saved under `INDEX_DIR` and reused while the model files and the

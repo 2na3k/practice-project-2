@@ -2,5 +2,5 @@
 
 from .logs import configure_logging
 
-# Before any submodule runs: the shared recipe_repository already logs when it is created on import.
+# Before any submodule runs, so everything they log is in this format.
 configure_logging()

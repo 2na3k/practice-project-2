@@ -61,10 +61,13 @@ class FakeRecommender:
 
 
 @pytest.fixture(autouse=True)
-def no_model(monkeypatch) -> None:
-    """No test loads the real models and catalog unless it asks for them."""
+def no_model(monkeypatch, tmp_path) -> None:
+    """No test loads the real models and catalog unless it asks for them. Startup builds the catalog database from
+    CATALOG_PATH, so both point at files that are not there."""
     monkeypatch.setattr(main, "load_recommender", lambda: None)
     monkeypatch.setattr(main, "load_classifier", lambda: None)
+    monkeypatch.setenv("CATALOG_PATH", str(tmp_path / "no-catalog.csv"))
+    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(tmp_path / "no-catalog.db"))
 
 
 @pytest.fixture
@@ -72,3 +75,12 @@ def recommender(monkeypatch) -> FakeRecommender:
     fake = FakeRecommender()
     monkeypatch.setattr(main, "load_recommender", lambda: fake)
     return fake
+
+
+@pytest.fixture
+def override():
+    """Swap a FastAPI dependency for the test, e.g. override(get_recipe_repository, lambda: fake)."""
+    def swap(dependency, replacement) -> None:
+        main.app.dependency_overrides[dependency] = replacement
+    yield swap
+    main.app.dependency_overrides.clear()

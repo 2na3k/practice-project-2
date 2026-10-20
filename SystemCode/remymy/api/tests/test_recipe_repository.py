@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import csv
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 
-from remymy_api.repository.recipe_repository import RecipeRepository, ingredient_index, is_food_id, name_key
+from remymy_api.db import sqlite_engine
+from remymy_api.repository.recipe_repository import (
+    RecipeRepository,
+    ingredient_index,
+    init_catalog_database,
+    is_food_id,
+    name_key,
+)
 from remymy_api.schemas import CatalogFood, ItemPrice
-
-SRC = Path(__file__).resolve().parents[1] / "src"
 
 
 def food(fdc_id: int, description: str = "Apples, raw", sugars_g: str = "10.4") -> dict[str, str]:
@@ -48,70 +51,66 @@ def write_catalog(path: Path, rows: list[dict[str, str]]) -> Path:
     return path
 
 
-def shared_repository_on_import(catalog_csv: Path, catalog_database: Path) -> str:
-    """What recipe_repository is when the module is first imported with these paths, in a fresh interpreter so this
-    process's already-imported module is left alone."""
-    code = ("from remymy_api.repository.recipe_repository import recipe_repository as shared; "
-            "print(None if shared is None else sorted(shared.fdc_ids()))")
-    env = {**os.environ, "PYTHONPATH": str(SRC),
-           "CATALOG_PATH": str(catalog_csv), "CATALOG_DATABASE_PATH": str(catalog_database)}
-    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
-                          check=True).stdout.strip()
+@pytest.fixture
+def open_catalog():
+    """A RecipeRepository on the catalog database at a path, as a request gets one; its session is closed after the
+    test."""
+    sessions: list[Session] = []
+
+    def open_(database: Path) -> RecipeRepository:
+        sessions.append(Session(sqlite_engine(database)))
+        return RecipeRepository(sessions[-1])
+
+    yield open_
+    for session in sessions:
+        session.close()
 
 
-def test_the_shared_repository_is_built_when_the_module_is_imported(tmp_path):
-    catalog = write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])
-    assert shared_repository_on_import(catalog, tmp_path / "catalog.db") == "[1, 2]"
-
-
-def test_importing_without_a_catalog_leaves_the_shared_repository_none(tmp_path):
-    assert shared_repository_on_import(tmp_path / "missing.csv", tmp_path / "missing.db") == "None"
-
-
-def test_builds_the_database_when_there_is_none(tmp_path):
+def test_builds_the_database_when_there_is_none(tmp_path, open_catalog):
     database = tmp_path / "state" / "catalog.db"
-    repository = RecipeRepository(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)]))
+    assert init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])) is True
     assert database.is_file()
-    assert repository.injected == 2
-    assert repository.fdc_ids() == {1, 2}
+    assert open_catalog(database).fdc_ids() == {1, 2}
 
 
-def test_injects_only_the_ids_the_database_does_not_hold(tmp_path):
-    database = tmp_path / "catalog.db"
-    RecipeRepository(database, write_catalog(tmp_path / "first.csv", [food(1), food(2)]))
+def test_injects_only_the_ids_the_database_does_not_hold(tmp_path, open_catalog):
+    repository = open_catalog(tmp_path / "catalog.db")
+    assert repository.from_csv_to_db(write_catalog(tmp_path / "first.csv", [food(1), food(2)])) == 2
     grown = write_catalog(tmp_path / "grown.csv", [food(1), food(2, description="Apples, renamed"), food(3)])
-    repository = RecipeRepository(database, grown)
-    assert repository.injected == 1
+
+    assert repository.from_csv_to_db(grown) == 1
     assert repository.fdc_ids() == {1, 2, 3}
     # 2 was already stored, so the CSV's newer row for it is not written over it
     assert repository.food(2).description == "Apples, raw"
-    assert RecipeRepository(database, grown).injected == 0
+    assert repository.from_csv_to_db(grown) == 0
 
 
-def test_uses_an_existing_database_without_a_csv(tmp_path):
+def test_uses_an_existing_database_without_a_csv(tmp_path, open_catalog):
     database = tmp_path / "catalog.db"
-    RecipeRepository(database, write_catalog(tmp_path / "catalog.csv", [food(1)]))
-    repository = RecipeRepository(database, tmp_path / "missing.csv")
-    assert repository.injected == 0
-    assert repository.fdc_ids() == {1}
+    init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1)]))
+    assert init_catalog_database(database, tmp_path / "missing.csv") is True
+    assert open_catalog(database).fdc_ids() == {1}
 
 
-def test_needs_a_database_or_a_csv(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        RecipeRepository(tmp_path / "catalog.db", tmp_path / "missing.csv")
+def test_without_a_database_or_a_csv_there_is_no_catalog(tmp_path):
+    assert init_catalog_database(tmp_path / "catalog.db", tmp_path / "missing.csv") is False
+    # nothing is created empty
+    assert not (tmp_path / "catalog.db").exists()
 
 
-def test_rejects_a_csv_missing_a_column(tmp_path):
+def test_rejects_a_csv_missing_a_column_before_writing(tmp_path, open_catalog):
     row = food(1)
     del row["sugars_g"]
     with pytest.raises(ValueError, match="sugars_g"):
-        RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", [row]))
+        open_catalog(tmp_path / "catalog.db").from_csv_to_db(write_catalog(tmp_path / "catalog.csv", [row]))
+    assert not (tmp_path / "catalog.db").exists()
 
 
 @pytest.fixture
-def repository(tmp_path) -> RecipeRepository:
+def repository(tmp_path, open_catalog) -> RecipeRepository:
     rows = [food(3, "Chicken, breast, roasted"), food(1), food(2, "Pineapple, raw", sugars_g="")]
-    return RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
+    init_catalog_database(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
+    return open_catalog(tmp_path / "catalog.db")
 
 
 def test_foods_come_back_with_their_lists_dicts_and_missing_nutrients(repository):
@@ -157,10 +156,11 @@ def test_ingredient_index_keeps_one_fully_priced_food_per_name():
         name_key("Bread")].nutrient_values
 
 
-def test_digest_matches_each_line_once_and_averages_the_matched_nutrients(tmp_path):
+def test_digest_matches_each_line_once_and_averages_the_matched_nutrients(tmp_path, open_catalog):
     bread = food(2, "Bread, white", sugars_g="")
     bread.update(energy_kcal="266.0", total_price="2.0")
-    repository = RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", [food(1), bread]))
+    init_catalog_database(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", [food(1), bread]))
+    repository = open_catalog(tmp_path / "catalog.db")
     # apple and bread
     assert repository.load_ingredient_index() == 2
 
@@ -172,6 +172,20 @@ def test_digest_matches_each_line_once_and_averages_the_matched_nutrients(tmp_pa
     # bread has no sugars value, so the apple's is the mean
     assert toast.nutrient_values["sugars_g"] == 10.4
     assert repository.digest("openrecipes:8", ["unknown thing"]).ingredients == []
+
+
+def test_the_ingredient_index_is_shared_and_rebuilt_once_new_foods_come(tmp_path, open_catalog):
+    database = tmp_path / "catalog.db"
+    init_catalog_database(database, write_catalog(tmp_path / "first.csv", [food(1)]))
+    first = open_catalog(database)
+    assert first.load_ingredient_index() == 1
+    # another request's repository on the same database gets the same index, not a new one
+    assert open_catalog(database)._ingredients() is first._ingredients()
+
+    open_catalog(database).from_csv_to_db(write_catalog(tmp_path / "grown.csv", [food(1), food(2, "Bread, white")]))
+
+    assert open_catalog(database).load_ingredient_index() == 2
+    assert [ingredient.fdc_id for ingredient in first.digest("r", ["bread"]).ingredients] == [2]
 
 
 def test_name_key_drops_case_asides_punctuation_and_stop_words_then_singularizes():
@@ -196,19 +210,35 @@ def test_food_ids_are_fdc_ids_and_recipe_ids_are_not():
     assert not is_food_id("١٢٣")
 
 
+def test_startup_builds_the_catalog_database_from_the_csv(tmp_path, monkeypatch, cache, open_catalog):
+    from fastapi.testclient import TestClient
+
+    from remymy_api.main import app
+
+    database = tmp_path / "state" / "catalog.db"
+    monkeypatch.setenv("CATALOG_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])))
+    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(database))
+    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
+
+    with TestClient(app) as client:
+        found = client.get("/api/catalog/2")
+
+    assert found.status_code == 200
+    assert open_catalog(database).fdc_ids() == {1, 2}
+
+
 def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from remymy_api import routes
     from remymy_api.main import app
 
     monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
-    monkeypatch.setattr(routes, "recipe_repository", repository)
+    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(tmp_path / "catalog.db"))
     with TestClient(app) as client:
         found = client.get("/api/catalog/2")
         missing = client.get("/api/catalog/99")
         invalid = client.get("/api/catalog/openrecipes:1")
-        monkeypatch.setattr(routes, "recipe_repository", None)
+        monkeypatch.setenv("CATALOG_DATABASE_PATH", str(tmp_path / "gone.db"))
         unloaded = client.get("/api/catalog/2")
 
     assert found.status_code == 200
@@ -219,4 +249,5 @@ def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypa
     assert (missing.status_code, missing.json()) == (404, {"detail": "Catalog item not found."})
     assert invalid.status_code == 422
     assert unloaded.status_code == 503
-
+    # no empty catalog database was created for the missing one
+    assert not (tmp_path / "gone.db").exists()

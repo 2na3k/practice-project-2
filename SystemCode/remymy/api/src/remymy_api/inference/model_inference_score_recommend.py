@@ -690,13 +690,17 @@ def main():
     args = parser.parse_args()
 
     # Imported here: the service imports this module, and only the command line needs the repository.
-    from ..repository.recipe_repository import RecipeRepository, recipe_repository
+    from sqlalchemy.orm import Session
+
+    from ..db import catalog_database_path, sqlite_engine
+    from ..repository.recipe_repository import RecipeRepository, init_catalog_database
     from .service import catalog_recipes
 
-    repository = RecipeRepository(database_path=args.catalog) if args.catalog else recipe_repository
-    if repository is None:
+    database = args.catalog or catalog_database_path()
+    if not init_catalog_database(database):
         parser.error("no catalog: pass --catalog, or set CATALOG_DATABASE_PATH or CATALOG_PATH")
-    recipes = catalog_recipes(repository.all_foods())
+    with Session(sqlite_engine(database)) as session:
+        recipes = catalog_recipes(RecipeRepository(session).all_foods())
     pipeline = RetrievalPipeline.from_recipes(recipes, args.artifacts, args.index_dir,
                                               rebuild=args.rebuild or args.command == "build")
     if args.command == "build":

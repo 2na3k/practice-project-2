@@ -5,21 +5,21 @@ import sqlite3
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Path, Query, Request
+from sqlalchemy.exc import SQLAlchemyError
 
-from .db import close_database, get_db, open_database, split_preview
+from .db import close_database, open_database, split_preview
 from .cache import drop_recommendation, read_recommendations, write_recommendations
+from .dependencies import Catalog, Users
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
-from .repository.recipe_repository import is_food_id, recipe_repository
+from .repository.recipe_repository import is_food_id
 from .schemas import (
     CatalogFood,
     ClassifyRequest,
     FoodClassification,
     HealthResponse,
     HistoryItem,
-    Preferences,
     RecipeDetail,
     RecipeListResponse,
     RecipeSummary,
@@ -29,14 +29,7 @@ from .schemas import (
     UserRecipeCreate,
     UserRecipeResponse,
 )
-from .users import (
-    add_history,
-    fetch_user_history,
-    fetch_user_likes,
-    find_user_id,
-    item_titles,
-    open_user_database,
-)
+from .users import item_titles, rate_item
 
 logger = logging.getLogger(__name__)
 
@@ -171,25 +164,25 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     tags=["recipes"],
     responses={404: {"description": "User not found."}, 501: {"description": "Not implemented yet."}},
 )
-def create_recipe(body: UserRecipeCreate, session: Annotated[Session, Depends(get_db)]) -> UserRecipeResponse:
+def create_recipe(body: UserRecipeCreate, users: Users) -> UserRecipeResponse:
     """Save a recipe the user wrote themselves, with the tags they kept or added, and return it as stored.
 
     Declared only: the app's Add recipe screen already sends this body, and shows the 501 until it is implemented."""
-    # TODO: with the ORM on `session`: 404 unless session.get(models.AppUser, body.user_id) finds the user; add a
-    # models.UserRecipe built from `body` (its tags as models.UserRecipeTag), commit, and return
+    # TODO: 404 unless users.user_exists(body.user_id); then a UserRepository.create_recipe that adds a
+    # models.UserRecipe built from `body` (its tags as models.UserRecipeTag), commits, and returns
     # UserRecipeResponse.model_validate(recipe). The DTOs are in schemas.py, the ORM models in models.py.
     raise HTTPException(status_code=501, detail="Saving your own recipes is not implemented yet.")
 
 
 @router.get("/api/catalog/{fdc_id}", response_model=CatalogFood, tags=["recipes"])
-def get_catalog_item(fdc_id: int) -> CatalogFood:
+def get_catalog_item(fdc_id: int, catalog: Catalog) -> CatalogFood:
     """One item of the priced catalog the recommendations come from: its ingredients with their FairPrice packs and
     prices, and its nutrients per 100 g."""
-    if recipe_repository is None:
+    if catalog is None:
         raise HTTPException(status_code=503, detail="The food catalog is not loaded.")
     try:
-        item = recipe_repository.food(fdc_id)
-    except sqlite3.Error:
+        item = catalog.food(fdc_id)
+    except SQLAlchemyError:
         logger.exception("Reading catalog item %d failed.", fdc_id)
         raise HTTPException(status_code=503, detail="The food catalog is unavailable.")
     if item is None:
@@ -204,14 +197,12 @@ def get_recommendation(
         Path(openapi_examples={"demo": {"summary": "Seeded demo user", "value": "demo"}}),
     ],
     request: Request,
+    users: Users,
+    catalog: Catalog,
     top_k: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> RecommendationResponse:
     cache = request.app.state.cache
-    connection = open_user_database()
-    try:
-        user_history = fetch_user_history(connection, cache, username)
-    finally:
-        connection.close()
+    user_history = users.fetch_user_history(username)
     if len(user_history) == 0:
         logger.debug("No history for %r, so no recommendations.", username)
         return RecommendationResponse(profile=None, items=[])
@@ -220,11 +211,11 @@ def get_recommendation(
     recommendations = read_recommendations(cache, user_id)
     if recommendations is None:
         recommender = request.app.state.recommender
-        if recommender is None:
+        if recommender is None or catalog is None:
             logger.warning("Recommendations for user %d asked for, but no food catalog is loaded.", user_id)
             raise HTTPException(status_code=503, detail="Recommendations are unavailable: the food catalog is not loaded.")
         started = time.perf_counter()
-        recommendations = recommend(recommender, user_history)
+        recommendations = recommend(recommender, user_history, catalog)
         logger.info("Recommended %d foods for user %d from %d history recipes in %.2fs.",
                     len(recommendations.items), user_id, len(user_history), time.perf_counter() - started)
         write_recommendations(cache, user_id, recommendations)
@@ -290,35 +281,26 @@ def classify_training_food(
 
 
 @router.get("/api/users/{username}", response_model=User, tags=["users"])
-def get_user(username: str) -> User:
+def get_user(username: str, users: Users) -> User:
     """A user by username, for clients that know the username but need the user_id the other routes take."""
-    connection = open_user_database()
     try:
-        row = connection.execute(
-            "SELECT user_id, username, json(preferences) AS preferences FROM app_user WHERE username = ?", (username,)
-        ).fetchone()
-    except sqlite3.Error:
+        user = users.get_user(username)
+    except SQLAlchemyError:
         logger.exception("Reading user %r failed.", username)
         raise HTTPException(status_code=503, detail="User data is unavailable.")
-    finally:
-        connection.close()
-    if row is None:
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
-    return User(id=row["user_id"], username=row["username"],
-                preferences=Preferences.model_validate_json(row["preferences"]))
+    return user
 
 
 @router.get("/api/users/{username}/likes", response_model=dict[str, bool], tags=["users"])
-def get_user_likes(username: str, request: Request) -> dict[str, bool]:
+def get_user_likes(username: str, users: Users) -> dict[str, bool]:
     """Whether the user liked each recipe or catalog food they rated, by its id, so a client can show it."""
-    connection = open_user_database()
     try:
-        likes = fetch_user_likes(connection, request.app.state.cache, username)
-    except sqlite3.Error:
+        likes = users.fetch_user_likes(username)
+    except SQLAlchemyError:
         logger.exception("Reading the likes of %r failed.", username)
         raise HTTPException(status_code=503, detail="User data is unavailable.")
-    finally:
-        connection.close()
     if likes is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return likes
@@ -327,23 +309,20 @@ def get_user_likes(username: str, request: Request) -> dict[str, bool]:
 @router.get("/api/users/{username}/history", response_model=list[HistoryItem], tags=["users"])
 def get_user_history(
     username: str,
-    request: Request,
+    users: Users,
+    catalog: Catalog,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[HistoryItem]:
     """The user's history, newest first: each recipe or recommended food they rated, its title, and whether they liked
     it."""
-    cache = request.app.state.cache
-    connection = open_user_database()
     try:
-        if find_user_id(connection, cache, username) is None:
+        if users.find_user_id(username) is None:
             raise HTTPException(status_code=404, detail="User not found.")
-        rows = fetch_user_history(connection, cache, username, limit)
-    except sqlite3.Error:
+        rows = users.fetch_user_history(username, limit)
+    except SQLAlchemyError:
         logger.exception("Reading the history of %r failed.", username)
         raise HTTPException(status_code=503, detail="User data is unavailable.")
-    finally:
-        connection.close()
-    titles = item_titles(row.recipe_id for row in rows)
+    titles = item_titles((row.recipe_id for row in rows), catalog)
     return [
         HistoryItem(recipe_id=row.recipe_id, kind="food" if is_food_id(row.recipe_id) else "recipe",
                     title=titles.get(row.recipe_id), like=row.like, timestamp=row.timestamp)
@@ -357,23 +336,22 @@ def rate_recipe(
     user_id: int,
     like: bool,
     request: Request,
+    users: Users,
+    catalog: Catalog,
 ) -> UserHistory:
     """Record whether the user liked a recipe they cooked, or a catalog food by its fdc_id (a recommended grocery). Rating
     the same one again changes the like in their history rather than adding another. A recommendation they did not
     like also leaves their cached recommendations."""
-    connection = open_user_database()
     try:
-        if connection.execute("SELECT 1 FROM app_user WHERE user_id = ?", (user_id,)).fetchone() is None:
+        if not users.user_exists(user_id):
             raise HTTPException(status_code=404, detail="User not found.")
-        # add_history checks the recipe or food exists, then updates its row of user_history or inserts one
-        entry = add_history(connection, user_id, recipe_id, like)
+        # rate_item checks the recipe or food exists, then updates its row of user_history or inserts one
+        entry = rate_item(users, catalog, user_id, recipe_id, like)
     except LookupError:
         raise HTTPException(status_code=404, detail="Recipe not found.")
-    except sqlite3.Error:
+    except SQLAlchemyError:
         logger.exception("Recording whether user %d liked recipe %s failed.", user_id, recipe_id)
         raise HTTPException(status_code=503, detail="User data is unavailable.")
-    finally:
-        connection.close()
     if not like and drop_recommendation(request.app.state.cache, user_id, recipe_id):
         logger.debug("Dropped %s, which user %d did not like, from their cached recommendations.", recipe_id, user_id)
     return entry

@@ -8,11 +8,16 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from remymy_api import main, recommend, users
+from sqlalchemy.orm import Session
+
+from remymy_api import main, recommend
+from remymy_api.db import users_engine
+from remymy_api.dependencies import get_recipe_repository
 from remymy_api.main import app, load_recommender
 from remymy_api.recipe import Recipe
+from remymy_api.repository.user_repository import UserRepository
 from remymy_api.schemas import Ingredient
-from remymy_api.users import add_history, create_user, init_user_database, open_user_database
+from remymy_api.users import init_user_database
 
 
 CATALOG = {
@@ -31,7 +36,7 @@ RECOMMENDED = [
 
 
 class FakeRepository:
-    """Stands in for the shared recipe_repository: an ingredient line matches the CATALOG food it names exactly."""
+    """Stands in for the catalog's RecipeRepository: an ingredient line matches the CATALOG food it names exactly."""
 
     def __init__(self) -> None:
         self.digested: list[str] = []
@@ -59,7 +64,8 @@ def answer(history, recipes, top_k: int) -> list[dict]:
 
 
 @pytest.fixture
-def stores(tmp_path, monkeypatch):
+def stores(tmp_path, monkeypatch, cache):
+    """The recipe database with three recipes, and a UserRepository on a new users database."""
     recipes = tmp_path / "recipes.db"
     with sqlite3.connect(recipes) as connection:
         connection.executescript(
@@ -87,17 +93,15 @@ def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(recipes))
     monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
     init_user_database()
-    connection = open_user_database()
-    yield connection
-    connection.close()
+    with Session(users_engine()) as session:
+        yield UserRepository(session, cache)
 
 
 @pytest.fixture
-def repository(monkeypatch) -> FakeRepository:
+def repository(override) -> FakeRepository:
     fake = FakeRepository()
-    monkeypatch.setattr(recommend, "recipe_repository", fake)
-    # add_history looks a rated catalog food up in it
-    monkeypatch.setattr(users, "recipe_repository", fake)
+    # the recommend and rating routes get it as the catalog
+    override(get_recipe_repository, lambda: fake)
     return fake
 
 
@@ -107,15 +111,15 @@ def models(recommender, repository):
     return recommender
 
 
-def seed_alice(stores, cache) -> int:
-    alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", like=True)
-    add_history(stores, alice.id, "openrecipes:2", like=False)
+def seed_alice(stores) -> int:
+    alice = stores.create_user("alice")
+    stores.add_history(alice.id, "openrecipes:1", like=True)
+    stores.add_history(alice.id, "openrecipes:2", like=False)
     return alice.id
 
 
 def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice", params={"top_k": 2})
@@ -154,9 +158,9 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
 
 
 def test_rating_a_recipe_again_changes_its_like(stores, models, repository, cache):
-    alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", like=False)
-    add_history(stores, alice.id, "openrecipes:1", like=True)
+    alice = stores.create_user("alice")
+    stores.add_history(alice.id, "openrecipes:1", like=False)
+    stores.add_history(alice.id, "openrecipes:1", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice")
@@ -170,9 +174,9 @@ def test_rating_a_recipe_again_changes_its_like(stores, models, repository, cach
 
 
 def test_a_rated_grocery_goes_to_the_model_as_itself(stores, models, repository, cache):
-    alice = create_user(stores, cache, "alice")
+    alice = stores.create_user("alice")
     # "Apples, raw" of CATALOG, by its fdc_id, as the groceries panel rates it
-    add_history(stores, alice.id, "3", like=True)
+    stores.add_history(alice.id, "3", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice")
@@ -184,7 +188,7 @@ def test_a_rated_grocery_goes_to_the_model_as_itself(stores, models, repository,
 
 
 def test_later_requests_are_served_from_the_cache(stores, models, cache):
-    seed_alice(stores, cache)
+    seed_alice(stores)
 
     with TestClient(app) as client:
         first = client.get("/api/recommend/alice", params={"top_k": 1}).json()
@@ -197,7 +201,7 @@ def test_later_requests_are_served_from_the_cache(stores, models, cache):
 
 
 def test_user_lookup_goes_to_redis_before_the_database(stores, models, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
     cache.store.clear()
 
     with TestClient(app) as client:
@@ -220,8 +224,8 @@ def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
 
 
 def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache):
-    bob = create_user(stores, cache, "bob")
-    add_history(stores, bob.id, "openrecipes:3", like=True)
+    bob = stores.create_user("bob")
+    stores.add_history(bob.id, "openrecipes:3", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/bob")
@@ -232,7 +236,7 @@ def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache)
 
 
 def test_redis_down_still_answers_from_the_model(stores, models, cache):
-    seed_alice(stores, cache)
+    seed_alice(stores)
     cache.down = True
 
     with TestClient(app) as client:
@@ -245,7 +249,7 @@ def test_redis_down_still_answers_from_the_model(stores, models, cache):
 
 
 def test_a_computed_recommendation_is_logged_and_a_cache_hit_at_debug(stores, models, cache, caplog):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
 
     with caplog.at_level(logging.DEBUG, logger="remymy_api"):
         with TestClient(app) as client:
@@ -262,7 +266,7 @@ def test_a_computed_recommendation_is_logged_and_a_cache_hit_at_debug(stores, mo
 
 
 def test_redis_failures_are_logged_as_warnings(stores, models, cache, caplog):
-    seed_alice(stores, cache)
+    seed_alice(stores)
     cache.down = True
 
     with TestClient(app) as client:
@@ -275,10 +279,9 @@ def test_redis_failures_are_logged_as_warnings(stores, models, cache, caplog):
 
 
 def test_without_a_catalog_the_api_starts_and_recommendations_are_503(stores, cache, monkeypatch):
-    # what recipe_repository is when neither a catalog database nor a CSV was there on import
-    monkeypatch.setattr(main, "recipe_repository", None)
+    # the real load, on the catalog database conftest points at, which is not there
     monkeypatch.setattr(main, "load_recommender", load_recommender)
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
 
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
@@ -288,17 +291,22 @@ def test_without_a_catalog_the_api_starts_and_recommendations_are_503(stores, ca
     assert f"recommendations:{alice}" not in cache.store
 
 
-def test_the_recommender_is_built_on_the_shared_repository(monkeypatch):
-    from remymy_api.inference import service
+def test_the_recommender_is_built_on_the_catalog_database(tmp_path, monkeypatch):
+    from test_recipe_repository import food, write_catalog
 
-    shared = object()
-    monkeypatch.setattr(main, "recipe_repository", shared)
-    monkeypatch.setattr(service.Recommender, "load", classmethod(lambda cls, repository: repository))
-    assert load_recommender() is shared
+    from remymy_api.inference import service
+    from remymy_api.repository.recipe_repository import init_catalog_database
+
+    database = tmp_path / "catalog.db"
+    init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)]))
+    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(database))
+    monkeypatch.setattr(service.Recommender, "load", classmethod(lambda cls, repository: repository.fdc_ids()))
+
+    assert load_recommender() == {1, 2}
 
 
 def test_a_disliked_pick_leaves_the_cached_recommendations(stores, models, repository, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
     key = f"recommendations:{alice}"
 
     with TestClient(app) as client:
@@ -319,7 +327,7 @@ def test_a_disliked_pick_leaves_the_cached_recommendations(stores, models, repos
 
 
 def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
     cache.down = True
 
     with TestClient(app) as client:

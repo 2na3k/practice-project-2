@@ -1,3 +1,5 @@
+"""The priced food catalog: its own SQLite database (CATALOG_DATABASE_PATH), built from the catalog CSV (CATALOG_PATH)
+and read through the ORM (models.CatalogFoodRecord), and the Recipes digested against it."""
 from __future__ import annotations
 
 import ast
@@ -5,63 +7,27 @@ import csv
 import logging
 import os
 import re
-import sqlite3
+import threading
 from collections import defaultdict
 from collections.abc import Iterable
-from contextlib import closing
-from functools import cache, cached_property
+from functools import cache
 from pathlib import Path
 from statistics import fmean, median
 
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
+from sqlalchemy import Float, Integer, insert, select
+from sqlalchemy.orm import Session
 
+from ..db import CatalogBase, catalog_database_path, sqlite_engine
+from ..models import CatalogFoodRecord, PythonLiteral
 from ..recipe import Recipe
 from ..schemas import CatalogFood, Ingredient
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CATALOG_PATH = "/data/price_mapped_nutrients.csv"
-DEFAULT_CATALOG_DATABASE_PATH = "/state/remymy-catalog.db"
-TABLE = "price_mapped_nutrients"
-
-# price_mapped_nutrients.csv column for column, in file order. Prices are SGD; nutrients are per 100 g, NULL where
-# FDC has no value.
-SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS {TABLE} (
-  fdc_id                   INTEGER PRIMARY KEY,
-  description              TEXT NOT NULL,
-  product                  TEXT NOT NULL,  -- list: the food's ingredient spans
-  item_prices              TEXT NOT NULL,  -- dict: span -> {{'price': pack price, 'quantity': pack size(s) in g / ml}}
-  item_unit_prices         TEXT NOT NULL,  -- dict: span -> price per 100 g / 100 ml
-  item_routes              TEXT NOT NULL,  -- dict: span -> 'variation' | 'average' | 'term crawl'
-  matched_variations       TEXT NOT NULL,  -- dict: span -> the brand / variant words it matched
-  unpriced_items           TEXT NOT NULL,  -- list: spans no listing priced
-  priced_items             INTEGER NOT NULL CHECK (priced_items >= 1),
-  total_items              INTEGER NOT NULL CHECK (total_items >= priced_items),
-  priced_share             REAL NOT NULL CHECK (priced_share > 0 AND priced_share <= 1),
-  items_without_unit_price INTEGER NOT NULL CHECK (items_without_unit_price BETWEEN 0 AND priced_items),
-  adj                      TEXT NOT NULL,  -- list
-  verb                     TEXT NOT NULL,  -- list
-  total_price              REAL NOT NULL CHECK (total_price >= 0),     -- 0 unless every item is priced
-  basket_per_100           REAL NOT NULL CHECK (basket_per_100 >= 0),  -- 0 unless every item is priced
-  protein_g                REAL,
-  fat_g                    REAL,
-  carb_g                   REAL,
-  energy_kcal              REAL,
-  fiber_g                  REAL,
-  sodium_mg                REAL,
-  cholesterol_mg           REAL,
-  satfat_g                 REAL,
-  sugars_g                 REAL
-);
-"""
-
-LITERAL_COLUMNS = (
-    "product", "item_prices", "item_unit_prices", "item_routes", "matched_variations", "unpriced_items", "adj", "verb",
-)
-CONVERTERS = {"INTEGER": int, "REAL": float, "TEXT": str}
 
 # The nutrients a matched ingredient reports, for its recipe's nutrient values and the buying profile.
 NUTRIENT_COLUMNS = (
@@ -71,20 +37,32 @@ NUTRIENT_COLUMNS = (
 # map_recipe_nutrients.ipynb keeps these of NLTK's English stop words: the single letters and the negations.
 KEPT_STOP_WORDS = {"a", "d", "i", "m", "no", "nor", "not", "o", "s", "t", "y"}
 
+# The ingredient index of each catalog database, by its URL: built once from its foods, then shared by the repositories
+# every request makes on it.
+_ingredient_indexes: dict[str, dict[str, Ingredient]] = {}
+_ingredient_indexes_lock = threading.Lock()
+
 
 def catalog_path() -> Path:
     return Path(os.getenv("CATALOG_PATH", DEFAULT_CATALOG_PATH))
 
 
-def catalog_database_path() -> Path:
-    return Path(os.getenv("CATALOG_DATABASE_PATH", DEFAULT_CATALOG_DATABASE_PATH))
-
-
-def food_from_row(row: sqlite3.Row) -> CatalogFood:
-    values = dict(row)
-    for column in LITERAL_COLUMNS:
-        values[column] = ast.literal_eval(values[column])
-    return CatalogFood(**values)
+def csv_values(row: dict[str, str]) -> dict[str, object]:
+    """A catalog CSV row as CatalogFoodRecord's values. An empty cell is a value FDC does not have, so None."""
+    values: dict[str, object] = {}
+    for column in CatalogFoodRecord.__table__.columns:
+        text = row[column.name]
+        if text == "":
+            values[column.name] = None
+        elif isinstance(column.type, PythonLiteral):
+            values[column.name] = ast.literal_eval(text)
+        elif isinstance(column.type, Integer):
+            values[column.name] = int(text)
+        elif isinstance(column.type, Float):
+            values[column.name] = float(text)
+        else:
+            values[column.name] = text
+    return values
 
 
 @cache
@@ -148,112 +126,90 @@ def ingredient_index(foods: Iterable[CatalogFood]) -> dict[str, Ingredient]:
 
 
 class RecipeRepository:
-    """The priced food catalog, read from its SQLite database, and the Recipes digested against it.
+    """The priced food catalog in its database, through the ORM, and the Recipes digested against it.
 
-    Creating one brings the database up to date with the catalog CSV first: a missing database is created, and the
-    CSV's foods whose fdc_id the table does not hold yet are injected, so a grown catalog adds just its new foods.
-    Without a CSV an existing database is used as it is."""
+    One is made per request on that request's session (dependencies.get_recipe_repository). The ingredient index the
+    digests match against is built once per catalog database and shared by them all."""
 
-    def __init__(self, database_path: Path | None = None, csv_path: Path | None = None) -> None:
-        self.database_path = Path(database_path) if database_path else catalog_database_path()
-        self.csv_path = Path(csv_path) if csv_path else catalog_path()
-        self.injected = self.inject()
+    def __init__(self, session: Session) -> None:
+        self.session = session
 
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        return connection
+    @property
+    def _database(self) -> str:
+        return str(self.session.get_bind().engine.url)
 
-    def inject(self) -> int:
-        """Insert the CSV's foods the table does not hold yet; returns how many went in."""
-        if not self.csv_path.is_file():
-            if self.database_path.is_file():
-                logger.info("No catalog CSV at %s; using the catalog database %s as it is.",
-                            self.csv_path, self.database_path)
-                return 0
-            raise FileNotFoundError(
-                f"No catalog database at {self.database_path}, and no catalog CSV at {self.csv_path} to build it from."
-            )
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self.connect()) as connection:
-            connection.executescript(SCHEMA)
-            types = {row["name"]: row["type"] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
-            stored = self._fdc_ids(connection)
-            with self.csv_path.open(newline="", encoding="utf-8") as file:
-                reader = csv.DictReader(file)
-                missing = [column for column in types if column not in (reader.fieldnames or ())]
-                if missing:
-                    raise ValueError(f"{self.csv_path} has no column {', '.join(missing)}")
-                rows = {int(row["fdc_id"]): row for row in reader}
-            new_ids = rows.keys() - stored
-            # an empty cell is a value FDC does not have, so NULL rather than ''
-            values = [
-                tuple(None if row[column] == "" else CONVERTERS[kind](row[column]) for column, kind in types.items())
-                for fdc_id, row in rows.items()
-                if fdc_id in new_ids
-            ]
-            with connection:
-                connection.executemany(
-                    f"INSERT INTO {TABLE} ({', '.join(types)}) VALUES ({', '.join('?' * len(types))})", values
-                )
+    def from_csv_to_db(self, csv_path: Path) -> int:
+        """Create the catalog table where it is missing and insert the CSV's foods whose fdc_id it does not hold yet,
+        so a grown catalog adds just its new foods (a stored food is left as it is). Returns how many went in."""
+        columns = [column.name for column in CatalogFoodRecord.__table__.columns]
+        with csv_path.open(newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            missing = [column for column in columns if column not in (reader.fieldnames or ())]
+            if missing:
+                raise ValueError(f"{csv_path} has no column {', '.join(missing)}")
+            rows = {int(row["fdc_id"]): row for row in reader}
+        CatalogBase.metadata.create_all(self.session.connection())
+        stored = self.fdc_ids()
+        new = [csv_values(row) for fdc_id, row in rows.items() if fdc_id not in stored]
+        if new:
+            self.session.execute(insert(CatalogFoodRecord), new)
+        self.session.commit()
+        # an index built before has none of the new foods
+        with _ingredient_indexes_lock:
+            _ingredient_indexes.pop(self._database, None)
         logger.info("Catalog database %s: %d foods inserted from %s, %d already stored.",
-                    self.database_path, len(values), self.csv_path, len(rows) - len(values))
-        return len(values)
-
-    @staticmethod
-    def _fdc_ids(connection: sqlite3.Connection) -> set[int]:
-        return {row[0] for row in connection.execute(f"SELECT DISTINCT fdc_id FROM {TABLE}")}
+                    self.session.get_bind().engine.url.database, len(new), csv_path, len(rows) - len(new))
+        return len(new)
 
     def fdc_ids(self) -> set[int]:
-        with closing(self.connect()) as connection:
-            return self._fdc_ids(connection)
+        return set(self.session.scalars(select(CatalogFoodRecord.fdc_id)))
 
     def all_foods(self) -> list[CatalogFood]:
-        with closing(self.connect()) as connection:
-            rows = connection.execute(f"SELECT * FROM {TABLE} ORDER BY fdc_id").fetchall()
-        return [food_from_row(row) for row in rows]
+        records = self.session.scalars(select(CatalogFoodRecord).order_by(CatalogFoodRecord.fdc_id))
+        return [CatalogFood.model_validate(record) for record in records]
 
     def foods_by_ids(self, fdc_ids: Iterable[int]) -> list[CatalogFood]:
         """The foods of those fdc_ids, in the order asked; an id the catalog does not have is left out."""
         wanted = list(dict.fromkeys(fdc_ids))
         if not wanted:
             return []
-        with closing(self.connect()) as connection:
-            rows = connection.execute(
-                f"SELECT * FROM {TABLE} WHERE fdc_id IN ({', '.join('?' * len(wanted))})", wanted
-            ).fetchall()
-        by_id = {row["fdc_id"]: row for row in rows}
-        return [food_from_row(by_id[fdc_id]) for fdc_id in wanted if fdc_id in by_id]
+        records = self.session.scalars(select(CatalogFoodRecord).where(CatalogFoodRecord.fdc_id.in_(wanted)))
+        by_id = {record.fdc_id: record for record in records}
+        return [CatalogFood.model_validate(by_id[fdc_id]) for fdc_id in wanted if fdc_id in by_id]
 
     def food(self, fdc_id: int) -> CatalogFood | None:
-        found = self.foods_by_ids([fdc_id])
-        return found[0] if found else None
+        record = self.session.get(CatalogFoodRecord, fdc_id)
+        return None if record is None else CatalogFood.model_validate(record)
 
     def search(self, query: str, limit: int = 20, offset: int = 0) -> list[CatalogFood]:
         """Foods whose description contains the query, case-insensitively, in fdc_id order."""
-        with closing(self.connect()) as connection:
-            rows = connection.execute(
-                f"SELECT * FROM {TABLE} WHERE description LIKE ? COLLATE NOCASE ORDER BY fdc_id LIMIT ? OFFSET ?",
-                (f"%{query.strip()}%", limit, offset),
-            ).fetchall()
-        return [food_from_row(row) for row in rows]
+        records = self.session.scalars(
+            select(CatalogFoodRecord)
+            .where(CatalogFoodRecord.description.ilike(f"%{query.strip()}%"))
+            .order_by(CatalogFoodRecord.fdc_id).limit(limit).offset(offset)
+        )
+        return [CatalogFood.model_validate(record) for record in records]
 
-    @cached_property
     def _ingredients(self) -> dict[str, Ingredient]:
-        """The catalog's ingredient_index, built the first time it is needed and kept."""
-        return ingredient_index(self.all_foods())
+        """This catalog database's ingredient_index, built from its foods the first time it is needed and kept."""
+        with _ingredient_indexes_lock:
+            index = _ingredient_indexes.get(self._database)
+            if index is None:
+                index = _ingredient_indexes[self._database] = ingredient_index(self.all_foods())
+        return index
 
     def load_ingredient_index(self) -> int:
         """Build the ingredient index now, so the first recipe digested does not wait for it; returns its name keys'
         count. Building it again does nothing."""
-        return len(self._ingredients)
+        return len(self._ingredients())
 
     def digest(self, recipe_id: str, lines: Iterable[str]) -> Recipe:
         """A recipe's ingredient lines → the Recipe the recommender reads. Each line's name key is matched to the
         food the ingredient index holds for it, a key once however many lines share it; a line no priced food
         matches is left out. The recipe's nutrient values are the mean of its matched foods'."""
+        index = self._ingredients()
         keys = dict.fromkeys(name_key(line) for line in lines)
-        ingredients = [self._ingredients[key] for key in keys if key in self._ingredients]
+        ingredients = [index[key] for key in keys if key in index]
         nutrients: dict[str, list[float]] = defaultdict(list)
         for ingredient in ingredients:
             for name, value in ingredient.nutrient_values.items():
@@ -270,12 +226,19 @@ class RecipeRepository:
         return Recipe(food_id, [ingredient], ingredient.nutrient_values)
 
 
-# The one repository the app shares, built from CATALOG_PATH / CATALOG_DATABASE_PATH when this module is first
-# imported. None when there is neither a catalog database nor a CSV to build it from, so that importing it never
-# fails: the recipe and user routes do not need the catalog.
-recipe_repository: RecipeRepository | None
-try:
-    recipe_repository = RecipeRepository()
-except FileNotFoundError as error:
-    logger.warning("%s", error)
-    recipe_repository = None
+def init_catalog_database(database_path: Path | None = None, csv_path: Path | None = None) -> bool:
+    """Bring the catalog database up to date with the catalog CSV, as the API does at startup: a missing database is
+    created, and the CSV's foods it does not hold yet are inserted. Without a CSV an existing database is used as it
+    is. Returns whether there is a catalog database; without one, the routes that need it answer 503."""
+    database_path = database_path or catalog_database_path()
+    csv_path = csv_path or catalog_path()
+    if not csv_path.is_file():
+        if database_path.is_file():
+            logger.info("No catalog CSV at %s; using the catalog database %s as it is.", csv_path, database_path)
+            return True
+        logger.warning("No catalog database at %s, and no catalog CSV at %s to build it from.", database_path, csv_path)
+        return False
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with Session(sqlite_engine(database_path)) as session:
+        RecipeRepository(session).from_csv_to_db(csv_path)
+    return True

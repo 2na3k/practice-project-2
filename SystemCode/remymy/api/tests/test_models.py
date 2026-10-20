@@ -46,8 +46,10 @@ def test_startup_creates_the_orm_tables_and_leaves_the_sql_ones_be(engine):
     tables = set(inspect(engine).get_table_names())
 
     assert {"app_user", "user_history", "user_recipe", "user_recipe_tag"} <= tables
-    # app_user is mapped, but its table is still users.SCHEMA's, with the preferences the ORM does not map
-    assert "preferences" in {column["name"] for column in inspect(engine).get_columns("app_user")}
+    # app_user is mapped, but its table is still users.SCHEMA's: the JSONB preferences keep their SQL checks
+    with engine.connect() as connection:
+        ddl = connection.exec_driver_sql("SELECT sql FROM sqlite_master WHERE name = 'app_user'").scalar_one()
+    assert "json_valid(preferences, 8)" in ddl
 
 
 def test_a_request_dto_is_stored_and_read_back_as_the_response_dto(engine):

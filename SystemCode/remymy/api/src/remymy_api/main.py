@@ -4,10 +4,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
 
 from .cache import connect_cache
-from .db import users_engine
-from .repository.recipe_repository import recipe_repository
+from .db import catalog_database_path, catalog_engine, users_engine
+from .repository.recipe_repository import RecipeRepository, init_catalog_database
 from .routes import router
 from .users import init_user_database
 
@@ -15,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 def load_recommender():
-    """The inference service over the shared recipe_repository, or None when there is no catalog to load."""
-    if recipe_repository is None:
+    """The inference service over the catalog database, or None when there is no catalog to load."""
+    if not catalog_database_path().is_file():
         # the recipe and user routes do not need the catalog, so the API still starts
         logger.warning("No food catalog is loaded; recommendations answer 503.")
         return None
@@ -24,7 +25,9 @@ def load_recommender():
     # Imported here so torch, hnswlib and the weights load when the API starts, not whenever this module is imported.
     from .inference.service import Recommender
 
-    recommender = Recommender.load(recipe_repository)
+    # reads the catalog's foods and builds its ingredient index, which the requests' repositories then share
+    with Session(catalog_engine()) as session:
+        recommender = Recommender.load(RecipeRepository(session))
     logger.info("Recommender ready in %.1fs.", time.perf_counter() - started)
     return recommender
 
@@ -53,6 +56,8 @@ async def lifespan(app: FastAPI):
     app.state.cache = connect_cache()
     # with SEED_DEMO_USER, this also injects the demo user
     init_user_database()
+    # builds the catalog database from the catalog CSV, or adds the CSV's new foods to it
+    init_catalog_database()
     app.state.recommender = load_recommender()
     app.state.classifier = load_classifier()
     logger.info("API ready; recommendations %s, classification %s.",
@@ -63,6 +68,7 @@ async def lifespan(app: FastAPI):
     finally:
         app.state.cache.close()
         users_engine().dispose()
+        catalog_engine().dispose()
         logger.info("API stopped.")
 
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy.orm import Session
 from test_recipe_repository import catalog_food, food as csv_food, write_catalog
 
+from remymy_api.db import sqlite_engine
 from remymy_api.history import History
 from remymy_api.inference.service import Recommender, catalog_recipes
-from remymy_api.repository.recipe_repository import RecipeRepository
+from remymy_api.repository.recipe_repository import RecipeRepository, init_catalog_database
 from remymy_api.schemas import ItemPrice, UserHistory
 
 
@@ -48,9 +50,11 @@ def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatc
         priced_food(5, "Spinach, raw", "spinach", 2.6, 23, 2.9),
         priced_food(6, "Chocolate, dark", "chocolate", 4.5, 546, 4.9),
     ]
-    repository = RecipeRepository(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
-    recommender = Recommender.load(repository)
-    soup = repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "unknown thing"])
+    init_catalog_database(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
+    with Session(sqlite_engine(tmp_path / "catalog.db")) as session:
+        repository = RecipeRepository(session)
+        recommender = Recommender.load(repository)
+        soup = repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "unknown thing"])
     history = History(1)
     history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
                             recipe_id="openrecipes:1"))

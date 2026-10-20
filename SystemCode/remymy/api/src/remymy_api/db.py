@@ -16,15 +16,25 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FOOD_DATABASE_PATH = "/data/remymy-food.db"
 DEFAULT_USER_DATABASE_PATH = "/data/remymy-users.db"
+DEFAULT_CATALOG_DATABASE_PATH = "/state/remymy-catalog.db"
 REQUIRED_TABLES = {"recipe", "recipe_ingredient", "recipe_instruction"}
 
 
 class Base(DeclarativeBase):
-    """The declarative base of the SQLAlchemy ORM models (models.py), all of them tables of the users database."""
+    """The declarative base of the SQLAlchemy ORM models (models.py) of the users database."""
+
+
+class CatalogBase(DeclarativeBase):
+    """The declarative base of the SQLAlchemy ORM models (models.py) of the catalog database: a database of its own,
+    so its tables are created there and nowhere else."""
 
 
 def user_database_path() -> Path:
     return Path(os.getenv("USER_DATABASE_PATH", DEFAULT_USER_DATABASE_PATH))
+
+
+def catalog_database_path() -> Path:
+    return Path(os.getenv("CATALOG_DATABASE_PATH", DEFAULT_CATALOG_DATABASE_PATH))
 
 
 def _enable_foreign_keys(dbapi_connection: sqlite3.Connection, _connection_record: object) -> None:
@@ -34,25 +44,41 @@ def _enable_foreign_keys(dbapi_connection: sqlite3.Connection, _connection_recor
     cursor.close()
 
 
-@lru_cache(maxsize=8)
-def _users_engine(path: str) -> Engine:
+@lru_cache(maxsize=16)
+def sqlite_engine(path: Path) -> Engine:
+    """The SQLAlchemy engine of the SQLite database at path: one per path, so tests can point a database elsewhere."""
     # URL.create takes the path as it is (no URL parsing of spaces or other characters); check_same_thread is off as
     # FastAPI may open a session in one worker thread and close it in another
-    engine = create_engine(URL.create("sqlite", database=path), connect_args={"check_same_thread": False})
+    engine = create_engine(URL.create("sqlite", database=str(path)), connect_args={"check_same_thread": False})
     event.listen(engine, "connect", _enable_foreign_keys)
     return engine
 
 
 def users_engine() -> Engine:
-    """The SQLAlchemy engine of the users database at USER_DATABASE_PATH: one per path, so tests can point it
-    elsewhere."""
-    return _users_engine(str(user_database_path()))
+    """The engine of the users database at USER_DATABASE_PATH."""
+    return sqlite_engine(user_database_path())
+
+
+def catalog_engine() -> Engine:
+    """The engine of the catalog database at CATALOG_DATABASE_PATH."""
+    return sqlite_engine(catalog_database_path())
 
 
 def get_db() -> Iterator[Session]:
     """A session on the users database for one request (a FastAPI dependency). The route commits what it writes;
     anything left uncommitted is rolled back when the session closes."""
     with Session(users_engine()) as session:
+        yield session
+
+
+def get_catalog_db() -> Iterator[Session | None]:
+    """A session on the catalog database for one request, or None when there is no catalog database (startup builds it
+    from the catalog CSV when there is one). A missing file is not opened, as SQLite would create it empty."""
+    path = catalog_database_path()
+    if not path.is_file():
+        yield None
+        return
+    with Session(sqlite_engine(path)) as session:
         yield session
 
 

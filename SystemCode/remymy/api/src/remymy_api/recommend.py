@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from .db import close_database, open_database
 from .history import History
 from .recipe import Recipe
-from .repository.recipe_repository import is_food_id, recipe_repository
+from .repository.recipe_repository import RecipeRepository, is_food_id
 from .schemas import (
     RecommendationResponse,
     RecommendedRecipe,
@@ -75,16 +75,16 @@ def user_history(rows: list[UserHistory]) -> History:
     return history
 
 
-def digest_recipes(history: History) -> dict[str, Recipe]:
-    """The Recipe of each recipe or catalog food in the history: the shared recipe_repository digests it once,
-    however often it is in the history."""
+def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Recipe]:
+    """The Recipe of each recipe or catalog food in the history: the catalog digests it once, however often it is in
+    the history."""
     ids = list(dict.fromkeys(entry.recipe_id for entry in history))
     # a catalog food the user rated itself, such as a recommended grocery, is digested as itself
     recipe_ids = {recipe_id for recipe_id in ids if not is_food_id(recipe_id)}
     ingredients_by_recipe = recipe_ingredients(recipe_ids) if recipe_ids else {}
     recipes = {
-        recipe_id: recipe_repository.digest_food(recipe_id) if is_food_id(recipe_id)
-        else recipe_repository.digest(recipe_id, ingredients_by_recipe.get(recipe_id, []))
+        recipe_id: catalog.digest_food(recipe_id) if is_food_id(recipe_id)
+        else catalog.digest(recipe_id, ingredients_by_recipe.get(recipe_id, []))
         for recipe_id in ids
     }
     logger.debug("User %d: %d ingredient lines of %d recipes matched %d priced foods.", history.user_id,
@@ -93,9 +93,9 @@ def digest_recipes(history: History) -> dict[str, Recipe]:
     return recipes
 
 
-def recommend(recommender: Recommender, rows: list[UserHistory]) -> RecommendationResponse:
+def recommend(recommender: Recommender, rows: list[UserHistory], catalog: RecipeRepository) -> RecommendationResponse:
     history = user_history(rows)
-    recipes = digest_recipes(history)
+    recipes = digest_recipes(history, catalog)
     items = recommender.recommend(history, recipes, top_k=MAX_TOP_K)
     profile = buying_profile(history, recipes)
     if profile is None:
