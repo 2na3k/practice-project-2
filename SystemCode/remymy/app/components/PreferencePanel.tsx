@@ -2,7 +2,10 @@
 
 import { Check, RotateCcw } from "lucide-react";
 import { useState } from "react";
+import { BUDGET_MAX, BUDGET_SLIDER_MAX, normalizeBudget } from "@/lib/budget";
 import { MEALS, type Preferences } from "@/lib/meals";
+
+const budgetText = (budget: number | null | undefined) => (budget == null ? "" : String(budget));
 
 type PreferencePanelProps = {
   preferences: Preferences;
@@ -12,8 +15,15 @@ type PreferencePanelProps = {
 export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
   const [draft, setDraft] = useState(preferences);
   const [avoidText, setAvoidText] = useState("");
+  // what is typed in the custom budget box, which may be mid-edit ("12.") while the draft keeps the number
+  const [budgetInput, setBudgetInput] = useState(budgetText(preferences.budget));
   const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
+  const budget = normalizeBudget(draft.budget);
+  const setBudget = (value: number | null) => {
+    update("budget", normalizeBudget(value));
+    setBudgetInput(budgetText(normalizeBudget(value)));
+  };
   const addAvoid = () => {
     const next = avoidText.trim().toLowerCase();
     if (!next || draft.exclude.includes(next)) return;
@@ -64,6 +74,49 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
             }
           />
         </label>
+        <div className="field-label budget-field">
+          <span>
+            Spend up to{" "}
+            <span className="range-value">
+              {budget === null ? "no limit" : `S$${budget.toFixed(2).replace(/\.00$/, "")} a meal`}
+            </span>
+          </span>
+          <input
+            className="range-control"
+            type="range"
+            min="1"
+            max={BUDGET_SLIDER_MAX}
+            step="1"
+            // no limit, or a custom amount above the slider, sits at its end
+            value={Math.min(budget ?? BUDGET_SLIDER_MAX, BUDGET_SLIDER_MAX)}
+            onChange={(event) => setBudget(Number(event.target.value))}
+            aria-label="Budget per meal, in SGD"
+            aria-valuetext={budget === null ? "No limit" : `S$${budget} a meal`}
+          />
+          <div className="budget-entry">
+            <span className="budget-currency" aria-hidden="true">S$</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0.5"
+              max={BUDGET_MAX}
+              step="0.5"
+              value={budgetInput}
+              placeholder="Any amount"
+              aria-label={`Custom budget per meal, in SGD, up to ${BUDGET_MAX}`}
+              onChange={(event) => {
+                setBudgetInput(event.target.value);
+                // an empty box is no limit; anything else counts once it is a positive number
+                const value = event.target.value.trim() === "" ? null : Number(event.target.value);
+                if (value === null || (Number.isFinite(value) && value > 0)) update("budget", normalizeBudget(value));
+              }}
+              onBlur={() => setBudgetInput(budgetText(budget))}
+            />
+            <button type="button" className="budget-clear" onClick={() => setBudget(null)} disabled={budget === null}>
+              No limit
+            </button>
+          </div>
+        </div>
         <label className="field-label">
           I&apos;m eating for
           <select
@@ -142,6 +195,7 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
             onClick={() => {
               setDraft(preferences);
               setAvoidText("");
+              setBudgetInput(budgetText(preferences.budget));
             }}
           >
             <RotateCcw size={15} aria-hidden="true" /> Reset changes
@@ -159,8 +213,9 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
                         avoidText.trim().toLowerCase(),
                       ],
                     }
-                  : draft;
+                  : { ...draft, budget };
               setDraft(next);
+              setBudgetInput(budgetText(budget));
               setAvoidText("");
               onSave(next);
             }}

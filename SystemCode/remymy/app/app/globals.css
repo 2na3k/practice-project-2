@@ -2485,3 +2485,11 @@ textarea.text-control { min-height: 168px; resize: vertical; line-height: 1.6; }
 .similar-info strong { display:block; font-size:12px; font-weight:600; line-height:1.4; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
 .similar-info small { display:block; margin-top:2px; font-size:10px; color:#7c8971; }
 .similar-item>svg { color:#8a9879; flex-shrink:0; }
+
+/* Budget per meal in Preferences: a slider plus a box for any amount. */
+.budget-field { grid-column: 1/-1; }
+.budget-entry { display:flex; align-items:center; gap:8px; }
+.budget-entry input { width:130px; border:1px solid #e0e4d6; background:#fafbf7; border-radius:10px; padding:10px 12px; font-size:12px; color:var(--ink); }
+.budget-currency { font-size:12px; font-weight:500; color:#69745f; }
+.budget-clear { border:1px solid #e0e4d6; background:#fffefa; border-radius:10px; padding:9px 12px; font-size:11px; font-weight:600; color:#5f6d55; }
+.budget-clear:disabled { opacity:.5; cursor:default; }

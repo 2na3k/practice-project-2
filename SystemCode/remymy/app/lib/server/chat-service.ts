@@ -8,6 +8,7 @@ import {
   type Models,
 } from "@earendil-works/pi-ai";
 import type { AgentStage, ChatRequest, ChatResult } from "@/lib/chat-types";
+import { validBudget } from "../budget";
 import type { Preferences } from "@/lib/meals";
 import { interpretRequest, type MealRecommendation } from "@/lib/recommender";
 import { MAX_CHAT_TEXT_CHARS, MAX_CHAT_TURNS } from "./request-guards";
@@ -50,9 +51,14 @@ const isPreferences = (value: unknown): value is Preferences => {
     candidate.maxMinutes >= 1 && candidate.maxMinutes <= 90 &&
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string" && item.length <= 80) &&
     (candidate.goal === "balanced" || candidate.goal === "protein" || candidate.goal === "light") &&
-    typeof candidate.cuisine === "string" && candidate.cuisine.length <= 80
+    typeof candidate.cuisine === "string" && candidate.cuisine.length <= 80 &&
+    validBudget(candidate.budget)
   );
 };
+
+// The lower of two budgets; one that is unset sets no limit.
+const lowerBudget = (a: number | null | undefined, b: number | null | undefined): number | null =>
+  a == null ? b ?? null : b == null ? a : Math.min(a, b);
 
 /** Keep restrictions established by the user outside the model's control. */
 const preserveHardPreferences = (candidate: Preferences, baseline: Preferences): Preferences => ({
@@ -69,6 +75,8 @@ const preserveHardPreferences = (candidate: Preferences, baseline: Preferences):
 
   goal: candidate.goal,
   cuisine: candidate.cuisine,
+  // the model may lower the budget but never raise or drop it
+  ...(lowerBudget(baseline.budget, candidate.budget) !== null && { budget: lowerBudget(baseline.budget, candidate.budget) }),
 });
 
 const textFromAssistant = (message: AssistantMessage | undefined): string =>
@@ -191,7 +199,7 @@ export function createMealAgent(
     "The only authoritative meals are the recommendations returned by the Remymy MCP recommend_meals tool.",
     "Call the MCP recommend_meals tool whenever the user asks for meal ideas, changes preferences, or asks what to eat.",
     "Call say_hello whenever the user asks to test MCP or asks you to say hello; it is backed by the Remymy Python MCP service.",
-    `The authoritative starting preference state is ${JSON.stringify(preferences)}. Preserve its diet, time limit, and exclusions in every tool call.`,
+    `The authoritative starting preference state is ${JSON.stringify(preferences)}. Preserve its diet, time limit, exclusions, and budget (most to spend on one meal, in SGD; null for no limit) in every tool call.`,
     "If the user wants meat-free meals, pass diet vegetarian or vegan into recommend_meals. Never list meat, poultry, or fish when that constraint is active.",
     "For halal requests, pass diet halal. The MCP returns vegan-tagged recipes that pass listed-ingredient screens; they are not halal-certified, so state that users must verify the source and cross-contamination.",
     "For halal requests, preserve the halal exclusion and say results are screened against listed ingredients only, not halal-certified; meat dishes are excluded because the source has no halal certification data.",

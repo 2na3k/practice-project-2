@@ -39,6 +39,7 @@ import {
   type Meal,
   type Preferences,
 } from "@/lib/meals";
+import { validBudget } from "@/lib/budget";
 import { demoReply } from "@/lib/demo-chat";
 import { alignRecommendations, interpretRequest, recommendMeals } from "@/lib/recommender";
 import type {
@@ -87,7 +88,9 @@ function validPreferences(value: unknown): value is Preferences {
     candidate.maxMinutes >= 1 && candidate.maxMinutes <= 90 &&
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string") &&
     (candidate.goal === "balanced" || candidate.goal === "protein" || candidate.goal === "light") &&
-    typeof candidate.cuisine === "string"
+    typeof candidate.cuisine === "string" &&
+    // preferences saved before there was a budget have none
+    validBudget(candidate.budget)
   );
 }
 

@@ -26,6 +26,8 @@ export type Preferences = {
   exclude: string[];
   goal: "balanced" | "protein" | "light";
   cuisine: string;
+  // most to spend on one meal, in SGD; unset or null is no limit
+  budget?: number | null;
 };
 
 export const DEFAULT_PREFERENCES: Preferences = {
