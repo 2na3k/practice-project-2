@@ -32,25 +32,24 @@ CREATE TABLE IF NOT EXISTS app_user (
   CHECK (json_valid(preferences, 8)),
   CHECK (
     json_type(preferences) = 'object'
-    AND json_type(preferences, '$.special_diet') IS NOT NULL
-    AND json_type(preferences, '$.cuisines') IS NOT NULL
-    AND json_type(preferences, '$.preferred_nutrient') IS NOT NULL
-    AND json_remove(preferences, '$.special_diet', '$.cuisines', '$.preferred_nutrient') = '{}'
   ),
   CHECK (
-    json_type(preferences, '$.special_diet') = 'null'
+    json_type(preferences, '$.special_diet') = ''
     OR json_extract(preferences, '$.special_diet') IN ('vegetarian', 'halal', 'Hinduism')
   ),
   CHECK (
-    json_type(preferences, '$.cuisines') = 'array'
+    json_type(preferences, '$.cuisines') = ''
     AND json_array_length(preferences, '$.cuisines') <= 40
   ),
   CHECK (
-    json_type(preferences, '$.preferred_nutrient') = 'null'
+    json_type(preferences, '$.preferred_nutrient') = ''
     OR (
       json_type(preferences, '$.preferred_nutrient') = 'text'
       AND length(json_extract(preferences, '$.preferred_nutrient')) <= 64
     )
+  ),
+  CHECK (
+    json_type(preferences, '$.budget') >= 0
   )
 );
 
