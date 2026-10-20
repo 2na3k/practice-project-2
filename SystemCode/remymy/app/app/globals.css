@@ -2460,3 +2460,17 @@ textarea.text-control { min-height: 168px; resize: vertical; line-height: 1.6; }
   .nutrient-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .add-recipe-form .field-label { grid-column: 1/-1; }
 }
+
+/* The demo user, shown as signed in: a profile card under the sidebar and an avatar in the header. */
+.user-avatar { display:block; border-radius:50%; flex-shrink:0; box-shadow:0 0 0 2px #fffefa, 0 0 0 3px #dfe5d3; }
+.sidebar-profile { display:flex; align-items:center; gap:10px; margin-top:12px; padding:9px 8px; border:1px solid transparent; border-radius:13px; background:none; text-align:left; color:var(--ink); }
+.sidebar-profile:hover, .sidebar-profile.is-active { background:#f1f4e9; border-color:#e4e9da; }
+.sidebar-profile>span { min-width:0; flex:1; }
+.sidebar-profile strong { display:block; font-size:11px; font-weight:600; line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sidebar-profile small { display:block; font-size:9px; color:#7c8971; line-height:1.5; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.header-avatar { display:flex; padding:0; border:0; background:none; border-radius:50%; }
+.header-avatar:hover .user-avatar { box-shadow:0 0 0 2px #fffefa, 0 0 0 3px #a9b994; }
+@media(max-width:650px){.chat-shell .sidebar-profile{display:none}.header-avatar .user-avatar{width:28px;height:28px}}
+.history-profile { display:flex; justify-content:space-between; align-items:center; gap:12px 18px; flex-wrap:wrap; margin-bottom:16px; padding:15px 18px; border:1px solid #e1e6d6; border-radius:16px; background:#fafbf5; }
+.history-profile strong { display:block; font-size:12px; font-weight:600; color:var(--ink); }
+.history-profile small { display:block; margin-top:3px; font-size:10px; color:#7c8971; }

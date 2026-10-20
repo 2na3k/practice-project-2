@@ -2,6 +2,8 @@
 
 import { MessageCircle, Heart, History, SlidersHorizontal, UtensilsCrossed, LayoutGrid, NotebookPen, Plug, Plus } from "lucide-react";
 import type { ConnectionStatus } from "@/lib/chat-types";
+import { UserAvatar } from "@/components/UserAvatar";
+import { DEMO_PROFILE } from "@/lib/demo-profile";
 export type AppView = "discover" | "meals" | "add-recipe" | "saved" | "history" | "preferences" | "connection";
 type SidebarProps = { view: AppView; onViewChange: (view: AppView) => void; onNewChat: () => void; connection: ConnectionStatus };
 const items = [
@@ -21,7 +23,7 @@ export function Sidebar({view,onViewChange,onNewChat,connection}:SidebarProps){
     <div className="sidebar-section-label">YOUR LITTLE FOOD CORNER</div>
     <nav className="sidebar-nav" aria-label="Main navigation">{items.map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${view===id?"is-active":""}`} onClick={()=>onViewChange(id)} aria-current={view===id?"page":undefined}><Icon size={18} strokeWidth={1.8}/><span>{label}</span></button>)}</nav>
     <button className={`sidebar-connection ${connection.connected?"connected":""}`} onClick={()=>onViewChange("connection")}><span className="connection-dot"/><span><strong>{connection.connected?"AI is connected":"Make it a conversation"}</strong><small>{connection.connected?connection.provider:"Connect your own AI model"}</small></span><Plug size={15}/></button>
-    <div className="sidebar-footer"><span className="sidebar-footer-dot"/><p>Small decisions.<br/><strong>Good days.</strong></p></div>
+    <button className={`sidebar-profile ${view==="preferences"?"is-active":""}`} onClick={()=>onViewChange("preferences")} aria-label={`${DEMO_PROFILE.name}, open your preferences`}><UserAvatar size={34}/><span><strong>{DEMO_PROFILE.name}</strong><small>@{DEMO_PROFILE.username} · {DEMO_PROFILE.tagline}</small></span></button>
   </aside>
   <nav className="mobile-nav" aria-label="Mobile navigation">{items.map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${view===id?"is-active":""}`} onClick={()=>onViewChange(id)} aria-current={view===id?"page":undefined}><Icon size={18}/><span>{id==="connection"?"Connect":id==="add-recipe"?"Add":label}</span></button>)}</nav>
  </>;

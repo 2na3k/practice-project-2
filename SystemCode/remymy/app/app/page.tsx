@@ -24,6 +24,8 @@ import type { MealRecommendation } from "@/components/MealCard";
 import { MealDetailModal } from "@/components/MealDetailModal";
 import { PreferencePanel } from "@/components/PreferencePanel";
 import { Sidebar, type AppView } from "@/components/Sidebar";
+import { UserAvatar } from "@/components/UserAvatar";
+import { DEMO_PROFILE } from "@/lib/demo-profile";
 import { ConnectionPanel } from "@/components/ConnectionPanel";
 import { RecipeCard } from "@/components/RecipeCard";
 import { RecipeDetailModal } from "@/components/RecipeDetailModal";
@@ -47,7 +49,7 @@ import type {
   ConnectionStatus,
 } from "@/lib/chat-types";
 import { fetchRecipeDetail, fetchRecipeLikes, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
-import { RECOMMENDATION_USERNAME } from "@/lib/recommendations";
+import { RECOMMENDATION_USERNAME, fetchRecommendations, formatPrice, nutrientHighlights, type BuyingProfile } from "@/lib/recommendations";
 import { parseLikes, parseSavedFoods, type SavedFood } from "@/lib/saved";
 import { fetchHistory, formatHistoryDate, type HistoryItem } from "@/lib/history";
 import { fetchCatalogItem, type CatalogItem } from "@/lib/catalog";
@@ -230,6 +232,8 @@ export default function HomePage() {
   const [history, setHistory] = useState<HistoryItem[] | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [historyNonce, setHistoryNonce] = useState(0);
+  // averages of the priced ingredients in the rated recipes, which the recommend route works out from the history
+  const [buyingProfile, setBuyingProfile] = useState<BuyingProfile | null>(null);
   const [notice, setNotice] = useState("");
   const [mcpMessage, setMcpMessage] = useState("");
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -274,6 +278,10 @@ export default function HomePage() {
     })
       .then((items) => { if (items && mountedRef.current) setHistory(items); })
       .catch((error) => { if (!controller.signal.aborted && mountedRef.current) setHistoryError(error instanceof Error ? error.message : "Your history could not be loaded."); });
+    // the profile is extra: if it cannot be read, the History page goes on without it
+    void fetchRecommendations(RECOMMENDATION_USERNAME, 1, controller.signal)
+      .then((result) => { if (mountedRef.current) setBuyingProfile(result.profile); })
+      .catch(() => undefined);
     return () => controller.abort();
   }, [historyNonce, view]);
 
@@ -573,7 +581,7 @@ export default function HomePage() {
           <>
             <header className="workspace-header">
               <div><p className="eyebrow">YOUR DAILY DOSE OF DELICIOUS</p><h1 className="workspace-title">{hasChat ? "Your food conversation" : "What sounds good?"}</h1></div>
-              <div className="workspace-actions"><button className="model-status-button" onClick={() => setView("connection")}><span className={`connection-dot ${connection.connected ? "connected" : ""}`} />{modelLabel}</button>{connectionLoadError && <span className="connection-load-note">Status unavailable</span>}{hasChat && <button className="header-new-chat" onClick={startNewChat}><Plus className="header-new-chat-icon" size={15} aria-hidden="true" />New chat</button>}</div>
+              <div className="workspace-actions"><button className="model-status-button" onClick={() => setView("connection")}><span className={`connection-dot ${connection.connected ? "connected" : ""}`} />{modelLabel}</button>{connectionLoadError && <span className="connection-load-note">Status unavailable</span>}{hasChat && <button className="header-new-chat" onClick={startNewChat}><Plus className="header-new-chat-icon" size={15} aria-hidden="true" />New chat</button>}<button className="header-avatar" onClick={() => setView("preferences")} aria-label={`Signed in as ${DEMO_PROFILE.name}, open your preferences`} title={DEMO_PROFILE.name}><UserAvatar size={34} /></button></div>
             </header>
             {hasChat ? <ChatWorkspace messages={chat} failedAssistantId={failedRequest?.assistantId} onRetry={() => void submitMessage(failedRequest?.text ?? "", true)} retryAvailable={Boolean(failedRequest) && !isBusy} onOpenMeal={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onViewShortlist={showShortlist} onSubmit={(text) => void submitMessage(text)} onStop={stopRequest} busy={isBusy} modelLabel={modelLabel} onConnection={() => setView("connection")} /> : (
               <section className="welcome-screen">
@@ -594,7 +602,7 @@ export default function HomePage() {
         ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
           : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onOpenFood={openCatalogItem} onDiscover={() => navigate("discover")} />
             : view === "add-recipe" ? <AddRecipePanel username={RECOMMENDATION_USERNAME} onSaved={(recipe) => flashNotice(`${recipe.title} added to your recipes`)} />
-            : view === "history" ? <HistoryView items={history} error={historyError} onRetry={() => setHistoryNonce((current) => current + 1)} onOpenRecipe={openRecipe} onOpenFood={openCatalogItem} />
+            : view === "history" ? <HistoryView items={history} profile={buyingProfile} error={historyError} onRetry={() => setHistoryNonce((current) => current + 1)} onOpenRecipe={openRecipe} onOpenFood={openCatalogItem} />
             : view === "preferences" ? <PreferencePanel preferences={preferences} onSave={savePreferences} />
               : <ConnectionPanel connection={connection} onConnectionChange={setConnection} onBackToChat={() => setView("discover")} />}
       </main>
@@ -648,8 +656,9 @@ function SavedView({ recommendations, onSave, onOpen, mealLikes, onRateMeal, foo
   </section>;
 }
 
-function HistoryView({ items, error, onRetry, onOpenRecipe, onOpenFood }: { items: HistoryItem[] | null; error: string; onRetry: () => void; onOpenRecipe: (recipe: { id: string }) => void; onOpenFood: (id: string) => void; }) {
+function HistoryView({ items, profile, error, onRetry, onOpenRecipe, onOpenFood }: { items: HistoryItem[] | null; profile: BuyingProfile | null; error: string; onRetry: () => void; onOpenRecipe: (recipe: { id: string }) => void; onOpenFood: (id: string) => void; }) {
   return <section className="saved-view history-view"><div className="view-heading"><p className="eyebrow">WHAT YOU&apos;VE RATED</p><h1>Your history.</h1><p>Every recipe you liked or didn&apos;t, newest first, as the database holds it.</p></div>
+    {profile && items && items.length > 0 && <div className="history-profile"><div><strong>What your ratings add up to</strong><small>Averages of the priced ingredients in the recipes you rated, nutrients per 100 g</small></div><div className="for-you-profile"><span>{formatPrice(profile.avg_price)} avg. ingredient</span>{nutrientHighlights(profile.avg_nutrient_values).map((highlight) => <span key={highlight}>{highlight}</span>)}</div></div>}
     {error ? <div className="empty-state recipe-state" role="alert"><h3>History unavailable.</h3><p>{error}</p><button className="detail-action" onClick={onRetry}>Try again <ArrowRight size={17} /></button></div>
       : items === null ? <div className="empty-state recipe-state" role="status"><LoaderCircle className="spin" size={22} /><h3>Loading your history…</h3></div>
         : items.length === 0 ? <div className="empty-state"><div className="empty-state-icon"><HistoryIcon size={22} /></div><h3>Nothing rated yet.</h3><p>Tap the tick or the cross on a recipe and it&apos;ll show up here.</p></div>

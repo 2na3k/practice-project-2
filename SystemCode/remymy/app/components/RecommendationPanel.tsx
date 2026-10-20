@@ -4,13 +4,7 @@ import { useEffect, useState } from "react";
 import { Bookmark, ChefHat, LoaderCircle, RotateCcw } from "lucide-react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import type { SavedFood } from "@/lib/saved";
-import {
-  RECOMMENDATION_USERNAME,
-  fetchRecommendations,
-  formatPrice,
-  nutrientHighlights,
-  type Recommendations,
-} from "@/lib/recommendations";
+import { RECOMMENDATION_USERNAME, fetchRecommendations, type Recommendations } from "@/lib/recommendations";
 
 const TOP_K = 6;
 
@@ -50,7 +44,6 @@ export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, on
   };
 
   const loading = !result && !error;
-  const profile = result?.profile ?? null;
 
   return (
     <section className="for-you" aria-labelledby="for-you-title" aria-busy={loading}>
@@ -60,12 +53,6 @@ export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, on
           <h2 className="for-you-title" id="for-you-title"><ChefHat size={18} aria-hidden="true" />Recipes you&apos;ll probably like</h2>
           <p className="for-you-caption">Based on the recipes the demo profile has rated.</p>
         </div>
-        {profile && (
-          <div className="for-you-profile" aria-label="Buying profile: averages of the foods in those recipes, nutrients per 100 g">
-            <span>{formatPrice(profile.avg_price)} avg. ingredient</span>
-            {nutrientHighlights(profile.avg_nutrient_values).map((highlight) => <span key={highlight}>{highlight}</span>)}
-          </div>
-        )}
       </div>
       {error ? (
         <p className="for-you-note is-error" role="alert">{error}<button onClick={retry}><RotateCcw size={12} aria-hidden="true" />Try again</button></p>
