@@ -294,15 +294,22 @@ def test_startup_creates_the_database_and_cache(users, cache):
 
 def test_a_user_is_looked_up_by_username(repo):
     alice = repo.create_user("alice", Preferences(special_diet="halal", cuisines=["Thai"]))
+    bob = repo.create_user("bob", Preferences(budget=12.5))
 
     with TestClient(app) as client:
         found = client.get("/api/users/alice")
+        with_budget = client.get("/api/users/bob")
         missing = client.get("/api/users/nobody")
 
     assert found.status_code == 200
+    # a user without a budget has 0, no limit
     assert found.json() == {
         "id": alice.id, "username": "alice",
-        "preferences": {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": None},
+        "preferences": {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": None, "budget": 0.0},
+    }
+    assert with_budget.json() == {
+        "id": bob.id, "username": "bob",
+        "preferences": {"special_diet": None, "cuisines": [], "preferred_nutrient": None, "budget": 12.5},
     }
     assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
 

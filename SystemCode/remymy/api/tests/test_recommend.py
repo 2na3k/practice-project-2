@@ -336,3 +336,41 @@ def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache
     assert response.status_code == 200
     assert response.json()["like"] is False
 
+
+
+class ItemsRecommender:
+    """Answers every recommendation with the same scored foods."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self.items = items
+
+    def recommend(self, history, recipes, top_k: int) -> list[dict]:
+        return list(self.items)
+
+
+SCORED = [
+    {"fdc_id": 1, "name": "Steak", "price": 18.5, "p_like": 0.9, "similarity": 0.9},
+    {"fdc_id": 2, "name": "Tofu", "price": 2.5, "p_like": 0.6, "similarity": 0.9},
+    {"fdc_id": 3, "name": "Salmon", "price": 9.0, "p_like": 0.8, "similarity": 0.9},
+    {"fdc_id": 4, "name": "Rice", "price": 2.0, "p_like": 0.6, "similarity": 0.9},
+    {"fdc_id": 5, "name": "Prawns", "price": 12.0, "p_like": 0.7, "similarity": 0.9},
+]
+
+
+def recommended_ids(budget: float) -> list[str]:
+    from remymy_api.schemas import Preferences, UserProfileInput
+
+    user = UserProfileInput(user_id=1, preferences=Preferences(budget=budget), history=[])
+    return [item.id for item in recommend.recommend(ItemsRecommender(SCORED), user, catalog=None).items]
+
+
+def test_a_budget_keeps_only_what_it_affords_most_liked_first():
+    # Steak and Prawns cost more than S$10; of Tofu and Rice, equally liked, the cheaper comes first
+    assert recommended_ids(10) == ["3", "4", "2"]
+    # the budget is inclusive
+    assert recommended_ids(9) == ["3", "4", "2"]
+    assert recommended_ids(1.5) == []
+
+
+def test_no_budget_keeps_everything():
+    assert recommended_ids(0) == ["1", "3", "5", "4", "2"]
