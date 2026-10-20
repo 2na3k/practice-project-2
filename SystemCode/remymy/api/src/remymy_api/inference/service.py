@@ -18,6 +18,8 @@ from ..repository.recipe_repository import RecipeRepository
 from ..schemas import CatalogFood
 from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS
 from .model_inference_score_recommend import CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, TEXT_COLUMNS, RetrievalPipeline
+from .food_query import NUTRIENT_COLS
+from .model_inference_recipe_clustering import RecipeClusterer
 
 logger = logging.getLogger(__name__)
 
@@ -61,42 +63,57 @@ def catalog_recipes(foods: list[CatalogFood]) -> list[dict]:
 class Recommender:
     """The retrieval pipeline, built from the repository's catalog."""
 
-    def __init__(self, repository: RecipeRepository, pipeline: RetrievalPipeline) -> None:
-        self.repository = repository
+    def __init__(self, pipeline: RetrievalPipeline) -> None:
         self.pipeline = pipeline
-        # One recommendation at a time, as the model service's single queue worker ran them: the pipeline keeps
-        # per-user state between calls.
-        self.lock = threading.Lock()
 
     @classmethod
     def load(cls, repository: RecipeRepository) -> Recommender:
+        """The pipeline over the catalog's foods. The repository's session is only read during the load."""
         foods = repository.all_foods()
         pipeline = RetrievalPipeline.from_recipes(catalog_recipes(foods), artifact_dir(), index_dir())
-        # at startup, so the first recommendation does not wait for the repository to build it
+        # at startup, so the first recommendation does not wait for the catalog's index to be built
         keys = repository.load_ingredient_index()
         logger.info("Recommender loaded: %d catalog foods, %d ingredient keys.", len(foods), keys)
-        return cls(repository, pipeline)
+        return cls(pipeline)
 
     def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
                   candidates: int = 100) -> list[dict]:
-        """The catalog foods to recommend to the user whose history this is, best first. recipes holds the digested
-        Recipe of each recipe_id in history. Each food a recipe matched goes to the pipeline with that entry's like,
-        as LIKED_RATING or DISLIKED_RATING, and its date."""
-        foods = [
+        # Preparing the history
+        history_foods = [
             {"fdc_id": ingredient.fdc_id, "rating": LIKED_RATING if entry.like else DISLIKED_RATING,
              "date": entry.timestamp.date().isoformat()}
             for entry in history
             for ingredient in recipes[entry.recipe_id].ingredients
         ]
         results = []
-        if foods:
-            # The pipeline reports each of its steps through log; at DEBUG they go to this module's logger.
-            trace = logger.debug if logger.isEnabledFor(logging.DEBUG) else None
-            with self.lock:
-                results = self.pipeline.recommend({"history": foods}, n_candidates=candidates, top_k=top_k, log=trace)
-        logger.debug("%d history recipes matched %d catalog foods; %d recommended.", len(history), len(foods),
+        if history_foods:
+            try:
+                trace = logger.debug if logger.isEnabledFor(logging.DEBUG) else None
+                results = self.pipeline.recommend({"history": history_foods}, n_candidates=candidates, top_k=top_k, log=trace)
+            except Exception as e:
+                logger.error(f"Error encountered when recommending: {e}")
+
+        logger.debug("%d history recipes matched %d catalog foods; %d recommended.", len(history), len(history_foods),
                      len(results))
         return [
             {key: result[key] for key in ("fdc_id", "name", "price", "p_like", "similarity")}
             for result in results
         ]
+
+class Clusterer:
+    def __init__(self, recipe_clusterer: RecipeClusterer) -> None:
+        self.clusterer = recipe_clusterer
+
+    def cluster(self, recipe: Recipe, top_k: int, catalog: RecipeRepository) -> list[Recipe]:
+        try:
+            result = self.clusterer.predict(recipe.to_dict(), k=top_k )
+        except Exception:
+            logger.exception("Clustering recipe %s failed.", recipe.recipe_id)
+            return []
+        nearest = [catalog.digest_food(str(neighbour["fdc_id"])) for neighbour in result["neighbours"]]
+        # a neighbour the catalog does not price has no ingredient
+        found = [food for food in nearest if food.ingredients][:top_k]
+        logger.debug("Recipe %s: cluster %d (%s); %d of %d neighbours in the catalog.", recipe.recipe_id,
+                     result["cluster"], result["cluster_name"], len(found), len(nearest))
+        return found
+ 
