@@ -16,8 +16,8 @@ from .repository.recipe_repository import RecipeRepository, is_food_id
 from .schemas import (
     RecommendationResponse,
     RecommendedRecipe,
-    UserBuyingProfile,
-    UserRating,
+    UserProfileInput,
+    UserProfileOutput,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +48,7 @@ def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
     return ingredients
 
 
-def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserBuyingProfile | None:
+def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserProfileOutput | None:
     """The average price and nutrient values of every priced food the user's recipes matched, a food once per time
     its recipe is in the history."""
     prices: list[float] = []
@@ -60,19 +60,11 @@ def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserBuyin
                 nutrients[name].append(value)
     if not prices:
         return None
-    return UserBuyingProfile(
+    return UserProfileOutput(
         user_id=history.user_id,
         avg_price=fmean(prices),
         avg_nutrient_values={name: fmean(values) for name, values in sorted(nutrients.items())},
     )
-
-
-def user_history(rows: list[UserRating]) -> History:
-    """A user's likes as fetch_user_history reads them (newest first), as their History (oldest first)."""
-    history = History(rows[0].user_id)
-    for row in reversed(rows):
-        history.add(row)
-    return history
 
 
 def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Recipe]:
@@ -93,8 +85,8 @@ def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Rec
     return recipes
 
 
-def recommend(recommender: Recommender, user: UserBuyingProfile, catalog: RecipeRepository) -> RecommendationResponse:
-    history = History.from_ratings(user.history)
+def recommend(recommender: Recommender, user: UserProfileInput, catalog: RecipeRepository) -> RecommendationResponse:
+    history = History.from_ratings(user.user_id, user.history)
     recipes = digest_recipes(history, catalog)
     items = recommender.recommend(history, recipes, top_k=MAX_TOP_K)
     profile = buying_profile(history, recipes)

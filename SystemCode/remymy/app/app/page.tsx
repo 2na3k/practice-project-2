@@ -39,7 +39,7 @@ import {
   type Meal,
   type Preferences,
 } from "@/lib/meals";
-import { validBudget } from "@/lib/budget";
+import { normalizeBudget, validBudget } from "@/lib/budget";
 import { demoReply } from "@/lib/demo-chat";
 import { alignRecommendations, interpretRequest, recommendMeals } from "@/lib/recommender";
 import type {
@@ -336,7 +336,8 @@ export default function HomePage() {
       storedMealLikes = Object.fromEntries(Object.entries(mealLikes).filter(([id]) => MEALS.some((meal) => meal.id === id)));
       if (preferencesValue) {
         const parsed: unknown = JSON.parse(preferencesValue);
-        if (validPreferences(parsed)) storedPreferences = parsed;
+        // a budget saved as null, or none at all, is stored as 0, no limit
+        if (validPreferences(parsed)) storedPreferences = { ...parsed, budget: normalizeBudget(parsed.budget) };
       }
       if (savedValue) {
         const parsed: unknown = JSON.parse(savedValue);

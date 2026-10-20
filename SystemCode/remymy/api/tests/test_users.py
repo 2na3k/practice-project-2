@@ -17,7 +17,7 @@ from remymy_api.db import users_engine
 from remymy_api.dependencies import get_recipe_repository
 from remymy_api.main import app
 from remymy_api.repository.user_repository import UserRepository
-from remymy_api.schemas import Preferences, UserHistory
+from remymy_api.schemas import Preferences, UserRating
 from remymy_api.users import init_user_database, open_user_database, rate_item
 
 
@@ -222,12 +222,12 @@ def test_history_rejects_unknown_user(repo):
 @pytest.mark.parametrize("like", [None, "maybe"])
 def test_history_model_needs_like_or_not(like):
     with pytest.raises(ValidationError):
-        UserHistory(user_id=1, timestamp="2026-09-28T00:00:00Z", like=like, recipe_id="x")
+        UserRating(user_id=1, timestamp="2026-09-28T00:00:00Z", like=like, recipe_id="x")
 
 
 def test_a_database_with_ratings_keeps_them_as_likes(tmp_path, monkeypatch):
     path = tmp_path / "old-users.db"
-    liked_column = "  liked      INTEGER NOT NULL CHECK (liked IN (0, 1)),  -- UserHistory.like: 1 liked, 0 not\n"
+    liked_column = "  liked      INTEGER NOT NULL CHECK (liked IN (0, 1)),  -- UserRating.like: 1 liked, 0 not\n"
     assert liked_column in users_module.SCHEMA
     # the schema as it was before likes
     old_schema = users_module.SCHEMA.replace(

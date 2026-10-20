@@ -117,7 +117,7 @@ class UserHistoryEntry(Base):
     history_id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("app_user.user_id", ondelete="CASCADE"))
     timestamp: Mapped[datetime] = mapped_column(UtcTimestamp, server_default=NOW)
-    # schemas.UserHistory.like, stored as liked: 1 liked, 0 not
+    # schemas.UserRating.like, stored as liked: 1 liked, 0 not
     like: Mapped[bool] = mapped_column("liked", Boolean)
     recipe_id: Mapped[str] = mapped_column(Text)
 

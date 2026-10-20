@@ -9,7 +9,7 @@ from remymy_api.db import sqlite_engine
 from remymy_api.history import History
 from remymy_api.inference.service import Recommender, catalog_recipes
 from remymy_api.repository.recipe_repository import RecipeRepository, init_catalog_database
-from remymy_api.schemas import ItemPrice, UserHistory
+from remymy_api.schemas import ItemPrice, UserRating
 
 
 def test_catalog_recipes_are_the_rerankers_input_format():
@@ -56,7 +56,7 @@ def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatc
         recommender = Recommender.load(repository)
         soup = repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "unknown thing"])
     history = History(1)
-    history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
+    history.add(UserRating(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
                             recipe_id="openrecipes:1"))
 
     items = recommender.recommend(history, {"openrecipes:1": soup}, top_k=3)

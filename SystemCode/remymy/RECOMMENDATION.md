@@ -39,7 +39,7 @@ sequenceDiagram
         A->>A: the likes go into a History; recipe_repository digests each recipe into a Recipe
         A->>M: recommend(history, recipes, top_k=50)
         M-->>A: scored items
-        A->>A: compute UserBuyingProfile from the History
+        A->>A: compute UserProfileOutput from the History
         A->>R: store recommendations:{user_id} (1 day TTL)
     end
     A-->>C: profile + first top_k items, or 503 when no catalog is loaded
@@ -207,7 +207,7 @@ At startup the API:
 
 For each recommendation (one at a time) it:
 
-1. Builds the user's `History`: their `user_history` rows (`UserHistory`:
+1. Builds the user's `History`: their `user_history` rows (`UserRating`:
    recipe, like or not, timestamp), oldest first.
 2. Digests each of its recipes with `recipe_repository.digest`: normalizes each
    ingredient line with `name_key` and looks it up in the ingredient index, a
@@ -283,7 +283,7 @@ For each recommendation (one at a time) it:
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
 | GET | `/api/users/{username}/history` | `limit` 1–200 (default 50) | The user's history, newest first: each rated recipe or catalog food's `recipe_id`, `kind` (`recipe` or `food`), `title` (`null` when its database lacks it), `like` and `timestamp`; 404 if unknown |
 | GET | `/api/users/{username}/likes` | none | Whether the user liked each recipe or catalog food they rated, `{id: true or false}`, from their latest `user_history` row for it; 404 if unknown |
-| PUT | `/api/recipes/{recipe_id}/rating` | `user_id`, `like` (`true` or `false`) | Adds whether the user liked the recipe to their history, and returns that `UserHistory` row; 404 for an unknown user or recipe; a dislike also takes the item out of the user's cached recommendations |
+| PUT | `/api/recipes/{recipe_id}/rating` | `user_id`, `like` (`true` or `false`) | Adds whether the user liked the recipe to their history, and returns that `UserRating` row; 404 for an unknown user or recipe; a dislike also takes the item out of the user's cached recommendations |
 
 #### `GET /api/recommend/{username}`
 
@@ -343,7 +343,7 @@ one call at a time.
 
 | Argument | Type | Meaning |
 | --- | --- | --- |
-| `history` | `History` | The user's `UserHistory` rows, oldest first |
+| `history` | `History` | The user's `UserRating` rows, oldest first |
 | `history[].recipe_id` | string | The recipe; `recipes` holds its digested `Recipe` |
 | `history[].like` | boolean | Goes to the model as rating 5 (liked) or 0 (not) |
 | `history[].timestamp` | datetime | Its date orders the history and cuts the windows |
@@ -358,14 +358,14 @@ from datetime import datetime, timezone
 
 from remymy_api.history import History
 from remymy_api.repository.recipe_repository import recipe_repository
-from remymy_api.schemas import UserHistory
+from remymy_api.schemas import UserRating
 
 soup = recipe_repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "salt", "butter"])
 apples = recipe_repository.digest("openrecipes:2", ["apples", "butter"])
 history = History(user_id=1)
-history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
+history.add(UserRating(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,
                         recipe_id="openrecipes:1"))
-history.add(UserHistory(user_id=1, timestamp=datetime(2026, 9, 10, tzinfo=timezone.utc), like=False,
+history.add(UserRating(user_id=1, timestamp=datetime(2026, 9, 10, tzinfo=timezone.utc), like=False,
                         recipe_id="openrecipes:2"))
 items = recommender.recommend(history, {"openrecipes:1": soup, "openrecipes:2": apples}, top_k=5)
 ```
@@ -398,7 +398,7 @@ vector. When no recipe in the history matched a food, `items` is empty.
       its recipes with `recipe_repository.digest`.
    3. Call the inference service with the `History`, the `Recipe`s and
       `top_k=50`.
-   4. Compute the `UserBuyingProfile` from the foods of the `History`'s recipes.
+   4. Compute the `UserProfileOutput` from the foods of the `History`'s recipes.
    5. Store the result in Redis for `CACHE_TTL_SECONDS` (default 86400, one
       day), then return it trimmed to `top_k`.
 
@@ -417,11 +417,12 @@ API schemas, in [`api/src/remymy_api/schemas.py`](api/src/remymy_api/schemas.py)
 | --- | --- |
 | `Preferences` | `special_diet` (`vegetarian`, `halal`, `Hinduism` or `null`), `cuisines` (up to 40), `preferred_nutrient` (up to 64 characters). Unknown keys are rejected |
 | `User` | `id`, `username`, `preferences` |
-| `UserHistory` | `user_id`, `timestamp`, `like` (boolean), `recipe_id` |
+| `UserRating` | `user_id`, `timestamp`, `like` (boolean), `recipe_id` |
 | `Ingredient` | `fdc_id`, `name`, `price`, `nutrient_values` |
-| `UserBuyingProfile` | `user_id`, `avg_price`, `avg_nutrient_values` |
+| `UserProfileInput` | `user_id`, `preferences`, `history` (list of `UserRating`, oldest first): what a recommendation is made from |
+| `UserProfileOutput` | `user_id`, `avg_price`, `avg_nutrient_values` |
 | `RecommendedRecipe` | `id`, `title`, `score` |
-| `RecommendationResponse` | `profile` (`UserBuyingProfile` or `null`), `items` (list of `RecommendedRecipe`) |
+| `RecommendationResponse` | `profile` (`UserProfileOutput` or `null`), `items` (list of `RecommendedRecipe`) |
 
 What the recommend route hands the inference service, in
 [`api/src/remymy_api/recipe.py`](api/src/remymy_api/recipe.py) and
@@ -430,7 +431,7 @@ What the recommend route hands the inference service, in
 | Class | Holds |
 | --- | --- |
 | `Recipe` | `recipe_id`, `ingredients` (the `Ingredient`s its lines matched), `nutrient_values` (their mean, per 100 g) |
-| `History` | `user_id` and `history`, a queue of `UserHistory`, oldest first; past 50, each new entry drops the oldest |
+| `History` | `user_id` and `history`, a queue of `UserRating`, oldest first; past 50, each new entry drops the oldest |
 
 Storage:
 

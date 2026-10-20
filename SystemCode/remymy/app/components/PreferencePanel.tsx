@@ -2,10 +2,14 @@
 
 import { Check, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { BUDGET_MAX, BUDGET_SLIDER_MAX, normalizeBudget } from "@/lib/budget";
+import { BUDGET_MAX, BUDGET_SLIDER_MAX, NO_BUDGET_LIMIT, normalizeBudget } from "@/lib/budget";
 import { MEALS, type Preferences } from "@/lib/meals";
 
-const budgetText = (budget: number | null | undefined) => (budget == null ? "" : String(budget));
+// no limit (0) shows as an empty box
+const budgetText = (budget: number | undefined) => {
+  const value = normalizeBudget(budget);
+  return value === NO_BUDGET_LIMIT ? "" : String(value);
+};
 
 type PreferencePanelProps = {
   preferences: Preferences;
@@ -20,9 +24,10 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
   const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
   const budget = normalizeBudget(draft.budget);
-  const setBudget = (value: number | null) => {
+  const noLimit = budget === NO_BUDGET_LIMIT;
+  const setBudget = (value: number) => {
     update("budget", normalizeBudget(value));
-    setBudgetInput(budgetText(normalizeBudget(value)));
+    setBudgetInput(budgetText(value));
   };
   const addAvoid = () => {
     const next = avoidText.trim().toLowerCase();
@@ -78,7 +83,7 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
           <span>
             Spend up to{" "}
             <span className="range-value">
-              {budget === null ? "no limit" : `S$${budget.toFixed(2).replace(/\.00$/, "")} a meal`}
+              {noLimit ? "no limit" : `S$${budget.toFixed(2).replace(/\.00$/, "")} a meal`}
             </span>
           </span>
           <input
@@ -88,10 +93,10 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
             max={BUDGET_SLIDER_MAX}
             step="1"
             // no limit, or a custom amount above the slider, sits at its end
-            value={Math.min(budget ?? BUDGET_SLIDER_MAX, BUDGET_SLIDER_MAX)}
+            value={noLimit ? BUDGET_SLIDER_MAX : Math.min(budget, BUDGET_SLIDER_MAX)}
             onChange={(event) => setBudget(Number(event.target.value))}
             aria-label="Budget per meal, in SGD"
-            aria-valuetext={budget === null ? "No limit" : `S$${budget} a meal`}
+            aria-valuetext={noLimit ? "No limit" : `S$${budget} a meal`}
           />
           <div className="budget-entry">
             <span className="budget-currency" aria-hidden="true">S$</span>
@@ -106,13 +111,13 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
               aria-label={`Custom budget per meal, in SGD, up to ${BUDGET_MAX}`}
               onChange={(event) => {
                 setBudgetInput(event.target.value);
-                // an empty box is no limit; anything else counts once it is a positive number
-                const value = event.target.value.trim() === "" ? null : Number(event.target.value);
-                if (value === null || (Number.isFinite(value) && value > 0)) update("budget", normalizeBudget(value));
+                // an empty box, or 0, is no limit; anything else counts once it is a positive number
+                const value = event.target.value.trim() === "" ? NO_BUDGET_LIMIT : Number(event.target.value);
+                if (Number.isFinite(value) && value >= 0) update("budget", normalizeBudget(value));
               }}
               onBlur={() => setBudgetInput(budgetText(budget))}
             />
-            <button type="button" className="budget-clear" onClick={() => setBudget(null)} disabled={budget === null}>
+            <button type="button" className="budget-clear" onClick={() => setBudget(NO_BUDGET_LIMIT)} disabled={noLimit}>
               No limit
             </button>
           </div>
@@ -203,11 +208,13 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
           <button
             className="preference-save"
             onClick={() => {
+              // the budget is always saved, 0 for no limit
               const next =
                 avoidText.trim().toLowerCase() &&
                 !draft.exclude.includes(avoidText.trim().toLowerCase())
                   ? {
                       ...draft,
+                      budget,
                       exclude: [
                         ...draft.exclude,
                         avoidText.trim().toLowerCase(),

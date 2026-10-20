@@ -23,11 +23,13 @@ from .schemas import (
     FoodClassification,
     HealthResponse,
     HistoryItem,
+    Preferences,
     RecipeDetail,
     RecipeListResponse,
     RecipeSummary,
     RecommendationResponse,
     User,
+    UserProfileInput,
     UserRating,
     UserRecipeCreate,
     UserRecipeResponse,
@@ -218,7 +220,11 @@ def get_recommendation(
             logger.warning("Recommendations for user %d asked for, but no food catalog is loaded.", user_id)
             raise HTTPException(status_code=503, detail="Recommendations are unavailable: the food catalog is not loaded.")
         started = time.perf_counter()
-        recommendations = recommend(recommender, user_history, catalog)
+        user = users.get_user(username)
+        # fetch_user_history reads newest first; the History is oldest first
+        profile = UserProfileInput(user_id=user_id, preferences=user.preferences if user else Preferences(),
+                                   history=list(reversed(user_history)))
+        recommendations = recommend(recommender, profile, catalog)
         logger.info("Recommended %d foods for user %d from %d history recipes in %.2fs.",
                     len(recommendations.items), user_id, len(user_history), time.perf_counter() - started)
         write_recommendations(cache, user_id, recommendations)

@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS app_user (
     )
   ),
   CHECK (
-    json_type(preferences, '$.budget') >= 0
+    json_type(preferences, '$.budget') IS NULL
+    OR json_type(preferences, '$.budget') >= 0
   )
 );
 
@@ -71,7 +72,7 @@ CREATE TABLE IF NOT EXISTS user_history (
   history_id INTEGER PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES app_user (user_id) ON DELETE CASCADE,
   timestamp  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  liked      INTEGER NOT NULL CHECK (liked IN (0, 1)),  -- UserHistory.like: 1 liked, 0 not
+  liked      INTEGER NOT NULL CHECK (liked IN (0, 1)),  -- UserRating.like: 1 liked, 0 not
   recipe_id  TEXT NOT NULL
 );
 

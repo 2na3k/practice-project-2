@@ -168,8 +168,8 @@ export function interpretRequest(
     exclude: [...(current.exclude ?? [])].map(canonicalExclude).filter(Boolean),
     goal: current.goal,
     cuisine: current.cuisine || DEFAULT_PREFERENCES.cuisine,
-    // only when one is set, so preferences without a budget keep their shape
-    ...(normalizeBudget(current.budget) !== null && { budget: normalizeBudget(current.budget) }),
+    // kept when the preferences have one, 0 included, so preferences without a budget keep their shape
+    ...(current.budget !== undefined && { budget: normalizeBudget(current.budget) }),
   };
   const normalized = normalizeText(text);
   if (/\bhalal\b/.test(normalized)) addExclusion(source.exclude, "halal");

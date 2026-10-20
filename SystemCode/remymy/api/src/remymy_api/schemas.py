@@ -50,7 +50,7 @@ class Preferences(BaseModel):
     special_diet: Diet | None = None
     cuisines: list[str] = Field(default_factory=list, max_length=40)
     preferred_nutrient: str | None = Field(default=None, max_length=64)
-
+    budget: float | None = Field(default=0)
 
 class User(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -91,14 +91,25 @@ class Ingredient(BaseModel):
     nutrient_values: dict[str, float]
 
 
-class UserBuyingProfile(BaseModel):
+class UserProfileInput(BaseModel):
+    """What a recommendation is made from: the user's preferences and their ratings, oldest first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    preferences: Preferences = Field(default_factory=Preferences)
+    history: list[UserRating]
+
+
+class UserProfileOutput(BaseModel):
+    """What a recommendation reports about the user: the average price and nutrients of the foods their rated
+    recipes call for."""
+
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
     avg_price: float
     avg_nutrient_values: dict[str, float]
-    preferences: dict[str, any]
-    history: list[UserRating]
 
 class ClusteringRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -120,7 +131,7 @@ class RecommendedRecipe(BaseModel):
 class RecommendationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: UserBuyingProfile | None
+    profile: UserProfileOutput | None
     items: list[RecommendedRecipe]
 
 class ItemPrice(BaseModel):
