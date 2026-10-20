@@ -608,7 +608,7 @@ export default function HomePage() {
       </main>
       {notice && <div className="notice" role="status"><Bookmark size={16} aria-hidden="true" />{notice}</div>}
       <MealDetailModal meal={activeMeal} saved={activeMeal ? savedIds.includes(activeMeal.id) : false} onClose={closeMeal} onSave={toggleSaved} />
-      <RecipeDetailModal recipe={activeRecipe} loading={recipeDetailBusy} error={recipeDetailError} onClose={closeRecipe} />
+      <RecipeDetailModal recipe={activeRecipe} loading={recipeDetailBusy} error={recipeDetailError} onClose={closeRecipe} onOpenFood={(id) => { closeRecipe(); openCatalogItem(id); }} />
       <CatalogItemModal item={activeCatalogItem} loading={catalogBusy} error={catalogError} onClose={closeCatalogItem} rating={activeCatalogItem ? foodRatings[String(activeCatalogItem.fdc_id)] : undefined} onRate={rateFood} saved={activeCatalogItem ? savedFoods.some((food) => food.id === String(activeCatalogItem.fdc_id)) : false} onSave={(item) => toggleSavedFood({ id: String(item.fdc_id), title: item.description })} />
     </div>
   );

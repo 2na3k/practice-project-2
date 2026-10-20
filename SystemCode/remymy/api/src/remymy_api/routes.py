@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 from sqlalchemy.exc import SQLAlchemyError
 
 from .db import close_database, open_database, split_preview
+from .clustering import cluster
 from .cache import drop_recommendation, read_recommendations, write_recommendations
 from .dependencies import Catalog, Users
 from .inference.food_query import EmptyQuery, UnknownFood
@@ -17,6 +18,8 @@ from .repository.recipe_repository import is_food_id
 from .schemas import (
     CatalogFood,
     ClassifyRequest,
+    ClusteringRequest,
+    ClusteringResponse,
     FoodClassification,
     HealthResponse,
     HistoryItem,
@@ -278,6 +281,34 @@ def classify_training_food(
     training data for comparison."""
     classifier = loaded_classifier(request)
     return classify_or_raise(classifier.classify_fdc, fdc_id)
+
+
+def loaded_clusterer(request: Request):
+    clusterer = request.app.state.clusterer
+    if clusterer is None:
+        raise HTTPException(status_code=503, detail="Clustering is unavailable: the clusterer is not loaded.")
+    return clusterer
+
+
+@router.post("/api/cluster", response_model=ClusteringResponse, tags=["clustering"])
+def cluster_recipe(
+    body: ClusteringRequest,
+    request: Request,
+    catalog: Catalog,
+    k: Annotated[int, Query(ge=1, le=50)] = 5,
+) -> ClusteringResponse:
+    """The k catalog foods nearest the item in its recipe cluster (the HDBSCAN model of recipe_clustering.ipynb). The
+    model reads the item's title as a food description; the first call loads the extraction models, so it is slow."""
+    clusterer = loaded_clusterer(request)
+    if catalog is None:
+        raise HTTPException(status_code=503, detail="Clustering is unavailable: no food catalog is loaded.")
+    started = time.perf_counter()
+    try:
+        response = cluster(clusterer, body, k, catalog)
+    except EmptyQuery as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    logger.info("Clustered %r in %.2fs.", body.item.title, time.perf_counter() - started)
+    return response
 
 
 @router.get("/api/users/{username}", response_model=User, tags=["users"])

@@ -128,10 +128,16 @@ else
   [ -f "$data_path/models/$MODEL_FILE" ] || printf '     missing %s\n' "$data_path/models/$MODEL_FILE" >&2
 fi
 
-if [ -n "$(compose ps --status running --quiet 2>/dev/null)" ]; then
-  fail "Remymy is already running in Docker."
-  printf '   Press Ctrl+C in the terminal running ./start-all.sh, or run: (cd %q && docker compose down)\n' "$ROOT" >&2
-  exit 1
+# Containers left from an earlier start are removed first, so their ports are
+# free again. Volumes are kept, so user accounts and Langfuse data survive.
+if [ -n "$(compose ps --all --quiet 2>/dev/null)" ]; then
+  info "Stopping the Remymy containers that are already running…"
+  if compose --profile recommender down --remove-orphans >/dev/null 2>&1; then
+    ok "Old containers stopped."
+  else
+    fail "Could not stop the running Remymy containers. Run: (cd $ROOT && docker compose down)"
+    exit 1
+  fi
 fi
 
 # The containers install their own copies, so a failed install is reported but

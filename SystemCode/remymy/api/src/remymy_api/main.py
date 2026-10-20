@@ -50,6 +50,25 @@ def load_classifier():
     return classifier
 
 
+def load_clusterer(classifier):
+    """The recipe clusterer, or None when its weights or packages are missing (the cluster routes then answer 503). It
+    needs the classifier's packages, and shares the classifier's term extractor when there is one."""
+    started = time.perf_counter()
+    try:
+        from .inference.service import Clusterer, clustering_dir
+
+        if not clustering_dir().is_dir():
+            logger.warning("No clustering weights at %s; clustering answers 503.", clustering_dir())
+            return None
+        clusterer = (Clusterer.load(classifier.extractor, classifier.lock) if classifier is not None
+                     else Clusterer.load())
+    except ImportError as error:
+        logger.warning("The clusterer's packages are not installed (%s); clustering answers 503.", error)
+        return None
+    logger.info("Clusterer ready in %.1fs.", time.perf_counter() - started)
+    return clusterer
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting the API.")
@@ -60,9 +79,11 @@ async def lifespan(app: FastAPI):
     init_catalog_database()
     app.state.recommender = load_recommender()
     app.state.classifier = load_classifier()
-    logger.info("API ready; recommendations %s, classification %s.",
+    app.state.clusterer = load_clusterer(app.state.classifier)
+    logger.info("API ready; recommendations %s, classification %s, clustering %s.",
                 "on" if app.state.recommender else "off (no catalog)",
-                "on" if app.state.classifier else "off")
+                "on" if app.state.classifier else "off",
+                "on" if app.state.clusterer else "off")
     try:
         yield
     finally:

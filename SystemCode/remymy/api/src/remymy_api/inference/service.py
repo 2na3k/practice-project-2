@@ -18,7 +18,9 @@ from ..repository.recipe_repository import RecipeRepository
 from ..schemas import CatalogFood
 from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS
 from .model_inference_score_recommend import CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, TEXT_COLUMNS, RetrievalPipeline
-from .food_query import NUTRIENT_COLS
+from .classification_service import lookup_path
+from .food_query import NUTRIENT_COLS, EmptyQuery, TermExtractor, build_item
+from .model_inference_recipe_clustering import DEFAULT_ARTIFACTS as CLUSTERING_ARTIFACTS
 from .model_inference_recipe_clustering import RecipeClusterer
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,10 @@ def artifact_dir() -> Path:
 
 def index_dir() -> Path:
     return Path(os.getenv("INDEX_DIR", str(DEFAULT_INDEX_DIR)))
+
+
+def clustering_dir() -> Path:
+    return Path(os.getenv("CLUSTERING_ARTIFACT_DIR", str(CLUSTERING_ARTIFACTS)))
 
 
 def catalog_recipes(foods: list[CatalogFood]) -> list[dict]:
@@ -101,19 +107,40 @@ class Recommender:
         ]
 
 class Clusterer:
-    def __init__(self, recipe_clusterer: RecipeClusterer) -> None:
-        self.clusterer = recipe_clusterer
+    # the model's neighbours are training foods, and not every one is in the priced catalog, so it is asked for more
+    CANDIDATES_PER_ITEM = 4
 
-    def cluster(self, recipe: Recipe, top_k: int, catalog: RecipeRepository) -> list[Recipe]:
+    def __init__(self, recipe_clusterer: RecipeClusterer, extractor: TermExtractor, lookup: Path,
+                 lock: threading.Lock | None = None) -> None:
+        self.clusterer = recipe_clusterer
+        self.extractor = extractor
+        self.lookup = lookup
+        # One query at a time, as for the classifier; when the two share an extractor they share this lock too.
+        self.lock = lock or threading.Lock()
+
+    @classmethod
+    def load(cls, extractor: TermExtractor | None = None, lock: threading.Lock | None = None) -> Clusterer:
+        """The clusterer, on the classifier's extractor and lock when given, so GLiNER and stanza load only once."""
+        recipe_clusterer = RecipeClusterer(clustering_dir(), lookup_path())
+        logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
+                    len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
+        return cls(recipe_clusterer, extractor or TermExtractor(), lookup_path(), lock)
+
+    def cluster(self, title: str, top_k: int, catalog: RecipeRepository) -> list[CatalogFood]:
+        """The top_k catalog foods nearest a recipe, by its title, in its cluster. EmptyQuery for a title with no food
+        description in it."""
         try:
-            result = self.clusterer.predict(recipe.to_dict(), k=top_k )
+            with self.lock:
+                item = build_item(title, self.extractor, lookup=self.lookup)
+                result = self.clusterer.predict(item, k=top_k * self.CANDIDATES_PER_ITEM)
+        except EmptyQuery:
+            raise
         except Exception:
-            logger.exception("Clustering recipe %s failed.", recipe.recipe_id)
+            logger.exception("Clustering recipe %r failed.", title)
             return []
-        nearest = [catalog.digest_food(str(neighbour["fdc_id"])) for neighbour in result["neighbours"]]
-        # a neighbour the catalog does not price has no ingredient
-        found = [food for food in nearest if food.ingredients][:top_k]
-        logger.debug("Recipe %s: cluster %d (%s); %d of %d neighbours in the catalog.", recipe.recipe_id,
+        nearest = [neighbour["fdc_id"] for neighbour in result["neighbours"]]
+        # a neighbour the catalog does not price is left out
+        found = catalog.foods_by_ids(nearest)[:top_k]
+        logger.debug("Recipe %r: cluster %d (%s); %d of %d neighbours in the catalog.", title,
                      result["cluster"], result["cluster_name"], len(found), len(nearest))
         return found
- 

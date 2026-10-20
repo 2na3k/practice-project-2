@@ -106,7 +106,7 @@ class ClusteringRequest(BaseModel):
 class ClusteringResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    near_items: list[RecipeDetail]
+    near_items: list[CatalogFood]
 
 class RecommendedRecipe(BaseModel):
     model_config = ConfigDict(extra="forbid")

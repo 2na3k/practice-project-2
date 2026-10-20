@@ -66,6 +66,7 @@ def no_model(monkeypatch, tmp_path) -> None:
     CATALOG_PATH, so both point at files that are not there."""
     monkeypatch.setattr(main, "load_recommender", lambda: None)
     monkeypatch.setattr(main, "load_classifier", lambda: None)
+    monkeypatch.setattr(main, "load_clusterer", lambda classifier: None)
     monkeypatch.setenv("CATALOG_PATH", str(tmp_path / "no-catalog.csv"))
     monkeypatch.setenv("CATALOG_DATABASE_PATH", str(tmp_path / "no-catalog.db"))
 

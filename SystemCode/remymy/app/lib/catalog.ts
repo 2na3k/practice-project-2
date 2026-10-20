@@ -1,4 +1,4 @@
-import { dataApiError } from "./recipes";
+import { dataApiError, type RecipeDetail } from "./recipes";
 
 // One item of the priced catalog, as the Data API's GET /api/catalog/{fdc_id} gives it (the fields shown here).
 // Prices are SGD from FairPrice; nutrients are per 100 g, null where FDC has no value.
@@ -66,6 +66,24 @@ export async function fetchCatalogItem(id: string, signal?: AbortSignal): Promis
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(dataApiError(body, "This recipe could not be loaded."));
   return parseCatalogItem(body);
+}
+
+export const MAX_SIMILAR = 12;
+
+// The catalog foods nearest a recipe in its recipe cluster, nearest first.
+export async function fetchSimilarFoods(recipe: RecipeDetail, k: number, signal?: AbortSignal): Promise<CatalogItem[]> {
+  const response = await fetch("/api/cluster", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ item: recipe, k }),
+    cache: "no-store",
+    signal,
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(dataApiError(body, "Similar recipes could not be loaded."));
+  const items = body && typeof body === "object" ? (body as { near_items?: unknown }).near_items : undefined;
+  if (!Array.isArray(items)) throw new Error("Clustering service returned an unexpected response.");
+  return items.map(parseCatalogItem);
 }
 
 // "100 g/ml", or "160–1000 g/ml" when the price is an average over packs of several sizes.
