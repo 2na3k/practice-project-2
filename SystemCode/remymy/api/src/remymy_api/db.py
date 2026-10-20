@@ -15,7 +15,7 @@ from sqlalchemy.orm import DeclarativeBase, Session
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_PATH = "/data/remymy-food.db"
-DEFAULT_USER_DATABASE_PATH = "/state/remymy-users.db"
+DEFAULT_USER_DATABASE_PATH = "/data/remymy-users.db"
 REQUIRED_TABLES = {"recipe", "recipe_ingredient", "recipe_instruction"}
 
 
