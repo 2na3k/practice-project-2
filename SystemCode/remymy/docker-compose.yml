@@ -137,7 +137,7 @@ services:
       - remymy
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     restart: unless-stopped
     command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
@@ -245,7 +245,7 @@ services:
       - remymy
 
   langfuse-clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: clickhouse/clickhouse-server:24.8-alpine
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: default
@@ -288,7 +288,7 @@ services:
       - remymy
 
   langfuse-redis:
-    image: redis:7
+    image: redis:7-alpine
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_AUTH:-myredissecret}", "--maxmemory-policy", "noeviction"]
     volumes:
