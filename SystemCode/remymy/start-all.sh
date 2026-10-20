@@ -3,10 +3,11 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
 ENV_FILE="$ROOT/.env.nonprod"
 OPEN_BROWSER=1
+INSTALL_REQUIREMENTS=1
 
 usage() {
   cat <<EOF
-Usage: ./start-all.sh [--no-open]
+Usage: ./start-all.sh
 
 Builds and starts Remymy with Docker Compose: the Data API (with its Redis
 cache), the Next.js app and local Langfuse. When the recommender files are
@@ -36,6 +37,7 @@ EOF
 for arg in "$@"; do
   case "$arg" in
     --no-open) OPEN_BROWSER=0 ;;
+    --no-install) INSTALL_REQUIREMENTS=0 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -131,6 +133,34 @@ if [ -n "$(compose ps --status running --quiet 2>/dev/null)" ]; then
   printf '   Press Ctrl+C in the terminal running ./start-all.sh, or run: (cd %q && docker compose down)\n' "$ROOT" >&2
   exit 1
 fi
+
+# The containers install their own copies, so a failed install is reported but
+# does not stop the start.
+install_requirements() {
+  local python=${PYTHON:-python3} dir req venv stamp sum
+  if ! command -v "$python" >/dev/null; then
+    warn "$python not found, so the Python requirements are not installed."
+    return
+  fi
+  for dir in api mcp models; do
+    req="$ROOT/$dir/requirements.txt"
+    venv="$ROOT/$dir/.venv"
+    stamp="$venv/.requirements.cksum"
+    [ -f "$req" ] || continue
+    sum=$(cksum <"$req")
+    [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$sum" ] && continue
+    info "Installing $dir/requirements.txt into $dir/.venv"
+    if { [ -x "$venv/bin/python" ] || "$python" -m venv "$venv"; } &&
+      "$venv/bin/python" -m pip install --quiet --disable-pip-version-check -r "$req"; then
+      printf '%s\n' "$sum" >"$stamp"
+      ok "Installed $dir requirements."
+    else
+      warn "Could not install $dir/requirements.txt. Docker still installs its own copy."
+    fi
+  done
+}
+
+[ "$INSTALL_REQUIREMENTS" -eq 1 ] && install_requirements
 
 # A port that is already taken (by another program or another container) is
 # swapped for the next free one, so the stack still starts. Ports already
