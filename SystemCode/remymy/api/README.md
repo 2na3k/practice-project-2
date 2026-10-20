@@ -7,7 +7,9 @@ and parameterized SQLite queries.
 ## Project layout
 
 - `src/remymy_api/` contains the FastAPI app, routes, database access, and
-  response schemas.
+  response schemas. Request and response models (DTOs, Pydantic) are in
+  `schemas.py`; SQLAlchemy ORM models are in `models.py`, with their `Base`,
+  engine and `get_db` session dependency in `db.py`.
 - `src/remymy_api/repository/` reads the priced food catalog (see
   [Catalog database](#catalog-database)).
 - `src/remymy_api/inference/` runs the recommendation model in the API process:
@@ -81,6 +83,15 @@ creates the schema on startup if it is missing, which needs SQLite 3.45 or
 newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
 recipe database; SQLite cannot enforce that across files, so `add_history`
 checks it in code.
+
+`app_user` and `user_history` are created and queried with SQL in `users.py`.
+The recipes users write themselves are SQLAlchemy ORM models (`models.py`):
+`user_recipe` (ingredient and step lines as JSON arrays, a column per nutrient
+per 100 g) and `user_recipe_tag` (each tag and whether the classifier suggested
+it or the user added it). `create_tables` creates them on startup after the SQL
+schema; `AppUser` maps `app_user` for the foreign key and relationship without
+creating it. `POST /api/recipes` (body `UserRecipeCreate`, response
+`UserRecipeResponse`) is declared and answers `501` until it is implemented.
 
 ## Catalog database
 

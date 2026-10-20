@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class RecipeSummary(BaseModel):
@@ -197,3 +197,56 @@ class FoodClassification(BaseModel):
     scores: dict[str, float]
     # the food's labels in the training data, for a food looked up by fdc_id
     training_labels: list[str] | None = None
+
+
+RecipeLine = Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class RecipeTag(BaseModel):
+    """A tag on a user's own recipe: one the classifier suggested and the user kept, or one the user added. Also read
+    from the ORM's models.UserRecipeTag."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    # lowercase snake_case, e.g. "dessert_sweet_treat" or a user's own "grandmas_recipe"
+    label: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+    source: Literal["classifier", "user"]
+
+
+class UserRecipeCreate(BaseModel):
+    """Request of POST /api/recipes: a recipe a user writes themselves, as the app's Add recipe screen sends it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    title: str = Field(min_length=1, max_length=200)
+    # one line each, in order
+    ingredients: list[RecipeLine] = Field(min_length=1, max_length=100)
+    instructions: list[RecipeLine] = Field(default_factory=list, max_length=100)
+    tags: list[RecipeTag] = Field(default_factory=list, max_length=30)
+    # per 100 g, only those the user entered; also what the tag suggestions were classified with
+    nutrients: dict[NutrientName, float] = Field(default_factory=dict)
+
+    @field_validator("tags")
+    @classmethod
+    def tags_are_distinct(cls, tags: list[RecipeTag]) -> list[RecipeTag]:
+        labels = [tag.label for tag in tags]
+        if len(set(labels)) != len(labels):
+            raise ValueError("each tag label can be given once")
+        return tags
+
+
+class UserRecipeResponse(BaseModel):
+    """Response of POST /api/recipes: a user's own recipe as stored, read from the ORM's models.UserRecipe."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    # its id among the app's recipes, "user-recipe:<n>" (models.UserRecipe.recipe_id)
+    id: str = Field(validation_alias=AliasChoices("recipe_id", "id"))
+    user_id: int
+    title: str
+    ingredients: list[str]
+    instructions: list[str]
+    tags: list[RecipeTag]
+    nutrients: dict[NutrientName, float]
+    created_at: datetime

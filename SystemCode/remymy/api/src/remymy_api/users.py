@@ -4,20 +4,19 @@ import logging
 import os
 import sqlite3
 from collections.abc import Iterable
-from pathlib import Path
 
 from fastapi import HTTPException
 from redis import Redis
 
 from .cache import read_user_id, write_user_id
-from .db import close_database, open_database
+from .db import close_database, open_database, user_database_path, users_engine
+from .models import create_tables
 from .repository.recipe_repository import is_food_id, recipe_repository
 from .schemas import Preferences, User, UserHistory
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_DATABASE_PATH = "/state/remymy-users.db"
-
+# The tables written with SQL here. The ORM's tables (models.py) are created after them, by create_tables.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_user (
   user_id     INTEGER PRIMARY KEY,
@@ -122,10 +121,6 @@ def demo_enabled() -> bool:
     return os.getenv("SEED_DEMO_USER", "false").strip().lower() in {"1", "true", "yes"}
 
 
-def user_database_path() -> Path:
-    return Path(os.getenv("USER_DATABASE_PATH", DEFAULT_USER_DATABASE_PATH))
-
-
 def open_user_database() -> sqlite3.Connection:
     connection = sqlite3.connect(user_database_path())
     connection.row_factory = sqlite3.Row
@@ -148,6 +143,7 @@ def init_user_database() -> None:
                 logger.info("Injected the demo user %r and its liked and disliked recipes.", DEMO_USERNAME)
     finally:
         connection.close()
+    create_tables(users_engine())
     logger.info("Users database ready at %s.", user_database_path())
 
 

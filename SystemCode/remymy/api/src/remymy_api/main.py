@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 
 from .cache import connect_cache
+from .db import users_engine
 from .repository.recipe_repository import recipe_repository
 from .routes import router
 from .users import init_user_database
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         app.state.cache.close()
+        users_engine().dispose()
         logger.info("API stopped.")
 
 

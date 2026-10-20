@@ -3,15 +3,57 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from collections.abc import Iterator
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import HTTPException
+from sqlalchemy import URL, Engine, create_engine, event
+from sqlalchemy.orm import DeclarativeBase, Session
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_PATH = "/data/remymy-food.db"
+DEFAULT_USER_DATABASE_PATH = "/state/remymy-users.db"
 REQUIRED_TABLES = {"recipe", "recipe_ingredient", "recipe_instruction"}
+
+
+class Base(DeclarativeBase):
+    """The declarative base of the SQLAlchemy ORM models (models.py), all of them tables of the users database."""
+
+
+def user_database_path() -> Path:
+    return Path(os.getenv("USER_DATABASE_PATH", DEFAULT_USER_DATABASE_PATH))
+
+
+def _enable_foreign_keys(dbapi_connection: sqlite3.Connection, _connection_record: object) -> None:
+    # SQLite enforces REFERENCES ... ON DELETE CASCADE only on connections that ask, as open_user_database does
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON")
+    cursor.close()
+
+
+@lru_cache(maxsize=8)
+def _users_engine(path: str) -> Engine:
+    # URL.create takes the path as it is (no URL parsing of spaces or other characters); check_same_thread is off as
+    # FastAPI may open a session in one worker thread and close it in another
+    engine = create_engine(URL.create("sqlite", database=path), connect_args={"check_same_thread": False})
+    event.listen(engine, "connect", _enable_foreign_keys)
+    return engine
+
+
+def users_engine() -> Engine:
+    """The SQLAlchemy engine of the users database at USER_DATABASE_PATH: one per path, so tests can point it
+    elsewhere."""
+    return _users_engine(str(user_database_path()))
+
+
+def get_db() -> Iterator[Session]:
+    """A session on the users database for one request (a FastAPI dependency). The route commits what it writes;
+    anything left uncommitted is rolled back when the session closes."""
+    with Session(users_engine()) as session:
+        yield session
 
 
 def database_path() -> Path:

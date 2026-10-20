@@ -28,6 +28,7 @@ import { ConnectionPanel } from "@/components/ConnectionPanel";
 import { RecipeCard } from "@/components/RecipeCard";
 import { RecipeDetailModal } from "@/components/RecipeDetailModal";
 import { CatalogItemModal } from "@/components/CatalogItemModal";
+import { AddRecipePanel } from "@/components/AddRecipePanel";
 import { RecommendationPanel } from "@/components/RecommendationPanel";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import {
@@ -592,6 +593,7 @@ export default function HomePage() {
           </>
         ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
           : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onOpenFood={openCatalogItem} onDiscover={() => navigate("discover")} />
+            : view === "add-recipe" ? <AddRecipePanel username={RECOMMENDATION_USERNAME} onSaved={(recipe) => flashNotice(`${recipe.title} added to your recipes`)} />
             : view === "history" ? <HistoryView items={history} error={historyError} onRetry={() => setHistoryNonce((current) => current + 1)} onOpenRecipe={openRecipe} onOpenFood={openCatalogItem} />
             : view === "preferences" ? <PreferencePanel preferences={preferences} onSave={savePreferences} />
               : <ConnectionPanel connection={connection} onConnectionChange={setConnection} onBackToChat={() => setView("discover")} />}

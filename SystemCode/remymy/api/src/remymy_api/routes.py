@@ -5,9 +5,10 @@ import sqlite3
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from sqlalchemy.orm import Session
 
-from .db import close_database, open_database, split_preview
+from .db import close_database, get_db, open_database, split_preview
 from .cache import drop_recommendation, read_recommendations, write_recommendations
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
@@ -25,6 +26,8 @@ from .schemas import (
     RecommendationResponse,
     User,
     UserHistory,
+    UserRecipeCreate,
+    UserRecipeResponse,
 )
 from .users import (
     add_history,
@@ -160,6 +163,23 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     finally:
         close_database(connection)
+
+@router.post(
+    "/api/recipes",
+    response_model=UserRecipeResponse,
+    status_code=201,
+    tags=["recipes"],
+    responses={404: {"description": "User not found."}, 501: {"description": "Not implemented yet."}},
+)
+def create_recipe(body: UserRecipeCreate, session: Annotated[Session, Depends(get_db)]) -> UserRecipeResponse:
+    """Save a recipe the user wrote themselves, with the tags they kept or added, and return it as stored.
+
+    Declared only: the app's Add recipe screen already sends this body, and shows the 501 until it is implemented."""
+    # TODO: with the ORM on `session`: 404 unless session.get(models.AppUser, body.user_id) finds the user; add a
+    # models.UserRecipe built from `body` (its tags as models.UserRecipeTag), commit, and return
+    # UserRecipeResponse.model_validate(recipe). The DTOs are in schemas.py, the ORM models in models.py.
+    raise HTTPException(status_code=501, detail="Saving your own recipes is not implemented yet.")
+
 
 @router.get("/api/catalog/{fdc_id}", response_model=CatalogFood, tags=["recipes"])
 def get_catalog_item(fdc_id: int) -> CatalogFood:
