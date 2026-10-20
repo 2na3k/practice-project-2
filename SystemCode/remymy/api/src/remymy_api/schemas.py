@@ -59,7 +59,7 @@ class User(BaseModel):
     username: str = Field(min_length=1)
     preferences: Preferences = Field(default_factory=Preferences)
 
-class UserHistory(BaseModel):
+class UserRating(BaseModel):
     # also read from the ORM's models.UserHistoryEntry
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
@@ -97,6 +97,8 @@ class UserBuyingProfile(BaseModel):
     user_id: int
     avg_price: float
     avg_nutrient_values: dict[str, float]
+    preferences: dict[str, any]
+    history: list[UserRating]
 
 class ClusteringRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")

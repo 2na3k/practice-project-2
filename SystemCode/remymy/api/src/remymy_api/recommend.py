@@ -17,7 +17,7 @@ from .schemas import (
     RecommendationResponse,
     RecommendedRecipe,
     UserBuyingProfile,
-    UserHistory,
+    UserRating,
 )
 
 if TYPE_CHECKING:
@@ -67,7 +67,7 @@ def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserBuyin
     )
 
 
-def user_history(rows: list[UserHistory]) -> History:
+def user_history(rows: list[UserRating]) -> History:
     """A user's likes as fetch_user_history reads them (newest first), as their History (oldest first)."""
     history = History(rows[0].user_id)
     for row in reversed(rows):
@@ -93,8 +93,8 @@ def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Rec
     return recipes
 
 
-def recommend(recommender: Recommender, rows: list[UserHistory], catalog: RecipeRepository) -> RecommendationResponse:
-    history = user_history(rows)
+def recommend(recommender: Recommender, user: UserBuyingProfile, catalog: RecipeRepository) -> RecommendationResponse:
+    history = History.from_ratings(user.history)
     recipes = digest_recipes(history, catalog)
     items = recommender.recommend(history, recipes, top_k=MAX_TOP_K)
     profile = buying_profile(history, recipes)

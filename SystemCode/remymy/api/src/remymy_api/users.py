@@ -14,7 +14,7 @@ from .db import close_database, open_database, user_database_path, users_engine
 from .models import create_tables
 from .repository.recipe_repository import RecipeRepository, is_food_id
 from .repository.user_repository import UserRepository
-from .schemas import UserHistory
+from .schemas import UserRating
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ def rate_item(
     user_id: int,
     recipe_id: str,
     like: bool,
-) -> UserHistory:
+) -> UserRating:
     """Record whether the user liked a recipe, or a catalog food by its fdc_id, in their history (UserRepository.
     add_history). LookupError for an id that is neither."""
     if not known_item(recipe_id, catalog):

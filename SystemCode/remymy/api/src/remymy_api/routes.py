@@ -28,7 +28,7 @@ from .schemas import (
     RecipeSummary,
     RecommendationResponse,
     User,
-    UserHistory,
+    UserRating,
     UserRecipeCreate,
     UserRecipeResponse,
 )
@@ -361,7 +361,7 @@ def get_user_history(
     ]
 
 
-@router.put("/api/recipes/{recipe_id}/rating", response_model=UserHistory, tags=["recipe"])
+@router.put("/api/recipes/{recipe_id}/rating", response_model=UserRating, tags=["recipe"])
 def rate_recipe(
     recipe_id: str,
     user_id: int,
@@ -369,7 +369,7 @@ def rate_recipe(
     request: Request,
     users: Users,
     catalog: Catalog,
-) -> UserHistory:
+) -> UserRating:
     """Record whether the user liked a recipe they cooked, or a catalog food by its fdc_id (a recommended grocery). Rating
     the same one again changes the like in their history rather than adding another. A recommendation they did not
     like also leaves their cached recommendations."""

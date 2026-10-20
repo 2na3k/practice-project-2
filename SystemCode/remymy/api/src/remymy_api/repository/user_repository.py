@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..cache import read_user_id, write_user_id
 from ..models import NOW, AppUser, UserHistoryEntry
-from ..schemas import Preferences, User, UserHistory
+from ..schemas import Preferences, User, UserRating
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class UserRepository:
         logger.info("Created user %r with id %d.", username, user_id)
         return User(id=user_id, username=username, preferences=preferences)
 
-    def fetch_user_history(self, username: str, limit: int = 50) -> list[UserHistory]:
+    def fetch_user_history(self, username: str, limit: int = 50) -> list[UserRating]:
         """The user's likes, newest first; none for an unknown username."""
         user_id = self.find_user_id(username)
         if user_id is None:
@@ -81,7 +81,7 @@ class UserRepository:
             .order_by(UserHistoryEntry.timestamp.desc(), UserHistoryEntry.history_id.desc())
             .limit(limit)
         )
-        return [UserHistory.model_validate(entry) for entry in entries]
+        return [UserRating.model_validate(entry) for entry in entries]
 
     def fetch_user_likes(self, username: str) -> dict[str, bool] | None:
         """Whether the user liked each recipe or catalog food they rated, by its id, as their latest row for it says;
@@ -97,7 +97,7 @@ class UserRepository:
         )
         return {recipe_id: like for recipe_id, like in rows}
 
-    def add_history(self, user_id: int, recipe_id: str, like: bool) -> UserHistory:
+    def add_history(self, user_id: int, recipe_id: str, like: bool) -> UserRating:
         """Record whether the user liked a recipe, or a catalog food by its fdc_id. One they rated before has its like
         changed and dated now; anything else gets a new row. Callers check the recipe or food exists (users.rate_item);
         an unknown user_id is an IntegrityError."""
@@ -116,4 +116,4 @@ class UserRepository:
                 self.session.flush()
                 timestamp = entry.timestamp
         logger.debug("User %d %s recipe %s.", user_id, "liked" if like else "did not like", recipe_id)
-        return UserHistory(user_id=user_id, timestamp=timestamp, like=like, recipe_id=recipe_id)
+        return UserRating(user_id=user_id, timestamp=timestamp, like=like, recipe_id=recipe_id)
