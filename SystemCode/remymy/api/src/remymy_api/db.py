@@ -14,7 +14,7 @@ from sqlalchemy.orm import DeclarativeBase, Session
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DATABASE_PATH = "/data/remymy-food.db"
+DEFAULT_FOOD_DATABASE_PATH = "/data/remymy-food.db"
 DEFAULT_USER_DATABASE_PATH = "/data/remymy-users.db"
 REQUIRED_TABLES = {"recipe", "recipe_ingredient", "recipe_instruction"}
 
@@ -56,14 +56,14 @@ def get_db() -> Iterator[Session]:
         yield session
 
 
-def database_path() -> Path:
-    return Path(os.getenv("DATABASE_PATH", DEFAULT_DATABASE_PATH))
+def food_database_path() -> Path:
+    return Path(os.getenv("DATABASE_PATH", DEFAULT_FOOD_DATABASE_PATH))
 
 
 def open_database() -> sqlite3.Connection:
     """Open a valid recipe database or raise a generic, non-leaky 503. The reason goes to the log, not the caller."""
 
-    path = database_path()
+    path = food_database_path()
     if not path.is_file():
         logger.warning("No recipe database at %s.", path)
         raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
