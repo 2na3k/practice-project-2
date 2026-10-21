@@ -118,6 +118,9 @@ BROAD_MATCH_SHARE = 0.10
 # So the threads only pay with big buckets on big scans; on this catalog the scan stays under 0.05 ms either way.
 SCAN_BUCKET = 1000
 SCAN_THREADS = 4
+# A run of at least this many matching rows stored side by side is scanned where it lies; shorter ones are gathered
+# into one block first, as a small gather costs less than a bucket per short run.
+SCAN_MIN_RUN = 256
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -339,7 +342,7 @@ def encode_catalog(reranker, recipes, batch_size=1024):
                       for start in range(0, len(recipes), batch_size)])
 
 
-def average_linkage(distance, threshold, sizes=None):
+def average_linkage(distance, threshold, sizes=None, leaf_order=False):
     """The cluster of each row (0 to C - 1) under average-linkage agglomerative clustering of a square distance
     matrix, cut at threshold: scipy's linkage(method="average") with fcluster(threshold, "distance"), without scipy.
     sizes counts each row as that many identical points (1 each by default), so a group of duplicates is clustered
@@ -350,12 +353,18 @@ def average_linkage(distance, threshold, sizes=None):
     order here only follows the rows', so the same rows always give the same clusters.
 
     Nearest-neighbour chain: follow each cluster's nearest neighbour until two are each other's nearest, merge them
-    and update the merged row's distances by Lance-Williams (the size-weighted mean of the two). O(n^2) time."""
+    and update the merged row's distances by Lance-Williams (the size-weighted mean of the two). O(n^2) time.
+
+    With leaf_order, also the rows in the order of the tree's leaves: each merge puts its two sides next to each other,
+    so every sub-cluster, at every level of the tree, is one contiguous stretch of that order. Of the four ways to put
+    two sides together (either first, either reversed), a merge takes the one whose meeting rows are nearest."""
     n = len(distance)
+    original = distance.copy() if leaf_order else None
     np.fill_diagonal(distance, np.inf)
     size = np.ones(n) if sizes is None else np.asarray(sizes, dtype=float).copy()
     active = np.ones(n, dtype=bool)
     merges = []  # (height, a, b): a and b merged at that distance
+    leaves = [[row] for row in range(n)]  # the rows under each cluster, in leaf order
     chain = []
     for _ in range(n - 1):
         while True:
@@ -378,6 +387,14 @@ def average_linkage(distance, threshold, sizes=None):
         distance[b], distance[:, b] = np.inf, np.inf
         size[a] += size[b]
         active[b] = False
+        if leaf_order:
+            left, right = leaves[a], leaves[b]
+            arrangements = [(left, right), (left, right[::-1]), (left[::-1], right), (left[::-1], right[::-1])]
+            first, second = min(arrangements, key=lambda pair: original[pair[0][-1], pair[1][0]])
+            leaves[a] = first + second
+        else:
+            leaves[a] += leaves[b]
+        leaves[b] = []
     # average linkage is monotone, so the cut keeps every merge at or below the threshold, whatever order they came in
     parent = np.arange(n)
 
@@ -392,7 +409,10 @@ def average_linkage(distance, threshold, sizes=None):
         # must not decide which side
         if height <= threshold + 1e-9:
             parent[root(a)] = root(b)
-    return np.unique([root(row) for row in range(n)], return_inverse=True)[1].reshape(-1)
+    labels = np.unique([root(row) for row in range(n)], return_inverse=True)[1].reshape(-1)
+    if leaf_order:
+        return labels, np.array([row for rows in leaves for row in rows], dtype=np.intp)
+    return labels
 
 
 def jaccard_distances(sets):
@@ -472,11 +492,14 @@ def macro_clusters(tag_matrix, threshold=TAG_CLUSTER_THRESHOLD):
     their 692 tag sets. The tag sets come sorted, so the same catalog always gives the same clusters."""
     tag_sets, set_of_row, counts = np.unique(tag_matrix, axis=0, return_inverse=True, return_counts=True)
     set_of_row = set_of_row.reshape(-1)
-    labels = average_linkage(jaccard_distances(tag_sets), threshold, counts)
+    labels, leaves = average_linkage(jaccard_distances(tag_sets), threshold, counts, leaf_order=True)
     rows_of_set = [BitMap(np.flatnonzero(set_of_row == tag_set).tolist()) for tag_set in range(len(tag_sets))]
+    # clusters and their tag-set groups in the tree's leaf order: below the cut the tree keeps clustering the groups by
+    # Jaccard distance, so the sub-clusters of a cluster, at every level, sit next to each other, and the groups a query
+    # keeps (sharing its tags) tend to be neighbours
     clusters = []
-    for cluster in range(int(labels.max()) + 1 if len(labels) else 0):
-        sets = np.flatnonzero(labels == cluster)
+    for cluster in dict.fromkeys(labels[leaves].tolist()):
+        sets = leaves[labels[leaves] == cluster]
         weights = counts[sets].astype(float)
         clusters.append(MacroCluster(
             members=BitMap.union(*(rows_of_set[tag_set] for tag_set in sets)),
@@ -510,16 +533,24 @@ class RecipeIndex:
         self.fdc_ids = list(fdc_ids)
         self.embeddings = embeddings  # (N, d) float32, not normalized: the reranker takes them as they are.
         self.index = index
-        # Structure of arrays for the exact scan: the unit embeddings by column, each dimension's values for every row
-        # contiguous in memory, so scoring a bucket is one multiply-add per dimension across all its rows (SIMD).
-        unit = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12)
-        self.columns = np.ascontiguousarray(unit.T, dtype=np.float32)  # (d, N)
         # built from the recipes, whether the HNSW index was built or loaded: cheap, and always in step with them
         self.tags, self.clusters, self.prices = [], [], None
         if recipes is not None:
             self.prices = np.array([float(recipe.get("price", 0.0)) for recipe in recipes])
             self.tags, tag_matrix = food_tags(recipes, self.prices)
             self.clusters = macro_clusters(tag_matrix)
+        # Structure of arrays for the exact scan: the unit embeddings by column, each dimension's values for every row
+        # contiguous in memory, so scoring a bucket is one multiply-add per dimension across all its rows (SIMD). The
+        # rows are stored macro-cluster by macro-cluster and tag-set group by group, so a group is one contiguous range
+        # of every column, and the rows a query routes to are a few long runs read in place rather than gathered.
+        # order[position] is the row stored there, position_of[row] where a row is stored.
+        self.order = (np.concatenate([np.asarray(rows.to_array(), dtype=np.intp)
+                                      for cluster in self.clusters for _, rows in cluster.groups])
+                      if self.clusters else np.arange(len(self.fdc_ids)))
+        self.position_of = np.empty_like(self.order)
+        self.position_of[self.order] = np.arange(len(self.order))
+        unit = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12)
+        self.columns = np.ascontiguousarray(unit[self.order].T, dtype=np.float32)  # (d, N), in storage order
 
     def required_tags(self, preferences):
         """Step 3.1: the tags a query's constraints require, as a bool vector over self.tags (its special_diet, its
@@ -657,30 +688,67 @@ class RecipeIndex:
     def scan(self, query, rows, k):
         """The exact k nearest of rows (a Roaring bitmap) to query: a SIMD brute-force distance calculation over the
         structure-of-arrays columns, in buckets of SCAN_BUCKET rows computed concurrently on a pool of SCAN_THREADS
-        threads, then a priority queue (a min-heap) of the k most similar."""
-        query = query / (np.linalg.norm(query) + 1e-12)
-        rows = np.asarray(rows.to_array(), dtype=np.intp)
-        # the matching rows' columns, gathered once into a (d, m) block: each bucket is then a contiguous run of every
-        # column, not 20 values gathered from all over it
-        block = self.columns[:, rows]
-        buckets = [(rows[start:start + SCAN_BUCKET], block[:, start:start + SCAN_BUCKET])
-                   for start in range(0, len(rows), SCAN_BUCKET)]
+        threads, then a priority queue (a min-heap) of the k most similar.
+
+        The matching rows that are stored side by side (whole tag-set groups, for a routed query) are scored where they
+        lie, as contiguous runs of every column; only the rest are gathered, once, into one contiguous block. Each
+        bucket writes its similarities into its own slice of one array."""
+        query = np.ascontiguousarray(query / (np.linalg.norm(query) + 1e-12), dtype=np.float32)
+        ids = np.frombuffer(rows.to_array(), dtype=np.uint32)  # the bitmap's row ids read in place, not copied
+        positions = self.position_of[ids]
+        if not len(positions):
+            return []
+        if len(positions) * math.log2(len(positions) + 1) > len(self.order):
+            # many rows: marking them in a storage-wide mask puts them in order faster than sorting
+            stored = np.zeros(len(self.order), dtype=bool)
+            stored[positions] = True
+            positions = np.flatnonzero(stored)
+        else:
+            positions = np.sort(positions)
+        # runs of consecutive storage positions, and which of them are long enough to scan in place
+        starts = np.flatnonzero(np.r_[True, np.diff(positions) != 1])
+        lengths = np.diff(np.r_[starts, len(positions)])
+        long_run = lengths >= SCAN_MIN_RUN
+        buckets = []  # (columns: (d, n) view, the storage positions it scores)
+        for start, length in zip(starts[long_run].tolist(), lengths[long_run].tolist()):
+            first = int(positions[start])
+            for begin in range(first, first + length, SCAN_BUCKET):
+                stop = min(begin + SCAN_BUCKET, first + length)
+                buckets.append((self.columns[:, begin:stop], np.arange(begin, stop)))
+        loose = positions[~np.repeat(long_run, lengths)]
+        if len(loose):
+            block = self.columns[:, loose]  # the only gather: rows with no long run of matches around them
+            buckets += [(block[:, begin:begin + SCAN_BUCKET], loose[begin:begin + SCAN_BUCKET])
+                        for begin in range(0, len(loose), SCAN_BUCKET)]
+        offsets = np.cumsum([0] + [len(scored) for _, scored in buckets])
+        similarities = np.empty(offsets[-1], dtype=np.float32)
 
         def score(bucket):
-            # the product sums query[j] times the bucket's run of column j: one multiply-add per dimension covers all
-            # of the bucket's rows
-            bucket_rows, bucket_columns = bucket
-            return bucket_rows, query @ bucket_columns
+            # one multiply-add per dimension over the bucket's contiguous run of it, straight into its slice
+            columns, offset = buckets[bucket][0], offsets[bucket]
+            np.dot(query, columns, out=similarities[offset:offset + columns.shape[1]])
 
         # the distance calculation, every bucket of it, before the priority queue sees any
-        scored = list(scan_pool().map(score, buckets) if SCAN_THREADS > 1 else map(score, buckets))
+        if SCAN_THREADS > 1 and len(buckets) > 1:
+            list(scan_pool().map(score, range(len(buckets))))
+        else:
+            for bucket in range(len(buckets)):
+                score(bucket)
+
         best = []  # (similarity, row) of the k most similar so far, the least similar on top
-        for bucket, similarities in scored:
-            for row, similarity in zip(bucket.tolist(), similarities.tolist()):
+        for bucket, (_, scored) in enumerate(buckets):
+            part = similarities[offsets[bucket]:offsets[bucket + 1]]
+            # NumPy picks what can enter the queue: once it is full, only rows beating its least similar, and of a
+            # bucket only its own k most similar, so the queue sees a few rows, not every one
+            candidates = np.flatnonzero(part > best[0][0]) if len(best) == k else np.arange(len(part))
+            if len(candidates) > k:
+                candidates = candidates[np.argpartition(part[candidates], len(candidates) - k)[len(candidates) - k:]]
+            for index in candidates.tolist():
+                entry = (float(part[index]), int(self.order[scored[index]]))
                 if len(best) < k:
-                    heapq.heappush(best, (similarity, row))
-                elif similarity > best[0][0]:
-                    heapq.heapreplace(best, (similarity, row))
+                    heapq.heappush(best, entry)
+                elif entry[0] > best[0][0]:
+                    heapq.heapreplace(best, entry)
         return [(row, similarity) for similarity, row in sorted(best, reverse=True)]
 
 

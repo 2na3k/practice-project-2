@@ -183,3 +183,24 @@ def test_the_scan_reads_a_structure_of_arrays():
     # one contiguous array per dimension, holding that dimension for every row
     assert index.columns.shape == (8, 50) and index.columns.flags["C_CONTIGUOUS"]
     assert index.columns[3] == pytest.approx(unit[:, 3])
+
+
+def test_the_leaf_order_keeps_every_sub_cluster_contiguous():
+    # two pairs of near sets far from each other, and the pairs' own two members nearest of all
+    sets = np.array([[1, 1, 1, 0, 0, 0, 0], [0, 0, 0, 1, 1, 1, 1], [1, 1, 0, 0, 0, 0, 0], [0, 0, 0, 1, 1, 1, 0]],
+                    dtype=bool)
+    labels, order = average_linkage(jaccard_distances(sets), threshold=0.5, leaf_order=True)
+
+    assert sorted(order.tolist()) == [0, 1, 2, 3]
+    assert labels[0] == labels[2] and labels[1] == labels[3] and labels[0] != labels[1]
+    # each cluster's rows sit next to each other in the order
+    position = {row: index for index, row in enumerate(order.tolist())}
+    assert abs(position[0] - position[2]) == 1 and abs(position[1] - position[3]) == 1
+
+
+def test_the_columns_store_each_tag_set_group_contiguously(recipe_index):
+    stored = recipe_index.order.tolist()
+    for cluster in recipe_index.clusters:
+        for _, group_rows in cluster.groups:
+            positions = sorted(stored.index(row) for row in group_rows)
+            assert positions == list(range(positions[0], positions[0] + len(positions)))
