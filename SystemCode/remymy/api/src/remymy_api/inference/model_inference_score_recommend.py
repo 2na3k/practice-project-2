@@ -714,17 +714,22 @@ class RecipeIndex:
         else:
             positions = np.sort(positions)
 
-        # runs of consecutive storage positions, and which of them are long enough to scan in place
+        # runs of consecutive storage positions (in SoA), and which of them are long enough to scan in place
         # divide into segment which is contiguous
         starts = np.flatnonzero(np.r_[True, np.diff(positions) != 1])
         lengths = np.diff(np.r_[starts, len(positions)])
         long_run = lengths >= SCAN_MIN_RUN
         segments = [(self.columns[:, first:first + length], np.arange(first, first + length))
                     for first, length in zip(positions[starts[long_run]].tolist(), lengths[long_run].tolist())]
-        leftover = positions[~np.repeat(long_run, lengths)]
-        if len(leftover):
-            segments.append((self.columns[:, leftover], leftover))  # the only gather: rows with no long run around them
-        
+        leftover_positions = positions[~np.repeat(long_run, lengths)] # scattered range
+        if segments and len(leftover_positions):
+            # push the leftover onto the last segment: its positions, then the leftover's, gathered into one block
+            # in storage order, so the gather below reads the columns front to back
+            merged = np.sort(np.concatenate([segments[-1][1], leftover_positions]))
+            segments[-1] = (self.columns[:, merged], merged)  # replaces the last segment in place
+        elif len(leftover_positions): # no segments at all
+            segments.append((self.columns[:, leftover_positions], leftover_positions))
+
         # The buckets, precalculated: a segment of n rows makes n // SCAN_BUCKET full buckets, and its n % SCAN_BUCKET
         # remaining rows one last, smaller bucket.
         buckets = []  # array of array

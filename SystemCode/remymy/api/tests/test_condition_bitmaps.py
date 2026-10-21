@@ -244,3 +244,23 @@ def test_a_segment_makes_its_full_buckets_and_one_smaller_last_bucket(monkeypatc
     unit = index.embeddings / np.linalg.norm(index.embeddings, axis=1, keepdims=True)
     exact = 100 + np.argsort(-(unit[100:2550] @ (query / np.linalg.norm(query))))[:5]
     assert [row for row, _ in found] == exact.tolist()
+
+
+def test_the_last_long_runs_remainder_shares_buckets_with_the_leftover_rows(monkeypatch):
+    # rows 0-2,449 stored side by side (2 full buckets and 450 more) and 5 scattered ones: the 450 join the 5
+    monkeypatch.setattr(pipeline, "SCAN_BUCKET", 1000)
+    index = make_index(None, 4000, seed=7)
+    bucket_counts = []
+    monkeypatch.setattr(pipeline, "thread_groups", lambda num_buckets, num_threads: bucket_counts.append(num_buckets)
+                        or thread_groups(num_buckets, num_threads))
+    scattered = [2600, 2900, 3100, 3500, 3900]
+    rows = list(range(2450)) + scattered
+    query = index.embeddings[1]
+    found = index.scan(query, BitMap(rows), 10)
+
+    # two full buckets read in place, then one of 450 + 5 rows, rather than a bucket of 450 and another of 5
+    assert bucket_counts == [3]
+    unit = index.embeddings / np.linalg.norm(index.embeddings, axis=1, keepdims=True)
+    candidates = np.array(rows)
+    exact = candidates[np.argsort(-(unit[candidates] @ (query / np.linalg.norm(query))))[:10]]
+    assert [row for row, _ in found] == exact.tolist()
