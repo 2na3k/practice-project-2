@@ -5,7 +5,7 @@
    its standardized [price, nutrients], and the embeddings go into an HNSW index with cosine distance.
 2. Query: the user's representative embedding is the average of their history recipes' embeddings.
 3. Retrieval: HNSW returns the recipes closest to it by cosine similarity, the history's own recipes excluded, sorted
-   by that similarity, most similar first. Under the user's constraints (diet, preferred nutrient, budget), the search
+   by that similarity, most similar first. Under the user's constraints (diet, budget), the search
    is routed first (recommender.MD): the foods are clustered by their tags into macro-clusters, each a Roaring
    bitmap of its rows; the constraints are matched against the clusters' centroids for the rows they allow, and by
    how large a share of the catalog those are, HNSW searches them through a bitset mask or they are scanned exactly.
@@ -95,14 +95,13 @@ DIET_EXCLUDES = {
 }
 # A food is rich in a nutrient when it has at least this quantile of the catalog's values (per 100 g).
 RICH_QUANTILE = 0.75
-# Cluster-first routing of a search under the user's constraints (recommender.MD). Each food carries tags: the diet
-# screens and rich nutrients above, and cumulative price bands, "price<=X" for every band at or above its price, so
-# foods of similar price share most of their price tags. Catalog prices: median S$9.22, 10th percentile S$3.15, 90th
-# S$32.63.
-PRICE_BANDS = (3, 5, 10, 20, 50)
-# The foods' tag sets are clustered agglomeratively (average linkage, Jaccard distance) and cut here, so a
-# macro-cluster's members share at least 60% of their tags on average. On the catalog: 15 tags make 692 distinct tag
-# sets, cut into 43 macro-clusters (largest 3,890 foods, median 25); 0.3 gives 111, 0.5 gives 21.
+# Cluster-first routing of a search under the user's constraints (recommender.MD). The inverted bitmap index holds
+# one tag per special_diet a user can set (vegetarian, halal, Hinduism): each food carries the ones whose screen it
+# passes. A budget is a number, not a category, so it is checked against each food's price instead; the foods of a
+# tag-set group are stored cheapest first, so a budget keeps one contiguous stretch at the start of each group.
+# The foods' tag sets are clustered agglomeratively (average linkage, Jaccard distance) and cut here. On the catalog:
+# the 3 diet tags make 7 distinct tag sets, cut into 6 macro-clusters. (With price bands and rich nutrients as tags,
+# routed rows broke into 20x more runs: price bands left any budget between two bands scattered.)
 TAG_CLUSTER_THRESHOLD = 0.4
 # Index selection by the share of the catalog a query's constraints match: from BROAD_MATCH_SHARE up, HNSW over the
 # matching rows through a bitset mask; under it, an exact scan of them. Under 10%, masked HNSW needs ef raised to about
@@ -437,7 +436,8 @@ def condition_bitmaps(recipes):
     (food_tags), which the macro-clusters group them by.
 
     "diet:<diet>" for each special_diet: none of the diet's excluded terms in the food. "nutrient:<key>" for each
-    nutrient: at least the catalog's RICH_QUANTILE of it, for a preferred_nutrient."""
+    nutrient: at least the catalog's RICH_QUANTILE of it, for a preferred_nutrient; it does not filter a search yet,
+    so food_tags leaves it out."""
     words = [recipe_words(recipe) for recipe in recipes]
     bitmaps = {f"diet:{diet}": np.array([not row_words.intersection(terms) for row_words in words], dtype=bool)
                for diet, terms in DIET_EXCLUDES.items()}
@@ -457,21 +457,16 @@ def nutrient_key(preferred):
 
 
 def preference_conditions(preferences):
-    """The bitmap conditions a user's preferences ask for: their special_diet and their preferred_nutrient."""
-    conditions = []
-    if preferences.get("special_diet"):
-        conditions.append(f"diet:{preferences['special_diet']}")
-    if preferences.get("preferred_nutrient") and (key := nutrient_key(preferences["preferred_nutrient"])):
-        conditions.append(f"nutrient:{key}")
-    return conditions
+    """The conditions a user's preferences require of every food a search returns, besides the budget: their
+    special_diet. The preferred_nutrient does not filter (it is for later)."""
+    return [f"diet:{preferences['special_diet']}"] if preferences.get("special_diet") else []
 
 
-def food_tags(recipes, prices):
-    """The tag names and a (rows, tags) bool matrix of which food carries which: the condition bitmaps' diets and rich
-    nutrients, and the cumulative price bands."""
-    bitmaps = condition_bitmaps(recipes)
-    for band in PRICE_BANDS:
-        bitmaps[f"price<={band}"] = prices <= band
+def food_tags(recipes):
+    """The tag names and a (rows, tags) bool matrix of which food carries which: one tag per special_diet a user can
+    set, the only categorical condition a search filters by. The rich-nutrient bitmaps stay out (the preferred
+    nutrient does not filter), and so does the price, a number the budget is checked against directly."""
+    bitmaps = {name: bitmap for name, bitmap in condition_bitmaps(recipes).items() if name.startswith("diet:")}
     return list(bitmaps), np.stack(list(bitmaps.values()), axis=1)
 
 
@@ -552,15 +547,17 @@ class RecipeIndex:
         self.tags, self.clusters, self.prices = [], [], None
         if recipes is not None:
             self.prices = np.array([float(recipe.get("price", 0.0)) for recipe in recipes])
-            self.tags, tag_matrix = food_tags(recipes, self.prices)
+            self.tags, tag_matrix = food_tags(recipes)
             self.clusters = macro_clusters(tag_matrix)
         # Structure of arrays for the exact scan: the unit embeddings by column, each dimension's values for every row
         # contiguous in memory, so scoring a bucket is one multiply-add per dimension across all its rows (SIMD). The
         # rows are stored macro-cluster by macro-cluster and tag-set group by group, so a group is one contiguous range
-        # of every column, and the rows a query routes to are a few long runs read in place rather than gathered.
+        # of every column, and inside a group cheapest first, so a budget keeps the start of each group: the rows a
+        # query routes to are a few long runs read in place rather than gathered.
         # order[position] is the row stored there, position_of[row] where a row is stored.
-        self.order = (np.concatenate([np.asarray(rows.to_array(), dtype=np.intp)
-                                      for cluster in self.clusters for _, rows in cluster.groups])
+        self.order = (np.concatenate([group[np.argsort(self.prices[group], kind="stable")]
+                                      for cluster in self.clusters for _, rows in cluster.groups
+                                      for group in [np.asarray(rows.to_array(), dtype=np.intp)]])
                       if self.clusters else np.arange(len(self.fdc_ids)))
         self.position_of = np.empty_like(self.order)
         self.position_of[self.order] = np.arange(len(self.order))
@@ -568,15 +565,11 @@ class RecipeIndex:
         self.columns = np.ascontiguousarray(unit[self.order].T, dtype=np.float32)  # (d, N), in storage order
 
     def required_tags(self, preferences):
-        """Step 3.1: the tags a query's constraints require, as a bool vector over self.tags (its special_diet, its
-        preferred_nutrient and the smallest price band holding its budget), and its exact budget (0 is no limit)."""
+        """Step 3.1: the tags a query's constraints require, as a bool vector over self.tags (its special_diet), and
+        its budget (0 is no limit), which route() checks against each food's price."""
         required = np.zeros(len(self.tags), dtype=bool)
-        wanted = preference_conditions(preferences)
         budget = float(preferences.get("budget") or 0)
-        band = next((band for band in PRICE_BANDS if band >= budget), None) if budget > 0 else None
-        if band is not None:
-            wanted.append(f"price<={band}")
-        for tag in wanted:
+        for tag in preference_conditions(preferences):
             if tag in self.tags:
                 required[self.tags.index(tag)] = True
             else:
@@ -589,7 +582,7 @@ class RecipeIndex:
 
         A cluster whose centroid has a required tag at 0 (no member carries it) is skipped, one whose centroid has
         every required tag at 1 (every member carries them) is taken whole, and of the rest only the tag-set groups
-        carrying every required tag. The budget is then checked against each row's price, as its band only bounds it."""
+        carrying every required tag. The budget is then checked against each row's price."""
         required, budget = self.required_tags(preferences)
         if not required.any() and budget <= 0:
             return None
@@ -720,26 +713,28 @@ class RecipeIndex:
             positions = np.flatnonzero(stored)
         else:
             positions = np.sort(positions)
+
         # runs of consecutive storage positions, and which of them are long enough to scan in place
+        # divide into segment which is contiguous
         starts = np.flatnonzero(np.r_[True, np.diff(positions) != 1])
         lengths = np.diff(np.r_[starts, len(positions)])
         long_run = lengths >= SCAN_MIN_RUN
-        # the segments to scan, each a contiguous (d, n) view of the columns and the storage positions it covers: every
-        # long run where it lies, then the leftover rows
         segments = [(self.columns[:, first:first + length], np.arange(first, first + length))
                     for first, length in zip(positions[starts[long_run]].tolist(), lengths[long_run].tolist())]
         leftover = positions[~np.repeat(long_run, lengths)]
         if len(leftover):
             segments.append((self.columns[:, leftover], leftover))  # the only gather: rows with no long run around them
+        
         # The buckets, precalculated: a segment of n rows makes n // SCAN_BUCKET full buckets, and its n % SCAN_BUCKET
         # remaining rows one last, smaller bucket.
-        buckets = []  # (columns: (d, size) view, the storage positions it scores), in storage order
+        buckets = []  # array of array
+        # iterate through segments
         for columns, scored in segments:
             full, remainder = divmod(len(scored), SCAN_BUCKET)
             bounds = [(bucket * SCAN_BUCKET, (bucket + 1) * SCAN_BUCKET) for bucket in range(full)]
             if remainder:
                 bounds.append((full * SCAN_BUCKET, len(scored)))
-            buckets += [(columns[:, begin:stop], scored[begin:stop]) for begin, stop in bounds]
+            buckets.extend([(columns[:, begin:stop], scored[begin:stop]) for begin, stop in bounds])
         num_buckets = len(buckets)
         offsets = np.cumsum([0] + [len(scored) for _, scored in buckets])
         similarities = np.empty(offsets[-1], dtype=np.float32)

@@ -88,7 +88,7 @@ def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Rec
 def recommend(recommender: Recommender, user: UserProfileInput, catalog: RecipeRepository) -> RecommendationResponse:
     history = History.from_ratings(user.user_id, user.history)
     recipes = digest_recipes(history, catalog)
-    # the preferences' diet, preferred nutrient and budget route the retrieval to the foods they allow
+    # the preferences' diet and budget route the retrieval to the foods they allow
     recommended_items = recommender.recommend(history, recipes, top_k=MAX_TOP_K,
                                               preferences=user.preferences.model_dump())
     profile = buying_profile(history, recipes)

@@ -218,13 +218,15 @@ For each recommendation (one at a time) it:
    not (training counted 3 to 5 as liked).
 4. Averages the history items' normalized embeddings into one query vector and
    retrieves the 100 nearest catalog foods, excluding the history itself. When
-   the user's preferences set a diet, a preferred nutrient or a budget, only
-   foods meeting all of them can come back, found by cluster-first routing
+   the user's preferences set a diet or a budget, only foods meeting both can
+   come back (the preferred nutrient does not filter), found by cluster-first routing
    ([`inference/recommender.MD`](api/src/remymy_api/inference/recommender.MD)):
-   - At startup, each food gets tags (the diet screens, the nutrients it is in
-     the top quarter of the catalog for, and price bands of S$3, 5, 10, 20 and
-     50), and the foods' tag sets are clustered agglomeratively by Jaccard
-     distance into 43 macro-clusters, each a Roaring bitmap of its foods.
+   - At startup, each food gets a tag for each diet it passes (vegetarian,
+     halal, Hinduism), and the foods' tag sets are clustered agglomeratively
+     by Jaccard distance into 6 macro-clusters, each a Roaring bitmap of its
+     foods. The budget is not a tag: each food's price is checked against it,
+     and each group's foods are stored cheapest first, so a budget's matches
+     sit together at the start of each group.
    - Per request, the constraints are matched against the clusters' tag
      shares: a cluster no member of which meets them is skipped, one every
      member of which does is taken whole, and the others contribute only their

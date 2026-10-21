@@ -85,8 +85,8 @@ class Recommender:
 
     def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
                   candidates: int = 100, preferences: Mapping | None = None) -> list[dict]:
-        """The pipeline's recommendations from the history's foods; the preferences' diet, preferred nutrient and
-        budget constrain which foods its retrieval may return."""
+        """The pipeline's recommendations from the history's foods; the preferences' diet and budget constrain which
+        foods its retrieval may return."""
         # Preparing the history
         history_foods = [
             {"fdc_id": ingredient.fdc_id, "rating": LIKED_RATING if entry.like else DISLIKED_RATING,

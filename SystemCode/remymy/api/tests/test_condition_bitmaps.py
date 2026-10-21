@@ -56,21 +56,32 @@ def test_each_condition_has_a_bitmap_of_which_rows_meet_it():
 def test_preferences_name_their_conditions():
     assert nutrient_key("Protein") == "protein_g"
     assert nutrient_key("vitamin c") is None
+    # only the diet filters (the budget is checked apart); the preferred nutrient does not, for now
     assert preference_conditions({"special_diet": "halal", "preferred_nutrient": "protein", "budget": 10}) == [
-        "diet:halal", "nutrient:protein_g"]
+        "diet:halal"]
+    assert preference_conditions({"preferred_nutrient": "protein"}) == []
     assert preference_conditions({}) == []
 
 
-def test_each_food_carries_its_conditions_and_every_price_band_at_or_above_its_price():
-    tags, matrix = food_tags(RECIPES, np.array([recipe["price"] for recipe in RECIPES]))
-    # every food has the same value of the other nutrients here, so all reach their top quarter: left out
-    shown = [tag for tag in tags if not tag.startswith("nutrient:") or tag == "nutrient:protein_g"]
-    carried = {RECIPES[row]["name"]: {tag for tag, has in zip(tags, matrix[row]) if has and tag in shown}
-               for row in range(len(RECIPES))}
+def test_each_food_carries_a_tag_for_each_diet_it_passes():
+    tags, matrix = food_tags(RECIPES)
+    carried = {RECIPES[row]["name"]: {tag for tag, has in zip(tags, matrix[row]) if has} for row in range(len(RECIPES))}
 
-    assert carried["Tofu, firm"] == {"diet:vegetarian", "diet:halal", "diet:Hinduism",
-                                     "price<=3", "price<=5", "price<=10", "price<=20", "price<=50"}
-    assert carried["Beef steak"] == {"diet:halal", "nutrient:protein_g", "price<=20", "price<=50"}
+    # only the three diets a user can set: no price or nutrient tags
+    assert tags == ["diet:vegetarian", "diet:halal", "diet:Hinduism"]
+    assert carried["Tofu, firm"] == {"diet:vegetarian", "diet:halal", "diet:Hinduism"}
+    assert carried["Beef steak"] == {"diet:halal"}
+    assert carried["Pork belly"] == {"diet:Hinduism"}
+
+
+def test_a_budget_keeps_one_stretch_at_the_start_of_each_group(recipe_index):
+    stored = recipe_index.order.tolist()
+    for cluster in recipe_index.clusters:
+        for _, group_rows in cluster.groups:
+            positions = sorted(stored.index(row) for row in group_rows)
+            prices = [recipe_index.prices[stored[position]] for position in positions]
+            # cheapest first: any budget keeps a prefix of the group
+            assert prices == sorted(prices)
 
 
 def test_jaccard_distance_is_one_minus_the_shared_share_of_both():
@@ -124,7 +135,9 @@ def test_routing_finds_exactly_the_rows_the_constraints_allow(recipe_index):
     assert list(recipe_index.route({"special_diet": "halal", "budget": 10}, exclude={1})[0]) == [4, 5]
     # a budget above every band is checked exactly too
     assert list(recipe_index.route({"budget": 100})[0]) == [0, 1, 2, 3, 4, 5]
-    assert list(recipe_index.route({"special_diet": "vegetarian", "preferred_nutrient": "protein"})[0]) == []
+    # a preferred nutrient does not narrow the rows, and on its own it does not route at all
+    assert list(recipe_index.route({"special_diet": "vegetarian", "preferred_nutrient": "protein"})[0]) == [1, 4, 5]
+    assert recipe_index.route({"preferred_nutrient": "protein"}) is None
 
 
 def test_search_returns_only_the_rows_the_preferences_allow(recipe_index):
