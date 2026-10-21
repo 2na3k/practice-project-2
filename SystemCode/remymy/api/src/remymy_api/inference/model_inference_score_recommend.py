@@ -111,11 +111,11 @@ TAG_CLUSTER_THRESHOLD = 0.4
 # m = sqrt(k * N): 9.7% of the catalog for k = 100.
 BROAD_MATCH_SHARE = 0.10
 # The exact scan's distance calculation runs in buckets of SCAN_BUCKET rows on a pool of SCAN_THREADS threads (1 runs
-# it inline): the threads take buckets from a shared queue, each the next one as soon as it is done with its last, and
-# the priority queue then takes the k nearest. Measured distance calculation (64 dimensions):
-#   catalog, 1,066 rows (10%):  20-row buckets 0.29 ms on 4 threads, 1,000-row buckets 0.036 ms; inline 0.006 ms
-#   2M-row synthetic, 200,000 rows: 1,000-row buckets 3.8 ms on 4 threads, 10,000-row ones 0.86 ms; inline 1.2 ms
-# So the threads only pay with big buckets on big scans; on this catalog the scan stays under 0.05 ms either way.
+# it inline): each thread owns a contiguous group of buckets (thread_groups) and scores them in order, and the priority
+# queue then takes the k nearest. Measured whole scans (64 dimensions, k = 100), 4 threads against inline:
+#   catalog, 839 rows:                                0.20 ms against 0.14 ms: one or two buckets are too little to share
+#   2M-row synthetic, 200,000 rows in contiguous groups:  6.6 ms against 9.2 ms (a task per bucket took 9.2 ms)
+#   2M-row synthetic, 1,000,000 rows in contiguous groups: 27 ms against 35 ms (a task per bucket took 48 ms)
 SCAN_BUCKET = 1000
 SCAN_THREADS = 4
 # A run of at least this many matching rows stored side by side is scanned where it lies; shorter ones are gathered
@@ -508,6 +508,21 @@ def macro_clusters(tag_matrix, threshold=TAG_CLUSTER_THRESHOLD):
     return clusters
 
 
+def thread_groups(num_buckets, num_threads):
+    """The buckets each thread scores, as a 2D array: one contiguous group of bucket numbers per thread,
+    num_buckets / num_threads each, the first num_buckets % num_threads groups taking one more. A thread scores its
+    group in order, so the memory it reads stays contiguous rather than round-robin buckets: with 6 buckets on 3
+    threads, [0, 1], [2, 3], [4, 5], not [0, 3], [1, 4], [2, 5]."""
+    threads = max(1, min(num_threads, num_buckets))
+    per_thread, extra = divmod(num_buckets, threads)
+    groups, first = [], 0
+    for thread in range(threads):
+        count = per_thread + (thread < extra)
+        groups.append(list(range(first, first + count)))
+        first += count
+    return groups
+
+
 _scan_pool = None
 _scan_pool_lock = threading.Lock()
 
@@ -687,8 +702,8 @@ class RecipeIndex:
 
     def scan(self, query, rows, k):
         """The exact k nearest of rows (a Roaring bitmap) to query: a SIMD brute-force distance calculation over the
-        structure-of-arrays columns, in buckets of SCAN_BUCKET rows computed concurrently on a pool of SCAN_THREADS
-        threads, then a priority queue (a min-heap) of the k most similar.
+        structure-of-arrays columns, in buckets of SCAN_BUCKET rows split into one contiguous group per thread of a
+        pool of SCAN_THREADS, then a priority queue (a min-heap) of the k most similar.
 
         The matching rows that are stored side by side (whole tag-set groups, for a routed query) are scored where they
         lie, as contiguous runs of every column; only the rest are gathered, once, into one contiguous block. Each
@@ -709,31 +724,39 @@ class RecipeIndex:
         starts = np.flatnonzero(np.r_[True, np.diff(positions) != 1])
         lengths = np.diff(np.r_[starts, len(positions)])
         long_run = lengths >= SCAN_MIN_RUN
-        buckets = []  # (columns: (d, n) view, the storage positions it scores)
-        for start, length in zip(starts[long_run].tolist(), lengths[long_run].tolist()):
-            first = int(positions[start])
-            for begin in range(first, first + length, SCAN_BUCKET):
-                stop = min(begin + SCAN_BUCKET, first + length)
-                buckets.append((self.columns[:, begin:stop], np.arange(begin, stop)))
+        # the segments to scan, each a contiguous (d, n) view of the columns and the storage positions it covers: every
+        # long run where it lies, then the leftover rows
+        segments = [(self.columns[:, first:first + length], np.arange(first, first + length))
+                    for first, length in zip(positions[starts[long_run]].tolist(), lengths[long_run].tolist())]
         leftover = positions[~np.repeat(long_run, lengths)]
         if len(leftover):
-            block = self.columns[:, leftover]  # the only gather: rows with no long run of matches around them
-            buckets += [(block[:, begin:begin + SCAN_BUCKET], leftover[begin:begin + SCAN_BUCKET])
-                        for begin in range(0, len(leftover), SCAN_BUCKET)]
+            segments.append((self.columns[:, leftover], leftover))  # the only gather: rows with no long run around them
+        # The buckets, precalculated: a segment of n rows makes n // SCAN_BUCKET full buckets, and its n % SCAN_BUCKET
+        # remaining rows one last, smaller bucket.
+        buckets = []  # (columns: (d, size) view, the storage positions it scores), in storage order
+        for columns, scored in segments:
+            full, remainder = divmod(len(scored), SCAN_BUCKET)
+            bounds = [(bucket * SCAN_BUCKET, (bucket + 1) * SCAN_BUCKET) for bucket in range(full)]
+            if remainder:
+                bounds.append((full * SCAN_BUCKET, len(scored)))
+            buckets += [(columns[:, begin:stop], scored[begin:stop]) for begin, stop in bounds]
+        num_buckets = len(buckets)
         offsets = np.cumsum([0] + [len(scored) for _, scored in buckets])
         similarities = np.empty(offsets[-1], dtype=np.float32)
 
-        def score(bucket):
-            # one multiply-add per dimension over the bucket's contiguous run of it, straight into its slice
-            columns, offset = buckets[bucket][0], offsets[bucket]
-            np.dot(query, columns, out=similarities[offset:offset + columns.shape[1]])
+        def score_group(group):
+            # a thread's own buckets, one after another: one multiply-add per dimension over each bucket's contiguous
+            # run of it, straight into the bucket's slice of the similarities
+            for bucket in group:
+                columns, offset = buckets[bucket][0], offsets[bucket]
+                np.dot(query, columns, out=similarities[offset:offset + columns.shape[1]])
 
         # the distance calculation, every bucket of it, before the priority queue sees any
-        if SCAN_THREADS > 1 and len(buckets) > 1:
-            list(scan_pool().map(score, range(len(buckets))))
+        groups = thread_groups(num_buckets, SCAN_THREADS)
+        if len(groups) > 1:
+            list(scan_pool().map(score_group, groups))
         else:
-            for bucket in range(len(buckets)):
-                score(bucket)
+            score_group(groups[0])
 
         best = []  # (similarity, row) of the k most similar so far, the least similar on top
         for bucket, (_, scored) in enumerate(buckets):

@@ -10,7 +10,7 @@ from pyroaring import BitMap
 from remymy_api.inference import model_inference_score_recommend as pipeline
 from remymy_api.inference.model_inference_score_recommend import (
     CATALOG_NUTRIENTS, RecipeIndex, average_linkage, condition_bitmaps, food_tags, jaccard_distances, macro_clusters,
-    nutrient_key, preference_conditions)
+    nutrient_key, preference_conditions, thread_groups)
 
 
 def food(fdc_id: int, name: str, product: str, price: float, protein: float) -> dict:
@@ -204,3 +204,30 @@ def test_the_columns_store_each_tag_set_group_contiguously(recipe_index):
         for _, group_rows in cluster.groups:
             positions = sorted(stored.index(row) for row in group_rows)
             assert positions == list(range(positions[0], positions[0] + len(positions)))
+
+
+def test_each_thread_owns_a_contiguous_group_of_buckets():
+    # 6 buckets on 3 threads: two neighbours each, not round-robin
+    assert thread_groups(6, 3) == [[0, 1], [2, 3], [4, 5]]
+    # 9 buckets on 4 threads: 9 // 4 each, and the 9 % 4 first groups one more
+    assert thread_groups(9, 4) == [[0, 1, 2], [3, 4], [5, 6], [7, 8]]
+    # fewer buckets than threads: a group, and a thread, per bucket
+    assert thread_groups(2, 4) == [[0], [1]]
+    assert thread_groups(5, 1) == [[0, 1, 2, 3, 4]]
+
+
+def test_a_segment_makes_its_full_buckets_and_one_smaller_last_bucket(monkeypatch):
+    # 2,450 rows stored side by side: 2,450 // 1,000 = 2 full buckets and the 450 left one smaller bucket
+    monkeypatch.setattr(pipeline, "SCAN_BUCKET", 1000)
+    index = make_index(None, 3000, seed=6)
+    groups_seen = []
+    monkeypatch.setattr(pipeline, "thread_groups",
+                        lambda num_buckets, num_threads: groups_seen.append(num_buckets) or thread_groups(num_buckets,
+                                                                                                          num_threads))
+    query = index.embeddings[0]
+    found = index.scan(query, BitMap(range(100, 2550)), 5)
+
+    assert groups_seen == [3]
+    unit = index.embeddings / np.linalg.norm(index.embeddings, axis=1, keepdims=True)
+    exact = 100 + np.argsort(-(unit[100:2550] @ (query / np.linalg.norm(query))))[:5]
+    assert [row for row, _ in found] == exact.tolist()
