@@ -715,11 +715,11 @@ class RecipeIndex:
             for begin in range(first, first + length, SCAN_BUCKET):
                 stop = min(begin + SCAN_BUCKET, first + length)
                 buckets.append((self.columns[:, begin:stop], np.arange(begin, stop)))
-        loose = positions[~np.repeat(long_run, lengths)]
-        if len(loose):
-            block = self.columns[:, loose]  # the only gather: rows with no long run of matches around them
-            buckets += [(block[:, begin:begin + SCAN_BUCKET], loose[begin:begin + SCAN_BUCKET])
-                        for begin in range(0, len(loose), SCAN_BUCKET)]
+        leftover = positions[~np.repeat(long_run, lengths)]
+        if len(leftover):
+            block = self.columns[:, leftover]  # the only gather: rows with no long run of matches around them
+            buckets += [(block[:, begin:begin + SCAN_BUCKET], leftover[begin:begin + SCAN_BUCKET])
+                        for begin in range(0, len(leftover), SCAN_BUCKET)]
         offsets = np.cumsum([0] + [len(scored) for _, scored in buckets])
         similarities = np.empty(offsets[-1], dtype=np.float32)
 
