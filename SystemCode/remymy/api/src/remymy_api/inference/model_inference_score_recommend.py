@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -69,6 +70,23 @@ BUCKET_WIDTH = 0.1
 # Widens the history ranges past float32 rounding in HNSW's and torch's cosines, so none is missed at a range's edge.
 RANGE_SLACK = 1e-4
 SEED = 42
+
+# The preference conditions the inverted bitmap index holds, one bitmap each over the catalog rows. A diet is a screen
+# of a food's name and product terms, not a certification. Cuisines have none: the catalog has no cuisine data.
+MEAT_TERMS = ("beef", "bison", "veal", "pork", "bacon", "ham", "prosciutto", "lard", "tallow", "chicken", "turkey",
+              "duck", "lamb", "mutton", "venison", "sausage", "meat", "goat")
+SEAFOOD_TERMS = ("fish", "salmon", "tuna", "anchovy", "sardine", "cod", "shrimp", "prawn", "shellfish", "crab",
+                 "lobster", "oyster", "mussel", "clam", "scallop", "squid", "octopus", "seafood")
+PORK_TERMS = ("pork", "bacon", "ham", "prosciutto", "lard", "pancetta", "salami", "pepperoni", "chorizo")
+ALCOHOL_TERMS = ("wine", "beer", "rum", "vodka", "whiskey", "brandy", "liqueur", "sake", "alcohol")
+BEEF_TERMS = ("beef", "veal", "steak", "tallow", "brisket")
+DIET_EXCLUDES = {
+    "vegetarian": MEAT_TERMS + SEAFOOD_TERMS,
+    "halal": PORK_TERMS + ALCOHOL_TERMS,
+    "Hinduism": BEEF_TERMS,
+}
+# A food is rich in a nutrient when it has at least this quantile of the catalog's values (per 100 g).
+RICH_QUANTILE = 0.75
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -290,13 +308,74 @@ def encode_catalog(reranker, recipes, batch_size=1024):
                       for start in range(0, len(recipes), batch_size)])
 
 
-class RecipeIndex:
-    """Item embeddings of the catalog and an HNSW (cosine) index over them. Labels are catalog row positions."""
+def recipe_words(recipe):
+    """The lowercased words of a recipe's name and product terms, which the diet conditions screen."""
+    products = recipe.get("entities", {}).get("product", [])
+    phrases = [recipe.get("name", "")] + [" ".join(phrase) if isinstance(phrase, list) else phrase for phrase in products]
+    return set(re.findall(r"[a-z]+", " ".join(phrases).lower()))
 
-    def __init__(self, fdc_ids, embeddings, index):
+
+def condition_bitmaps(recipes):
+    """The inverted bitmap index of the catalog: {condition: bitmap}, each bitmap a bool array over the catalog rows,
+    True (1) where the row meets the condition, False (0) where it does not.
+
+    "diet:<diet>" for each special_diet: none of the diet's excluded terms in the food. "nutrient:<key>" for each
+    nutrient: at least the catalog's RICH_QUANTILE of it, for a preferred_nutrient."""
+    words = [recipe_words(recipe) for recipe in recipes]
+    bitmaps = {f"diet:{diet}": np.array([not row_words.intersection(terms) for row_words in words], dtype=bool)
+               for diet, terms in DIET_EXCLUDES.items()}
+    for key in CATALOG_NUTRIENTS:
+        values = np.array([float(recipe.get("nutrients", {}).get(key, np.nan)) for recipe in recipes])
+        threshold = np.nanquantile(values, RICH_QUANTILE) if np.isfinite(values).any() else np.inf
+        with np.errstate(invalid="ignore"):
+            bitmaps[f"nutrient:{key}"] = values >= threshold
+    return bitmaps
+
+
+def nutrient_key(preferred):
+    """The catalog nutrient key a preferred_nutrient names ("protein" → "protein_g"), or None."""
+    name = re.sub(r"[^a-z]+", "_", str(preferred).lower()).strip("_")
+    return next((key for key in CATALOG_NUTRIENTS if key == name or key.startswith(name + "_") or key.split("_")[0] == name),
+                None)
+
+
+def preference_conditions(preferences):
+    """The bitmap conditions a user's preferences ask for: their special_diet and their preferred_nutrient."""
+    conditions = []
+    if preferences.get("special_diet"):
+        conditions.append(f"diet:{preferences['special_diet']}")
+    if preferences.get("preferred_nutrient") and (key := nutrient_key(preferences["preferred_nutrient"])):
+        conditions.append(f"nutrient:{key}")
+    return conditions
+
+
+class RecipeIndex:
+    """Item embeddings of the catalog and an HNSW (cosine) index over them. Labels are catalog row positions. Next to
+    it, an inverted bitmap index of the preference conditions (condition_bitmaps) and each row's price, which narrow
+    a search to the rows a user's preferences allow."""
+
+    def __init__(self, fdc_ids, embeddings, index, recipes=None):
         self.fdc_ids = list(fdc_ids)
         self.embeddings = embeddings  # (N, d) float32, not normalized: the reranker takes them as they are.
         self.index = index
+        # built from the recipes, whether the HNSW index was built or loaded: cheap, and always in step with them
+        self.bitmaps = condition_bitmaps(recipes) if recipes is not None else {}
+        self.prices = (np.array([float(recipe.get("price", 0.0)) for recipe in recipes]) if recipes is not None
+                       else None)
+
+    def allowed_rows(self, preferences, exclude=()):
+        """The bitmap of the rows a search may return: every condition's bitmap ANDed together, a budget's price limit
+        (0 is no limit) and the excluded rows taken out. None when nothing narrows the search."""
+        bitmaps = [self.bitmaps[condition] for condition in preference_conditions(preferences)
+                   if condition in self.bitmaps]
+        budget = preferences.get("budget") or 0
+        if budget > 0 and self.prices is not None:
+            bitmaps.append(self.prices <= budget)
+        if not bitmaps:
+            return None
+        allowed = np.logical_and.reduce(bitmaps)
+        allowed[list(exclude)] = False
+        return allowed
 
     @classmethod
     def build(cls, reranker, recipes):
@@ -304,7 +383,7 @@ class RecipeIndex:
         index = hnswlib.Index(space="cosine", dim=embeddings.shape[1])
         index.init_index(max_elements=len(recipes), ef_construction=HNSW_EF_CONSTRUCTION, M=HNSW_M, random_seed=SEED)
         index.add_items(embeddings, np.arange(len(recipes)))
-        return cls([recipe["fdc_id"] for recipe in recipes], embeddings, index)
+        return cls([recipe["fdc_id"] for recipe in recipes], embeddings, index, recipes)
 
     def save(self, index_dir, source_fingerprint):
         index_dir = Path(index_dir)
@@ -316,12 +395,13 @@ class RecipeIndex:
             "ef_construction": HNSW_EF_CONSTRUCTION, "fdc_ids": self.fdc_ids}))
 
     @classmethod
-    def load(cls, index_dir):
+    def load(cls, index_dir, recipes=None):
+        """The saved index; with the recipes it was built from, their bitmaps and prices too."""
         index_dir = Path(index_dir)
         meta = json.loads((index_dir / "meta.json").read_text())
         index = hnswlib.Index(space="cosine", dim=meta["dim"])
         index.load_index(str(index_dir / "hnsw.bin"), max_elements=len(meta["fdc_ids"]))
-        return cls(meta["fdc_ids"], np.load(index_dir / "item_embeddings.npy"), index)
+        return cls(meta["fdc_ids"], np.load(index_dir / "item_embeddings.npy"), index, recipes)
 
     @classmethod
     def load_or_build(cls, reranker, recipes, index_dir, source_fingerprint, rebuild=False):
@@ -329,7 +409,7 @@ class RecipeIndex:
         meta_path = Path(index_dir) / "meta.json"
         if not rebuild and meta_path.exists() and json.loads(meta_path.read_text())["fingerprint"] == source_fingerprint:
             logger.info("Reusing the HNSW index in %s: the model and the catalog are unchanged.", index_dir)
-            return cls.load(index_dir)
+            return cls.load(index_dir, recipes)
         reason = "rebuild asked for" if rebuild else "none saved" if not meta_path.exists() else "model or catalog changed"
         started = time.perf_counter()
         built = cls.build(reranker, recipes)
@@ -338,8 +418,14 @@ class RecipeIndex:
                     time.perf_counter() - started, reason, index_dir)
         return built
 
-    def search(self, query, k, exclude=(), ef=HNSW_EF_SEARCH):
-        """Up to k (row, cosine similarity) nearest to query, most similar first, rows in exclude left out."""
+    def search(self, query, k, conditions=None, exclude=(), ef=HNSW_EF_SEARCH):
+        """Up to k (row, cosine similarity) nearest to query, most similar first, rows in exclude left out. With
+        conditions (the user's preferences), only rows their bitmaps allow are searched."""
+        # the bitmaps of the preferences' conditions ANDed into one: 1 for a row the search may return, 0 otherwise
+        inv_bitmap_cond = self.allowed_rows(conditions or {}, exclude)
+        if inv_bitmap_cond is not None:
+            return self._search_allowed(query, k, inv_bitmap_cond, ef)
+
         exclude = set(exclude)
         # Ask for enough neighbours that k remain after dropping the excluded rows.
         n = min(k + len(exclude), self.index.get_current_count())
@@ -349,6 +435,24 @@ class RecipeIndex:
         rows, distances = self.index.knn_query(np.asarray(query, dtype=np.float32).reshape(1, -1), k=n)
         return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])
                 if row not in exclude][:k]
+
+    def _search_allowed(self, query, k, allowed, ef):
+        """search over the rows set in the allowed bitmap: HNSW visits only those, through its filter. When the filter
+        leaves HNSW too few rows to reach (it raises then), the allowed rows are ranked exactly instead."""
+        n = min(k, int(allowed.sum()))
+        if n <= 0:
+            return []
+        query = np.asarray(query, dtype=np.float32).reshape(1, -1)
+        self.index.set_ef(max(ef, n))
+        try:
+            rows, distances = self.index.knn_query(query, k=n, filter=lambda row: bool(allowed[row]))
+            return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])]
+        except RuntimeError:
+            candidates = np.flatnonzero(allowed)
+            vectors = self.embeddings[candidates]
+            cosine = (vectors @ query[0]) / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query[0]) + 1e-12)
+            order = np.argsort(-cosine)[:n]
+            return [(int(candidates[i]), float(cosine[i])) for i in order]
 
 
 def bucket_of(similarity):
@@ -519,6 +623,13 @@ class RetrievalPipeline:
         `show` of them), the near-duplicates of the history dropped, how the reranker reorders the rest and what MMR
         picks."""
         log = log or (lambda *_: None)
+
+        # the user's preferences as a plain dict, {} when none are given, whether they come as a dict or as a
+        preferences = user.get("preferences") or {}
+        if hasattr(preferences, "model_dump"):
+            preferences = preferences.model_dump()
+        preferences = dict(preferences)
+
         if not user.get("history"):
             raise ValueError("The pipeline needs at least one recipe in the user's history.")
 
@@ -554,7 +665,7 @@ class RetrievalPipeline:
 
         seen = {self.row_of[recipe["fdc_id"]] for recipe in history if "fdc_id" in recipe}
         # HNSW already returns them most similar first; the buckets and the retrieval ranks rely on it.
-        retrieved = sorted(self.recipe_index.search(query.numpy(), n_candidates, exclude=seen),
+        retrieved = sorted(self.recipe_index.search(query.numpy(), n_candidates, conditions=preferences, exclude=seen),
                            key=lambda candidate: -candidate[1])
         log(f"\n=== Step 3. HNSW retrieval: {len(retrieved)} nearest of {len(self.recipes):,} recipes by cosine "
             f"similarity ({len(seen)} history recipes excluded) ===")
