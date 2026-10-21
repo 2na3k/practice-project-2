@@ -2,9 +2,8 @@
 
 import { ArrowRight, Check, ChefHat, Database, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { fetchSimilarFoods, type CatalogItem } from "@/lib/catalog";
+import { fetchSimilarFoods, priceLabel, type CatalogItem } from "@/lib/catalog";
 import type { RecipeDetail } from "@/lib/recipes";
-import { formatPrice } from "@/lib/recommendations";
 
 const SIMILAR_COUNT = 6;
 
@@ -59,7 +58,7 @@ export function RecipeDetailModal({ recipe, loading, error, onClose, onOpenFood 
               {!current ? <p className="similar-note" role="status"><LoaderCircle className="spin" size={14} aria-hidden="true" />Finding recipes in the same cluster…</p>
                 : current.error ? <p className="similar-note">{current.error}</p>
                   : current.items && current.items.length === 0 ? <p className="similar-note">No similar recipes in the catalog.</p>
-                    : <ul className="similar-list">{current.items?.map((item) => <li key={item.fdc_id}><button className="similar-item" onClick={() => onOpenFood(String(item.fdc_id))}><span className="similar-icon" aria-hidden="true"><ChefHat size={15} /></span><span className="similar-info"><strong>{item.description}</strong><small>{formatPrice(item.total_price)}{item.energy_kcal !== null ? ` · ${Math.round(item.energy_kcal)} kcal per 100 g` : ""}</small></span><ArrowRight size={15} aria-hidden="true" /></button></li>)}</ul>}
+                    : <ul className="similar-list">{current.items?.map((item) => <li key={item.fdc_id}><button className="similar-item" onClick={() => onOpenFood(String(item.fdc_id))}><span className="similar-icon" aria-hidden="true"><ChefHat size={15} /></span><span className="similar-info"><strong>{item.description}</strong><small>{priceLabel(item)}{item.energy_kcal !== null ? ` · ${Math.round(item.energy_kcal)} kcal per 100 g` : ""}</small></span><ArrowRight size={15} aria-hidden="true" /></button></li>)}</ul>}
             </div>
             <p className="detail-disclaimer">No nutrition, timing, cuisine, image, or other metadata is inferred from this source record.</p>
             <button className="detail-action" onClick={onClose}>Back to recipes <ArrowRight size={17} aria-hidden="true" /></button>

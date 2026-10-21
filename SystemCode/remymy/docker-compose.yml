@@ -72,6 +72,8 @@ services:
     volumes:
       - "${DATA_DIR:-./data}:/data:ro"
       - remymy-user-data:/state
+      # the classifier's and clusterer's models (GLiNER, stanza, the encoder), downloaded on first use and kept
+      - remymy-model-cache:/var/cache/remymy/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready', timeout=2)"]
       interval: 10s
@@ -326,6 +328,7 @@ networks:
 
 volumes:
   remymy-user-data:
+  remymy-model-cache:
   langfuse-postgres-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:

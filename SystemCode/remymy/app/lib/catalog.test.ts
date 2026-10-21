@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchCatalogItem, nutrientRows, packSize, parseCatalogItem, priceSource } from "./catalog";
+import { fetchCatalogItem, nutrientRows, packSize, parseCatalogItem, priceLabel, priceSource, type CatalogItem } from "./catalog";
 
 const onions = {
   fdc_id: 170005, description: "Onions, spring or scallions (includes tops and bulb), raw", product: ["onions"],
@@ -38,5 +38,18 @@ describe("catalog item details", () => {
     expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe("/api/catalog/170005");
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "Catalog item not found." }, { status: 404 })));
     await expect(fetchCatalogItem("99")).rejects.toThrow("Catalog item not found.");
+  });
+});
+
+describe("priceLabel", () => {
+  const item = (total_price: number, prices: number[]) => ({
+    total_price,
+    item_prices: Object.fromEntries(prices.map((price, index) => [`item ${index}`, { price, quantity: 100 }])),
+  }) as unknown as CatalogItem;
+
+  it("shows the basket price when every ingredient is priced, a floor when some are, and says when none are", () => {
+    expect(priceLabel(item(4.5, [2, 2.5]))).toBe("S$4.50");
+    expect(priceLabel(item(0, [2.98]))).toBe("from S$2.98");
+    expect(priceLabel(item(0, []))).toBe("price unknown");
   });
 });

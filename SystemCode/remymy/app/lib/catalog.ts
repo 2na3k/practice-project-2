@@ -68,6 +68,14 @@ export async function fetchCatalogItem(id: string, signal?: AbortSignal): Promis
   return parseCatalogItem(body);
 }
 
+// A catalog item's price in a list: total_price is 0 unless every ingredient is priced, so a partly priced item shows
+// what its priced ingredients add up to, marked as a floor, and one with none priced says so.
+export function priceLabel(item: CatalogItem): string {
+  if (item.total_price > 0) return `S$${item.total_price.toFixed(2)}`;
+  const priced = Object.values(item.item_prices).reduce((sum, entry) => sum + entry.price, 0);
+  return priced > 0 ? `from S$${priced.toFixed(2)}` : "price unknown";
+}
+
 export const MAX_SIMILAR = 12;
 
 // The catalog foods nearest a recipe in its recipe cluster, nearest first.

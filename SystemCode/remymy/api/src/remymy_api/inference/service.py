@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from statistics import median
@@ -128,6 +129,22 @@ class Clusterer:
         logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
                     len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
         return cls(recipe_clusterer, extractor or TermExtractor(), lookup_path(), lock)
+
+    def warm_up(self) -> None:
+        """Load every model a first query reads, GLiNER and stanza for its terms and the encoder for a term the
+        clusterer has not seen, downloading any not cached yet, so the first person to open a recipe does not wait for
+        them. Run on a background thread at startup; a failure only leaves the loading to that first query."""
+        started = time.perf_counter()
+        try:
+            with self.lock:
+                # an invented product term, so the encoder of unseen terms loads too
+                item = build_item("Tomato soup, canned", self.extractor, terms={"product": ["remymy warm up"]},
+                                  lookup=self.lookup)
+                self.clusterer.predict(item, k=1)
+        except Exception:
+            logger.exception("Warming up the clusterer failed; the first query will load its models.")
+            return
+        logger.info("Clusterer warmed up in %.1fs: its models are loaded.", time.perf_counter() - started)
 
     def cluster(self, title: str, top_k: int, catalog: RecipeRepository) -> list[CatalogFood]:
         """The top_k catalog foods nearest a recipe, by its title, in its cluster. EmptyQuery for a title with no food

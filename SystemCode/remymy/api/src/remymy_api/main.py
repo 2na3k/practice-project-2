@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -80,6 +81,9 @@ async def lifespan(app: FastAPI):
     app.state.recommender = load_recommender()
     app.state.classifier = load_classifier()
     app.state.clusterer = load_clusterer(app.state.classifier)
+    if app.state.clusterer is not None and hasattr(app.state.clusterer, "warm_up"):
+        # the models its first query needs load, or download, in the background: the API answers meanwhile
+        threading.Thread(target=app.state.clusterer.warm_up, name="remymy-clusterer-warm-up", daemon=True).start()
     logger.info("API ready; recommendations %s, classification %s, clustering %s.",
                 "on" if app.state.recommender else "off (no catalog)",
                 "on" if app.state.classifier else "off",
