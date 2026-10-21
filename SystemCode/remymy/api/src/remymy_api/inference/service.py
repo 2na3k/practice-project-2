@@ -18,7 +18,8 @@ from ..recipe import Recipe
 from ..repository.recipe_repository import RecipeRepository
 from ..schemas import CatalogFood
 from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS
-from .model_inference_score_recommend import CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, TEXT_COLUMNS, RetrievalPipeline
+from .model_inference_score_recommend import (CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, DIET_COLUMNS, TEXT_COLUMNS,
+                                              RetrievalPipeline)
 from .classification_service import lookup_path
 from .food_query import NUTRIENT_COLS, EmptyQuery, TermExtractor, build_item
 from .model_inference_recipe_clustering import DEFAULT_ARTIFACTS as CLUSTERING_ARTIFACTS
@@ -63,7 +64,9 @@ def catalog_recipes(foods: list[CatalogFood]) -> list[dict]:
         recipes.append({"fdc_id": food.fdc_id, "name": food.description,
                         "price": float(sum(item.price for item in food.item_prices.values())),
                         "nutrients": nutrients,
-                        "entities": {field: [[phrase] for phrase in getattr(food, field)] for field in TEXT_COLUMNS}})
+                        "entities": {field: [[phrase] for phrase in getattr(food, field)] for field in TEXT_COLUMNS},
+                        # the food's diet columns, when the catalog has them (None screens the food by its words)
+                        "special_diet": {column: getattr(food, column, None) for column in DIET_COLUMNS.values()}})
     return recipes
 
 

@@ -264,3 +264,18 @@ def test_the_last_long_runs_remainder_shares_buckets_with_the_leftover_rows(monk
     candidates = np.array(rows)
     exact = candidates[np.argsort(-(unit[candidates] @ (query / np.linalg.norm(query))))[:10]]
     assert [row for row, _ in found] == exact.tolist()
+
+
+def test_the_food_datas_diet_columns_win_over_the_word_screen():
+    # the tofu's data says it is not halal, the beef's says it is fit for Hinduism: the columns decide; the rice has no
+    # values, so its words are screened
+    recipes = [food(1, "Tofu, firm", "tofu", 3, 15)
+               | {"special_diet": {"vegetarian": True, "halal": False, "hinduism": True}},
+               food(2, "Beef steak", "beef", 15, 30)
+               | {"special_diet": {"vegetarian": False, "halal": True, "hinduism": True}},
+               food(3, "Rice", "rice", 1, 3) | {"special_diet": {"vegetarian": None, "halal": None, "hinduism": None}}]
+    bitmaps = condition_bitmaps(recipes)
+
+    assert bitmaps["diet:vegetarian"].tolist() == [True, False, True]
+    assert bitmaps["diet:halal"].tolist() == [False, True, True]
+    assert bitmaps["diet:Hinduism"].tolist() == [True, True, True]

@@ -88,6 +88,9 @@ SEAFOOD_TERMS = ("fish", "salmon", "tuna", "anchovy", "sardine", "cod", "shrimp"
 PORK_TERMS = ("pork", "bacon", "ham", "prosciutto", "lard", "pancetta", "salami", "pepperoni", "chorizo")
 ALCOHOL_TERMS = ("wine", "beer", "rum", "vodka", "whiskey", "brandy", "liqueur", "sake", "alcohol")
 BEEF_TERMS = ("beef", "veal", "steak", "tallow", "brisket")
+# The food data's column for each special_diet: True when the food is fit for that diet. A food without a value
+# there is screened by its words instead (DIET_EXCLUDES).
+DIET_COLUMNS = {"vegetarian": "vegetarian", "halal": "halal", "Hinduism": "hinduism"}
 DIET_EXCLUDES = {
     "vegetarian": MEAT_TERMS + SEAFOOD_TERMS,
     "halal": PORK_TERMS + ALCOHOL_TERMS,
@@ -435,11 +438,16 @@ def condition_bitmaps(recipes):
     catalog rows, True (1) where the row meets the condition, False (0) where it does not. The foods' tags
     (food_tags), which the macro-clusters group them by.
 
-    "diet:<diet>" for each special_diet: none of the diet's excluded terms in the food. "nutrient:<key>" for each
+    "diet:<diet>" for each special_diet: the food's value for it in its "special_diet" columns (DIET_COLUMNS) when it
+    has one, and otherwise none of the diet's excluded terms in its name or product terms. "nutrient:<key>" for each
     nutrient: at least the catalog's RICH_QUANTILE of it, for a preferred_nutrient; it does not filter a search yet,
     so food_tags leaves it out."""
     words = [recipe_words(recipe) for recipe in recipes]
-    bitmaps = {f"diet:{diet}": np.array([not row_words.intersection(terms) for row_words in words], dtype=bool)
+    labels = [recipe.get("special_diet") or {} for recipe in recipes]
+    bitmaps = {f"diet:{diet}": np.array([bool(label[DIET_COLUMNS[diet]])
+                                         if label.get(DIET_COLUMNS[diet]) is not None
+                                         else not row_words.intersection(terms)
+                                         for label, row_words in zip(labels, words)], dtype=bool)
                for diet, terms in DIET_EXCLUDES.items()}
     for key in CATALOG_NUTRIENTS:
         values = np.array([float(recipe.get("nutrients", {}).get(key, np.nan)) for recipe in recipes])
