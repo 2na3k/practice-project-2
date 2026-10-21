@@ -5,6 +5,7 @@ nltk==3.10.3
 numpy==2.5.3
 pandas==3.0.6
 pydantic==2.13.5
+pyroaring==1.1.0
 redis==8.1.0
 sqlalchemy==2.0.44
 torch==2.14.0

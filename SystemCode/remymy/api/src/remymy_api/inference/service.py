@@ -83,7 +83,9 @@ class Recommender:
         return cls(pipeline)
 
     def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
-                  candidates: int = 100) -> list[dict]:
+                  candidates: int = 100, preferences: Mapping | None = None) -> list[dict]:
+        """The pipeline's recommendations from the history's foods; the preferences' diet, preferred nutrient and
+        budget constrain which foods its retrieval may return."""
         # Preparing the history
         history_foods = [
             {"fdc_id": ingredient.fdc_id, "rating": LIKED_RATING if entry.like else DISLIKED_RATING,
@@ -95,7 +97,8 @@ class Recommender:
         if history_foods:
             try:
                 trace = logger.debug if logger.isEnabledFor(logging.DEBUG) else None
-                results = self.pipeline.recommend({"history": history_foods}, n_candidates=candidates, top_k=top_k, log=trace)
+                results = self.pipeline.recommend({"history": history_foods, "preferences": dict(preferences or {})},
+                                                  n_candidates=candidates, top_k=top_k, log=trace)
             except Exception as e:
                 logger.error(f"Error encountered when recommending: {e}")
 

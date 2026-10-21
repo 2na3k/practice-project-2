@@ -88,7 +88,9 @@ def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Rec
 def recommend(recommender: Recommender, user: UserProfileInput, catalog: RecipeRepository) -> RecommendationResponse:
     history = History.from_ratings(user.user_id, user.history)
     recipes = digest_recipes(history, catalog)
-    recommended_items = recommender.recommend(history, recipes, top_k=MAX_TOP_K)
+    # the preferences' diet, preferred nutrient and budget route the retrieval to the foods they allow
+    recommended_items = recommender.recommend(history, recipes, top_k=MAX_TOP_K,
+                                              preferences=user.preferences.model_dump())
     profile = buying_profile(history, recipes)
     if profile is None:
         logger.debug("User %d: no ingredient matched a priced food, so there is no buying profile.", history.user_id)

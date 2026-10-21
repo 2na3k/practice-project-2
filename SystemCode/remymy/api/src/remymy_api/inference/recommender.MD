@@ -24,6 +24,6 @@ Solve the graph fragmentation and traversal starvation of single-graph HNSW pre-
 2. **Cluster Matching:** The routing engine evaluates the query tags against the hierarchical cluster centroids to identify the relevant target **Cluster IDs**.
 3. **Index Selection:** 
    * **If Broad Match (> 10% data):** Route the HNSW search exclusively into the sub-graph of the matching cluster(s) via bitset masking.
-   * **If Narrow/Sparse Match (< 1% data):** Bypass HNSW entirely; pull the exact matching IDs via the inverted bitmap index and run a **SIMD-accelerated brute-force scan with a priority queue**. Can do in multithread in a thread pool of 4 - bucket like (for each 20 points) so that those can be calculated concurrently with SIMD.
+   * **If Narrow/Sparse Match (< 10% data):** Bypass HNSW entirely; pull the exact matching IDs via the inverted bitmap index and run a **SIMD-accelerated brute-force distance calculation (based on Structure of Array - each column are grouped together contigouously in memory) with a priority queue**. Can do distance calculation the in multithread in a thread pool of 4 - bucket like (for each 20 points) so that those can be calculated concurrently with SIMD.
 
 ---

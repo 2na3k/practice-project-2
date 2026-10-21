@@ -118,6 +118,20 @@ def seed_alice(stores) -> int:
     return alice.id
 
 
+def test_the_users_preferences_reach_the_recommender(stores, models):
+    from remymy_api.schemas import Preferences
+
+    bob = stores.create_user("bob", Preferences(special_diet="halal", preferred_nutrient="protein", budget=8.5))
+    stores.add_history(bob.id, "openrecipes:1", like=True)
+
+    with TestClient(app) as client:
+        assert client.get("/api/recommend/bob").status_code == 200
+
+    (call,) = models.calls
+    assert call["preferences"] == {"special_diet": "halal", "cuisines": [], "preferred_nutrient": "protein",
+                                   "budget": 8.5}
+
+
 def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models, cache):
     alice = seed_alice(stores)
 
@@ -344,7 +358,7 @@ class ItemsRecommender:
     def __init__(self, items: list[dict]) -> None:
         self.items = items
 
-    def recommend(self, history, recipes, top_k: int) -> list[dict]:
+    def recommend(self, history, recipes, top_k: int, preferences=None) -> list[dict]:
         return list(self.items)
 
 

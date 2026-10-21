@@ -1,11 +1,16 @@
+"""The cluster-first routing of recommender.MD: the foods' tags, their macro-clusters by Jaccard distance, the routing
+of a query's constraints through them, and the two ways a routed search runs (masked HNSW, the exact scan)."""
 from __future__ import annotations
 
 import hnswlib
 import numpy as np
 import pytest
+from pyroaring import BitMap
 
+from remymy_api.inference import model_inference_score_recommend as pipeline
 from remymy_api.inference.model_inference_score_recommend import (
-    CATALOG_NUTRIENTS, RecipeIndex, condition_bitmaps, nutrient_key, preference_conditions)
+    CATALOG_NUTRIENTS, RecipeIndex, average_linkage, condition_bitmaps, food_tags, jaccard_distances, macro_clusters,
+    nutrient_key, preference_conditions)
 
 
 def food(fdc_id: int, name: str, product: str, price: float, protein: float) -> dict:
@@ -20,13 +25,22 @@ RECIPES = [food(1, "Pork belly", "pork", 8, 20), food(2, "Tofu, firm", "tofu", 3
            food(5, "Lentils", "lentil", 2, 9), food(6, "Rice", "rice", 1, 3)]
 
 
+def make_index(recipes: list[dict] | None, n: int, seed: int = 0) -> RecipeIndex:
+    embeddings = np.random.default_rng(seed).normal(size=(n, 8)).astype(np.float32)
+    index = hnswlib.Index(space="cosine", dim=8)
+    index.init_index(max_elements=n, M=16, ef_construction=200, random_seed=seed)
+    index.add_items(embeddings, np.arange(n))
+    return RecipeIndex(list(range(n)) if recipes is None else [recipe["fdc_id"] for recipe in recipes], embeddings,
+                       index, recipes)
+
+
 @pytest.fixture
 def recipe_index() -> RecipeIndex:
-    embeddings = np.random.default_rng(0).normal(size=(len(RECIPES), 8)).astype(np.float32)
-    index = hnswlib.Index(space="cosine", dim=8)
-    index.init_index(max_elements=len(RECIPES), M=16, ef_construction=200)
-    index.add_items(embeddings, np.arange(len(RECIPES)))
-    return RecipeIndex([recipe["fdc_id"] for recipe in RECIPES], embeddings, index, RECIPES)
+    return make_index(RECIPES, len(RECIPES))
+
+
+def rows(results) -> list[int]:
+    return sorted(row for row, _ in results)
 
 
 def test_each_condition_has_a_bitmap_of_which_rows_meet_it():
@@ -47,8 +61,70 @@ def test_preferences_name_their_conditions():
     assert preference_conditions({}) == []
 
 
-def rows(results) -> list[int]:
-    return sorted(row for row, _ in results)
+def test_each_food_carries_its_conditions_and_every_price_band_at_or_above_its_price():
+    tags, matrix = food_tags(RECIPES, np.array([recipe["price"] for recipe in RECIPES]))
+    # every food has the same value of the other nutrients here, so all reach their top quarter: left out
+    shown = [tag for tag in tags if not tag.startswith("nutrient:") or tag == "nutrient:protein_g"]
+    carried = {RECIPES[row]["name"]: {tag for tag, has in zip(tags, matrix[row]) if has and tag in shown}
+               for row in range(len(RECIPES))}
+
+    assert carried["Tofu, firm"] == {"diet:vegetarian", "diet:halal", "diet:Hinduism",
+                                     "price<=3", "price<=5", "price<=10", "price<=20", "price<=50"}
+    assert carried["Beef steak"] == {"diet:halal", "nutrient:protein_g", "price<=20", "price<=50"}
+
+
+def test_jaccard_distance_is_one_minus_the_shared_share_of_both():
+    sets = np.array([[1, 1, 0], [0, 1, 1], [1, 1, 0], [0, 0, 0], [0, 0, 0]], dtype=bool)
+    distance = jaccard_distances(sets)
+
+    assert distance[0, 1] == pytest.approx(1 - 1 / 3)
+    assert distance[0, 2] == 0  # the same set
+    assert distance[3, 4] == 0  # two empty sets
+    assert distance[0, 3] == 1  # nothing shared
+
+
+def test_a_weighted_row_clusters_as_that_many_duplicates():
+    points = np.array([0.0, 1.0, 5.0, 5.5])
+    sizes = np.array([3, 1, 2, 1])
+    weighted = average_linkage(np.abs(points[:, None] - points[None, :]), threshold=2.0, sizes=sizes)
+    expanded_points = np.repeat(points, sizes)
+    expanded = average_linkage(np.abs(expanded_points[:, None] - expanded_points[None, :]), threshold=2.0)
+
+    assert weighted.tolist() == [0, 0, 1, 1]
+    assert expanded.tolist() == np.repeat(weighted, sizes).tolist()
+
+
+def test_a_merge_exactly_at_the_threshold_is_kept():
+    # 1 - 3/5 is 0.4 up to float rounding: the two sets still merge at a 0.4 threshold
+    sets = np.array([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]], dtype=bool)
+
+    assert len(set(average_linkage(jaccard_distances(sets), threshold=0.4))) == 1
+
+
+def test_macro_clusters_group_overlapping_tag_sets():
+    # tags a, b, c, d: {a, b} x3 and {a, b, c} x2 overlap (distance 1/3), {c, d} x2 shares little with either
+    matrix = np.array([[1, 1, 0, 0]] * 3 + [[1, 1, 1, 0]] * 2 + [[0, 0, 1, 1]] * 2, dtype=bool)
+    clusters = sorted(macro_clusters(matrix, threshold=0.4), key=lambda cluster: min(cluster.members))
+
+    assert [list(cluster.members) for cluster in clusters] == [[0, 1, 2, 3, 4], [5, 6]]
+    # every member carries a and b, two of the five carry c, none d
+    assert clusters[0].centroid.tolist() == pytest.approx([1, 1, 0.4, 0])
+    assert sorted(len(rows_) for _, rows_ in clusters[0].groups) == [2, 3]
+
+
+def test_routing_finds_exactly_the_rows_the_constraints_allow(recipe_index):
+    assert recipe_index.route({}) is None
+    assert recipe_index.route({"budget": 0}) is None
+
+    matching, plan = recipe_index.route({"special_diet": "vegetarian"})
+    assert list(matching) == [1, 4, 5]
+    assert sum(plan.values()) == len(recipe_index.clusters)
+    # the S$3 band holds the tofu at S$3, the exact check leaves it out of a S$2.50 budget
+    assert list(recipe_index.route({"budget": 2.5})[0]) == [4, 5]
+    assert list(recipe_index.route({"special_diet": "halal", "budget": 10}, exclude={1})[0]) == [4, 5]
+    # a budget above every band is checked exactly too
+    assert list(recipe_index.route({"budget": 100})[0]) == [0, 1, 2, 3, 4, 5]
+    assert list(recipe_index.route({"special_diet": "vegetarian", "preferred_nutrient": "protein"})[0]) == []
 
 
 def test_search_returns_only_the_rows_the_preferences_allow(recipe_index):
@@ -64,33 +140,46 @@ def test_search_returns_only_the_rows_the_preferences_allow(recipe_index):
     assert rows(recipe_index.search(query, 6, conditions={"budget": 0})) == [0, 1, 2, 3, 4, 5]
 
 
-def test_agglomerative_clusters_cut_where_groups_are_far_apart():
-    from remymy_api.inference.model_inference_score_recommend import agglomerative_clusters
+def test_a_broad_match_searches_hnsw_through_a_mask_and_a_narrow_one_is_scanned():
+    # 300 foods: 30 of beef, the rest tofu; 9 of them (3%) cost under S$1
+    recipes = [food(row, "Beef steak" if row % 10 == 0 else "Tofu, firm", "beef" if row % 10 == 0 else "tofu",
+                    0.5 if row % 33 == 1 else 4.0, 10) for row in range(300)]
+    index = make_index(recipes, 300)
+    unit = index.embeddings / np.linalg.norm(index.embeddings, axis=1, keepdims=True)
+    query = unit[7]
 
-    # three directions, a few rows near each: within a group the cosine distance is tiny, between groups about 1
-    rng = np.random.default_rng(0)
-    directions = np.eye(3, 8)
-    rows = np.repeat(directions, [4, 3, 5], axis=0) + 0.01 * rng.normal(size=(12, 8))
-    labels = agglomerative_clusters(rows, threshold=0.3)
+    logged: list[str] = []
+    broad = index.search(query, 20, conditions={"special_diet": "vegetarian"}, log=logged.append)
+    assert "HNSW through a bitset mask" in logged[-1]
+    assert all(row % 10 != 0 for row, _ in broad) and len(broad) == 20
 
-    assert len(set(labels[:4])) == len(set(labels[4:7])) == len(set(labels[7:])) == 1
-    assert len(set(labels)) == 3
-    # a threshold below every distance leaves each row on its own; one above all of them, one cluster
-    assert len(set(agglomerative_clusters(rows, threshold=0.0))) == 12
-    assert len(set(agglomerative_clusters(rows, threshold=2.0))) == 1
+    narrow = index.search(query, 5, conditions={"budget": 1}, log=logged.append)
+    assert "exact scan" in logged[-1]
+    cheap = np.array([row for row in range(300) if row % 33 == 1])
+    exact = cheap[np.argsort(-(unit[cheap] @ query))][:5]
+    assert [row for row, _ in narrow] == exact.tolist()
 
 
-def test_a_probing_search_stays_inside_the_nearest_clusters(recipe_index, monkeypatch):
-    from remymy_api.inference import model_inference_score_recommend as pipeline
+@pytest.mark.parametrize("threads", [4, 1])
+def test_the_scan_is_exact_across_buckets(monkeypatch, threads):
+    monkeypatch.setattr(pipeline, "SCAN_THREADS", threads)
+    monkeypatch.setattr(pipeline, "SCAN_BUCKET", 20)
+    index = make_index(None, 500, seed=3)
+    unit = index.embeddings / np.linalg.norm(index.embeddings, axis=1, keepdims=True)
+    candidates = np.sort(np.random.default_rng(4).choice(500, 150, replace=False))  # 8 buckets of 20
+    query = np.random.default_rng(5).normal(size=8).astype(np.float32)
 
-    # three clusters of two rows; probing for k rows (coverage 1) searches only the nearest cluster
-    monkeypatch.setattr(pipeline, "CLUSTER_PROBE_COVERAGE", 1)
-    clustered = RecipeIndex(recipe_index.fdc_ids, recipe_index.embeddings, recipe_index.index, RECIPES,
-                            labels=np.array([0, 0, 1, 1, 2, 2]))
-    query = clustered.centroids[1]
+    found = index.scan(query, BitMap(candidates.tolist()), 10)
+    similarity = unit[candidates] @ (query / np.linalg.norm(query))
+    order = np.argsort(-similarity)[:10]
+    assert [row for row, _ in found] == candidates[order].tolist()
+    assert [score for _, score in found] == pytest.approx(similarity[order].tolist(), abs=1e-5)
 
-    assert rows(clustered.search(query, 2, probe=True)) == [2, 3]
-    # conditions still apply inside the probed clusters: of the beef (2) and the salmon (3), Hinduism keeps the salmon
-    assert rows(clustered.search(query, 1, conditions={"special_diet": "Hinduism"}, probe=True)) == [3]
-    # without probing, the whole catalog is searched
-    assert len(clustered.search(query, 6)) == 6
+
+def test_the_scan_reads_a_structure_of_arrays():
+    index = make_index(None, 50)
+    unit = index.embeddings / np.linalg.norm(index.embeddings, axis=1, keepdims=True)
+
+    # one contiguous array per dimension, holding that dimension for every row
+    assert index.columns.shape == (8, 50) and index.columns.flags["C_CONTIGUOUS"]
+    assert index.columns[3] == pytest.approx(unit[:, 3])

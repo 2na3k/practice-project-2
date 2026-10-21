@@ -5,7 +5,10 @@
    its standardized [price, nutrients], and the embeddings go into an HNSW index with cosine distance.
 2. Query: the user's representative embedding is the average of their history recipes' embeddings.
 3. Retrieval: HNSW returns the recipes closest to it by cosine similarity, the history's own recipes excluded, sorted
-   by that similarity, most similar first.
+   by that similarity, most similar first. Under the user's constraints (diet, preferred nutrient, budget), the search
+   is routed first (recommender.MD): the foods are clustered by their tags into macro-clusters, each a Roaring
+   bitmap of its rows; the constraints are matched against the clusters' centroids for the rows they allow, and by
+   how large a share of the catalog those are, HNSW searches them through a bitset mask or they are scanned exactly.
 4. Near-duplicates of the history: the candidates go into a dictionary of buckets by that similarity ([0.9, 1],
    [0.8, 0.9), ...). Each history recipe gives a range of it, the similarities a recipe at cosine MAX_SIMILARITY or
    more to that history recipe can have; the buckets the range overlaps are looked up, a window slides over their
@@ -26,18 +29,23 @@ Usage, from api/src:
 """
 import argparse
 import hashlib
+import heapq
 import json
 import logging
 import math
 import re
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import hnswlib
 import numpy as np
 import pandas as pd
 import torch
+from pyroaring import BitMap
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
@@ -87,14 +95,29 @@ DIET_EXCLUDES = {
 }
 # A food is rich in a nutrient when it has at least this quantile of the catalog's values (per 100 g).
 RICH_QUANTILE = 0.75
-# Agglomerative clustering of the catalog (average linkage, cosine distance of the item embeddings), cut where the two
-# nearest clusters are farther apart than this. On the 10,658-food catalog: 0.1 gives 2,681 clusters, 0.2 793, 0.3
-# 265 (median 7 foods, largest 1,194).
-CLUSTER_DISTANCE_THRESHOLD = 0.3
-# A probing search takes the clusters nearest the query until they hold this many times k rows it may return. Probing
-# is off by default: on the catalog, 50 user embeddings' 100 nearest foods came back with recall 0.66 at coverage 3 and
-# 0.91 at 20 (worst query 0.49), against 1.00 for plain HNSW, which already answers in under a millisecond.
-CLUSTER_PROBE_COVERAGE = 20
+# Cluster-first routing of a search under the user's constraints (recommender.MD). Each food carries tags: the diet
+# screens and rich nutrients above, and cumulative price bands, "price<=X" for every band at or above its price, so
+# foods of similar price share most of their price tags. Catalog prices: median S$9.22, 10th percentile S$3.15, 90th
+# S$32.63.
+PRICE_BANDS = (3, 5, 10, 20, 50)
+# The foods' tag sets are clustered agglomeratively (average linkage, Jaccard distance) and cut here, so a
+# macro-cluster's members share at least 60% of their tags on average. On the catalog: 15 tags make 692 distinct tag
+# sets, cut into 43 macro-clusters (largest 3,890 foods, median 25); 0.3 gives 111, 0.5 gives 21.
+TAG_CLUSTER_THRESHOLD = 0.4
+# Index selection by the share of the catalog a query's constraints match: from BROAD_MATCH_SHARE up, HNSW over the
+# matching rows through a bitset mask; under it, an exact scan of them. Under 10%, masked HNSW needs ef raised to about
+# k / share to reach k matches: on the catalog it took 3-3.4 ms at recall 0.999 for 1-10% matches, against 0.4-0.8 ms
+# for the exact scan. The scan costs about m (the matching rows), HNSW about k * N / m, so they cross near
+# m = sqrt(k * N): 9.7% of the catalog for k = 100.
+BROAD_MATCH_SHARE = 0.10
+# The exact scan's distance calculation runs in buckets of SCAN_BUCKET rows on a pool of SCAN_THREADS threads (1 runs
+# it inline): the threads take buckets from a shared queue, each the next one as soon as it is done with its last, and
+# the priority queue then takes the k nearest. Measured distance calculation (64 dimensions):
+#   catalog, 1,066 rows (10%):  20-row buckets 0.29 ms on 4 threads, 1,000-row buckets 0.036 ms; inline 0.006 ms
+#   2M-row synthetic, 200,000 rows: 1,000-row buckets 3.8 ms on 4 threads, 10,000-row ones 0.86 ms; inline 1.2 ms
+# So the threads only pay with big buckets on big scans; on this catalog the scan stays under 0.05 ms either way.
+SCAN_BUCKET = 1000
+SCAN_THREADS = 4
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -316,21 +339,21 @@ def encode_catalog(reranker, recipes, batch_size=1024):
                       for start in range(0, len(recipes), batch_size)])
 
 
-def agglomerative_clusters(embeddings, threshold=CLUSTER_DISTANCE_THRESHOLD):
-    """The cluster of each row (0 to C - 1): average-linkage agglomerative clustering on the cosine distance between
-    every two rows, cut at threshold. The same clusters as scipy's linkage(method="average", metric="cosine") with
-    fcluster(threshold, "distance"), without scipy.
+def average_linkage(distance, threshold, sizes=None):
+    """The cluster of each row (0 to C - 1) under average-linkage agglomerative clustering of a square distance
+    matrix, cut at threshold: scipy's linkage(method="average") with fcluster(threshold, "distance"), without scipy.
+    sizes counts each row as that many identical points (1 each by default), so a group of duplicates is clustered
+    once. distance is overwritten.
+
+    When distances tie, average linkage depends on the order of the merges, in scipy as here (on 1,500 of the
+    catalog's foods, whose 1.1 million tag distances take 71 values, scipy gave 32 to 35 clusters by row order). The
+    order here only follows the rows', so the same rows always give the same clusters.
 
     Nearest-neighbour chain: follow each cluster's nearest neighbour until two are each other's nearest, merge them
-    and update the merged row's distances by Lance-Williams (the size-weighted mean of the two). O(n^2) time, and one
-    n x n float32 matrix: 450 MB for the catalog, built only with the index."""
-    unit = np.asarray(embeddings, dtype=np.float32)
-    unit = unit / (np.linalg.norm(unit, axis=1, keepdims=True) + 1e-12)
-    n = len(unit)
-    distance = unit @ unit.T
-    np.subtract(1.0, distance, out=distance)  # in place: one matrix, not two
+    and update the merged row's distances by Lance-Williams (the size-weighted mean of the two). O(n^2) time."""
+    n = len(distance)
     np.fill_diagonal(distance, np.inf)
-    size = np.ones(n)
+    size = np.ones(n) if sizes is None else np.asarray(sizes, dtype=float).copy()
     active = np.ones(n, dtype=bool)
     merges = []  # (height, a, b): a and b merged at that distance
     chain = []
@@ -365,9 +388,20 @@ def agglomerative_clusters(embeddings, threshold=CLUSTER_DISTANCE_THRESHOLD):
         return row
 
     for height, a, b in merges:
-        if height <= threshold:
+        # Jaccard distances are ratios of small counts, so merges land exactly on a round threshold: float rounding
+        # must not decide which side
+        if height <= threshold + 1e-9:
             parent[root(a)] = root(b)
-    return np.unique([root(row) for row in range(n)], return_inverse=True)[1]
+    return np.unique([root(row) for row in range(n)], return_inverse=True)[1].reshape(-1)
+
+
+def jaccard_distances(sets):
+    """1 - |A & B| / |A | B| between every two rows of a (rows, tags) bool matrix; 0 between two empty sets."""
+    members = np.asarray(sets, dtype=np.float64)
+    intersection = members @ members.T
+    sizes = members.sum(1)
+    union = sizes[:, None] + sizes[None, :] - intersection
+    return np.where(union > 0, 1.0 - intersection / np.maximum(union, 1.0), 0.0)
 
 
 def recipe_words(recipe):
@@ -378,8 +412,9 @@ def recipe_words(recipe):
 
 
 def condition_bitmaps(recipes):
-    """The inverted bitmap index of the catalog: {condition: bitmap}, each bitmap a bool array over the catalog rows,
-    True (1) where the row meets the condition, False (0) where it does not.
+    """Which foods meet each condition a preference can ask for: {condition: bitmap}, each bitmap a bool array over the
+    catalog rows, True (1) where the row meets the condition, False (0) where it does not. The foods' tags
+    (food_tags), which the macro-clusters group them by.
 
     "diet:<diet>" for each special_diet: none of the diet's excluded terms in the food. "nutrient:<key>" for each
     nutrient: at least the catalog's RICH_QUANTILE of it, for a preferred_nutrient."""
@@ -411,66 +446,127 @@ def preference_conditions(preferences):
     return conditions
 
 
+def food_tags(recipes, prices):
+    """The tag names and a (rows, tags) bool matrix of which food carries which: the condition bitmaps' diets and rich
+    nutrients, and the cumulative price bands."""
+    bitmaps = condition_bitmaps(recipes)
+    for band in PRICE_BANDS:
+        bitmaps[f"price<={band}"] = prices <= band
+    return list(bitmaps), np.stack(list(bitmaps.values()), axis=1)
+
+
+@dataclass
+class MacroCluster:
+    """Foods with overlapping tags: its members as a Roaring bitmap of catalog rows, its centroid (the share of its
+    members carrying each tag), and its groups, the rows of each distinct tag set in it."""
+
+    members: BitMap
+    centroid: np.ndarray
+    groups: list  # [(tags: (n_tags,) bool, rows: BitMap)]
+
+
+def macro_clusters(tag_matrix, threshold=TAG_CLUSTER_THRESHOLD):
+    """Steps 1 and 2 of recommender.MD: the foods' tag sets clustered agglomeratively by Jaccard distance (average
+    linkage) and cut at threshold, each cluster an inverted Roaring bitmap of its rows. Foods with the same tag set are
+    clustered once, weighted by how many share it: the same as clustering every food, with the 10,658 foods down to
+    their 692 tag sets. The tag sets come sorted, so the same catalog always gives the same clusters."""
+    tag_sets, set_of_row, counts = np.unique(tag_matrix, axis=0, return_inverse=True, return_counts=True)
+    set_of_row = set_of_row.reshape(-1)
+    labels = average_linkage(jaccard_distances(tag_sets), threshold, counts)
+    rows_of_set = [BitMap(np.flatnonzero(set_of_row == tag_set).tolist()) for tag_set in range(len(tag_sets))]
+    clusters = []
+    for cluster in range(int(labels.max()) + 1 if len(labels) else 0):
+        sets = np.flatnonzero(labels == cluster)
+        weights = counts[sets].astype(float)
+        clusters.append(MacroCluster(
+            members=BitMap.union(*(rows_of_set[tag_set] for tag_set in sets)),
+            centroid=(tag_sets[sets] * weights[:, None]).sum(0) / weights.sum(),
+            groups=[(tag_sets[tag_set], rows_of_set[tag_set]) for tag_set in sets]))
+    return clusters
+
+
+_scan_pool = None
+_scan_pool_lock = threading.Lock()
+
+
+def scan_pool():
+    """The thread pool the exact scan scores its buckets on: made on first use and shared by every search."""
+    global _scan_pool
+    with _scan_pool_lock:
+        if _scan_pool is None:
+            _scan_pool = ThreadPoolExecutor(max_workers=SCAN_THREADS, thread_name_prefix="remymy-scan")
+        return _scan_pool
+
+
 class RecipeIndex:
-    """Item embeddings of the catalog and an HNSW (cosine) index over them. Labels are catalog row positions. Next to
-    it, an inverted bitmap index of the preference conditions (condition_bitmaps) and each row's price, which narrow
-    a search to the rows a user's preferences allow.
+    """Item embeddings of the catalog and an HNSW (cosine) index over them. Labels are catalog row positions.
 
-    The rows are also clustered (agglomerative_clusters), each cluster a "cluster:<id>" bitmap, with a second HNSW
-    index over the clusters' centroids: a search first finds the clusters nearest the query there, then searches
-    only their rows."""
+    With the recipes, it also routes a search under the user's constraints (recommender.MD): the foods are clustered by
+    their tags into macro-clusters (macro_clusters), each an inverted Roaring bitmap of its rows; a query's required
+    tags are matched against the clusters' centroids to find the rows it may return, and by the share of the catalog
+    they are, HNSW searches them through a bitset mask or they are scanned exactly."""
 
-    def __init__(self, fdc_ids, embeddings, index, recipes=None, labels=None):
+    def __init__(self, fdc_ids, embeddings, index, recipes=None):
         self.fdc_ids = list(fdc_ids)
         self.embeddings = embeddings  # (N, d) float32, not normalized: the reranker takes them as they are.
         self.index = index
-        # built from the recipes, whether the HNSW index was built or loaded: cheap, and always in step with them
-        self.bitmaps = condition_bitmaps(recipes) if recipes is not None else {}
-        self.prices = (np.array([float(recipe.get("price", 0.0)) for recipe in recipes]) if recipes is not None
-                       else None)
-        self.labels = np.asarray(labels) if labels is not None else agglomerative_clusters(embeddings)
-        self.bitmaps.update({f"cluster:{cluster}": self.labels == cluster for cluster in range(self.n_clusters)})
-        # each centroid the mean of its rows' unit embeddings, as cosine compares directions
+        # Structure of arrays for the exact scan: the unit embeddings by column, each dimension's values for every row
+        # contiguous in memory, so scoring a bucket is one multiply-add per dimension across all its rows (SIMD).
         unit = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12)
-        self.centroids = np.stack([unit[self.labels == cluster].mean(0) for cluster in range(self.n_clusters)])
-        self.centroid_index = hnswlib.Index(space="cosine", dim=embeddings.shape[1])
-        self.centroid_index.init_index(max_elements=self.n_clusters, ef_construction=HNSW_EF_CONSTRUCTION, M=HNSW_M,
-                                       random_seed=SEED)
-        self.centroid_index.add_items(self.centroids.astype(np.float32), np.arange(self.n_clusters))
+        self.columns = np.ascontiguousarray(unit.T, dtype=np.float32)  # (d, N)
+        # built from the recipes, whether the HNSW index was built or loaded: cheap, and always in step with them
+        self.tags, self.clusters, self.prices = [], [], None
+        if recipes is not None:
+            self.prices = np.array([float(recipe.get("price", 0.0)) for recipe in recipes])
+            self.tags, tag_matrix = food_tags(recipes, self.prices)
+            self.clusters = macro_clusters(tag_matrix)
 
-    @property
-    def n_clusters(self):
-        return int(self.labels.max()) + 1 if len(self.labels) else 0
+    def required_tags(self, preferences):
+        """Step 3.1: the tags a query's constraints require, as a bool vector over self.tags (its special_diet, its
+        preferred_nutrient and the smallest price band holding its budget), and its exact budget (0 is no limit)."""
+        required = np.zeros(len(self.tags), dtype=bool)
+        wanted = preference_conditions(preferences)
+        budget = float(preferences.get("budget") or 0)
+        band = next((band for band in PRICE_BANDS if band >= budget), None) if budget > 0 else None
+        if band is not None:
+            wanted.append(f"price<={band}")
+        for tag in wanted:
+            if tag in self.tags:
+                required[self.tags.index(tag)] = True
+            else:
+                logger.debug("%r is not a tag of the catalog, so it does not narrow the search.", tag)
+        return required, budget
 
-    def probe_clusters(self, query, searchable, need):
-        """The bitmap of the rows of the clusters nearest the query (by their centroids, through HNSW), nearest first
-        until they hold `need` searchable rows or every cluster is in; and how many clusters that took."""
-        self.centroid_index.set_ef(max(HNSW_EF_SEARCH, self.n_clusters))
-        clusters, _ = self.centroid_index.knn_query(np.asarray(query, dtype=np.float32).reshape(1, -1),
-                                                    k=self.n_clusters)
-        probed = np.zeros(len(self.labels), dtype=bool)
-        found = 0
-        for used, cluster in enumerate(clusters[0], start=1):
-            members = self.bitmaps[f"cluster:{cluster}"]
-            probed |= members
-            found += int((members & searchable).sum())
-            if found >= need:
-                break
-        return probed, used
+    def route(self, preferences, exclude=()):
+        """Step 3.2: the rows a search under the user's preferences may return, as a Roaring bitmap, and how many
+        macro-clusters were taken whole, in part or skipped; None when nothing constrains the search.
 
-    def allowed_rows(self, preferences, exclude=()):
-        """The bitmap of the rows a search may return: every condition's bitmap ANDed together, a budget's price limit
-        (0 is no limit) and the excluded rows taken out. None when nothing narrows the search."""
-        bitmaps = [self.bitmaps[condition] for condition in preference_conditions(preferences)
-                   if condition in self.bitmaps]
-        budget = preferences.get("budget") or 0
-        if budget > 0 and self.prices is not None:
-            bitmaps.append(self.prices <= budget)
-        if not bitmaps:
+        A cluster whose centroid has a required tag at 0 (no member carries it) is skipped, one whose centroid has
+        every required tag at 1 (every member carries them) is taken whole, and of the rest only the tag-set groups
+        carrying every required tag. The budget is then checked against each row's price, as its band only bounds it."""
+        required, budget = self.required_tags(preferences)
+        if not required.any() and budget <= 0:
             return None
-        allowed = np.logical_and.reduce(bitmaps)
-        allowed[list(exclude)] = False
-        return allowed
+        matching = BitMap()
+        plan = {"whole": 0, "partial": 0, "skipped": 0}
+        for cluster in self.clusters:
+            carried = cluster.centroid[required]
+            if (carried == 0).any():
+                plan["skipped"] += 1
+            elif (carried == 1).all():
+                plan["whole"] += 1
+                matching |= cluster.members
+            else:
+                plan["partial"] += 1
+                for tags, rows in cluster.groups:
+                    if tags[required].all():
+                        matching |= rows
+        if exclude:
+            matching -= BitMap(int(row) for row in exclude)
+        if budget > 0:
+            rows = np.asarray(matching.to_array(), dtype=np.intp)
+            matching = BitMap(rows[self.prices[rows] <= budget].tolist())
+        return matching, plan
 
     @classmethod
     def build(cls, reranker, recipes):
@@ -480,41 +576,23 @@ class RecipeIndex:
         index.add_items(embeddings, np.arange(len(recipes)))
         return cls([recipe["fdc_id"] for recipe in recipes], embeddings, index, recipes)
 
-    def save_clusters(self, index_dir):
-        np.savez(Path(index_dir) / "clusters.npz", labels=self.labels, threshold=CLUSTER_DISTANCE_THRESHOLD)
-
-    @staticmethod
-    def saved_clusters(index_dir):
-        """The saved cluster labels when they were cut at today's CLUSTER_DISTANCE_THRESHOLD, else None."""
-        path = Path(index_dir) / "clusters.npz"
-        if not path.exists():
-            return None
-        saved = np.load(path)
-        return saved["labels"] if float(saved["threshold"]) == CLUSTER_DISTANCE_THRESHOLD else None
-
     def save(self, index_dir, source_fingerprint):
         index_dir = Path(index_dir)
         index_dir.mkdir(parents=True, exist_ok=True)
         np.save(index_dir / "item_embeddings.npy", self.embeddings)
         self.index.save_index(str(index_dir / "hnsw.bin"))
-        self.save_clusters(index_dir)
         (index_dir / "meta.json").write_text(json.dumps({
             "fingerprint": source_fingerprint, "dim": int(self.embeddings.shape[1]), "M": HNSW_M,
             "ef_construction": HNSW_EF_CONSTRUCTION, "fdc_ids": self.fdc_ids}))
 
     @classmethod
     def load(cls, index_dir, recipes=None):
-        """The saved index; with the recipes it was built from, their bitmaps and prices too. Clusters saved before, or
-        at another threshold, are clustered again and saved."""
+        """The saved index; with the recipes it was built from, their macro-clusters and prices too."""
         index_dir = Path(index_dir)
         meta = json.loads((index_dir / "meta.json").read_text())
         index = hnswlib.Index(space="cosine", dim=meta["dim"])
         index.load_index(str(index_dir / "hnsw.bin"), max_elements=len(meta["fdc_ids"]))
-        labels = cls.saved_clusters(index_dir)
-        loaded = cls(meta["fdc_ids"], np.load(index_dir / "item_embeddings.npy"), index, recipes, labels)
-        if labels is None:
-            loaded.save_clusters(index_dir)
-        return loaded
+        return cls(meta["fdc_ids"], np.load(index_dir / "item_embeddings.npy"), index, recipes)
 
     @classmethod
     def load_or_build(cls, reranker, recipes, index_dir, source_fingerprint, rebuild=False):
@@ -531,51 +609,79 @@ class RecipeIndex:
                     time.perf_counter() - started, reason, index_dir)
         return built
 
-    def search(self, query, k, conditions=None, exclude=(), ef=HNSW_EF_SEARCH, probe=False):
-        """Up to k (row, cosine similarity) nearest to query, most similar first, rows in exclude left out. With
-        conditions (the user's preferences), only rows their bitmaps allow are searched. With probe, only the rows of
-        the clusters nearest the query, until they hold CLUSTER_PROBE_COVERAGE * k such rows."""
-        # the bitmaps of the preferences' conditions ANDed into one: 1 for a row the search may return, 0 otherwise
-        inv_bitmap_cond = self.allowed_rows(conditions or {}, exclude)
-        if probe and self.n_clusters:
-            searchable = inv_bitmap_cond
-            if searchable is None:
-                searchable = np.ones(len(self.labels), dtype=bool)
-                searchable[list(exclude)] = False
-            probed, used = self.probe_clusters(query, searchable, CLUSTER_PROBE_COVERAGE * k)
-            logger.debug("Probed %d of %d clusters: %d searchable rows.", used, self.n_clusters,
-                         int((probed & searchable).sum()))
-            return self._search_allowed(query, k, probed & searchable, ef)
-        if inv_bitmap_cond is not None:
-            return self._search_allowed(query, k, inv_bitmap_cond, ef)
+    def search(self, query, k, conditions=None, exclude=(), ef=HNSW_EF_SEARCH, log=None):
+        """Up to k (row, cosine similarity) nearest to query, most similar first, rows in exclude left out.
 
-        exclude = set(exclude)
-        # Ask for enough neighbours that k remain after dropping the excluded rows.
-        n = min(k + len(exclude), self.index.get_current_count())
-        if k <= 0 or n == 0:
-            return []
-        self.index.set_ef(max(ef, n))
-        rows, distances = self.index.knn_query(np.asarray(query, dtype=np.float32).reshape(1, -1), k=n)
-        return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])
-                if row not in exclude][:k]
+        With conditions (the user's preferences), only the rows route() finds may come back (step 3.3 of
+        recommender.MD): from BROAD_MATCH_SHARE of the catalog up, HNSW searches them through a bitset mask, and under
+        it they are scanned exactly. When HNSW cannot reach k of them, they are scanned exactly too."""
+        log = log or (lambda *_: None)
+        query = np.asarray(query, dtype=np.float32).reshape(-1)
+        routed = self.route(conditions or {}, exclude) if self.clusters else None
+        if routed is None:
+            exclude = set(exclude)
+            # Ask for enough neighbours that k remain after dropping the excluded rows.
+            n = min(k + len(exclude), self.index.get_current_count())
+            if k <= 0 or n == 0:
+                return []
+            self.index.set_ef(max(ef, n))
+            rows, distances = self.index.knn_query(query.reshape(1, -1), k=n)
+            return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])
+                    if row not in exclude][:k]
 
-    def _search_allowed(self, query, k, allowed, ef):
-        """search over the rows set in the allowed bitmap: HNSW visits only those, through its filter. When the filter
-        leaves HNSW too few rows to reach (it raises then), the allowed rows are ranked exactly instead."""
-        n = min(k, int(allowed.sum()))
+        matching, plan = routed
+        share = len(matching) / max(len(self.fdc_ids), 1)
+        n = min(k, len(matching))
         if n <= 0:
-            return []
-        query = np.asarray(query, dtype=np.float32).reshape(1, -1)
+            results, how = [], "nothing to search"
+        elif share < BROAD_MATCH_SHARE:
+            results, how = self.scan(query, matching, n), "exact scan"
+        else:
+            results, how = self.masked_hnsw(query, matching, n, ef), "HNSW through a bitset mask"
+            if results is None:
+                results, how = self.scan(query, matching, n), "exact scan (HNSW could not reach k)"
+        log(f"  routing: {plan['whole']} macro-clusters taken whole, {plan['partial']} in part, {plan['skipped']} "
+            f"skipped of {len(self.clusters)}; {len(matching):,} matching rows ({share:.2%} of the catalog) -> {how}")
+        return results
+
+    def masked_hnsw(self, query, matching, n, ef):
+        """The n nearest of the matching rows by HNSW, bitset masking the rest: its filter admits a row only when the
+        Roaring bitmap holds it. None when the search cannot reach n of them."""
         self.index.set_ef(max(ef, n))
         try:
-            rows, distances = self.index.knn_query(query, k=n, filter=lambda row: bool(allowed[row]))
-            return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])]
+            rows, distances = self.index.knn_query(query.reshape(1, -1), k=n, filter=matching.__contains__)
         except RuntimeError:
-            candidates = np.flatnonzero(allowed)
-            vectors = self.embeddings[candidates]
-            cosine = (vectors @ query[0]) / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query[0]) + 1e-12)
-            order = np.argsort(-cosine)[:n]
-            return [(int(candidates[i]), float(cosine[i])) for i in order]
+            return None
+        return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])]
+
+    def scan(self, query, rows, k):
+        """The exact k nearest of rows (a Roaring bitmap) to query: a SIMD brute-force distance calculation over the
+        structure-of-arrays columns, in buckets of SCAN_BUCKET rows computed concurrently on a pool of SCAN_THREADS
+        threads, then a priority queue (a min-heap) of the k most similar."""
+        query = query / (np.linalg.norm(query) + 1e-12)
+        rows = np.asarray(rows.to_array(), dtype=np.intp)
+        # the matching rows' columns, gathered once into a (d, m) block: each bucket is then a contiguous run of every
+        # column, not 20 values gathered from all over it
+        block = self.columns[:, rows]
+        buckets = [(rows[start:start + SCAN_BUCKET], block[:, start:start + SCAN_BUCKET])
+                   for start in range(0, len(rows), SCAN_BUCKET)]
+
+        def score(bucket):
+            # the product sums query[j] times the bucket's run of column j: one multiply-add per dimension covers all
+            # of the bucket's rows
+            bucket_rows, bucket_columns = bucket
+            return bucket_rows, query @ bucket_columns
+
+        # the distance calculation, every bucket of it, before the priority queue sees any
+        scored = list(scan_pool().map(score, buckets) if SCAN_THREADS > 1 else map(score, buckets))
+        best = []  # (similarity, row) of the k most similar so far, the least similar on top
+        for bucket, similarities in scored:
+            for row, similarity in zip(bucket.tolist(), similarities.tolist()):
+                if len(best) < k:
+                    heapq.heappush(best, (similarity, row))
+                elif similarity > best[0][0]:
+                    heapq.heapreplace(best, (similarity, row))
+        return [(row, similarity) for similarity, row in sorted(best, reverse=True)]
 
 
 def bucket_of(similarity):
@@ -787,11 +893,13 @@ class RetrievalPipeline:
             log(f"  cosine to {str(recipe.get('name', ''))[:48]:<48} {cosine:.3f}")
 
         seen = {self.row_of[recipe["fdc_id"]] for recipe in history if "fdc_id" in recipe}
+        log(f"\n=== Step 3. Retrieval: the {n_candidates} nearest of {len(self.recipes):,} recipes by cosine similarity "
+            f"({len(seen)} history recipes excluded) ===")
         # HNSW already returns them most similar first; the buckets and the retrieval ranks rely on it.
-        retrieved = sorted(self.recipe_index.search(query.numpy(), n_candidates, conditions=preferences, exclude=seen),
+        retrieved = sorted(self.recipe_index.search(query.numpy(), n_candidates, conditions=preferences, exclude=seen,
+                                                    log=log),
                            key=lambda candidate: -candidate[1])
-        log(f"\n=== Step 3. HNSW retrieval: {len(retrieved)} nearest of {len(self.recipes):,} recipes by cosine "
-            f"similarity ({len(seen)} history recipes excluded) ===")
+        log(f"  {len(retrieved)} retrieved")
         log(f"  {'rank':>4}  {'fdc_id':>8}  {'recipe':<56} {'cosine':>7}")
         for rank, (row, similarity) in enumerate(retrieved[:show], start=1):
             log(f"  {rank:>4}  {self.recipes[row]['fdc_id']:>8}  {self.recipes[row]['name'][:56]:<56} {similarity:>7.3f}")

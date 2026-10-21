@@ -55,8 +55,9 @@ class FakeRecommender:
         )
         self.calls: list[dict] = []
 
-    def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int) -> list[dict]:
-        self.calls.append({"history": history, "recipes": recipes, "top_k": top_k})
+    def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
+                  preferences: Mapping | None = None) -> list[dict]:
+        self.calls.append({"history": history, "recipes": recipes, "top_k": top_k, "preferences": preferences})
         return self.handler(history, recipes, top_k)
 
 
