@@ -139,3 +139,7 @@ docs/drafts
 
 # Local Codex artifacts
 .codex-remymy/
+
+# data and model outputs stay local: every CSV, and any model_artifacts folder at any depth
+*.csv
+model_artifacts/
