@@ -10,7 +10,7 @@ from pyroaring import BitMap
 from remymy_api.inference import model_inference_score_recommend as pipeline
 from remymy_api.inference.model_inference_score_recommend import (
     CATALOG_NUTRIENTS, RecipeIndex, average_linkage, condition_bitmaps, food_tags, jaccard_distances, macro_clusters,
-    nutrient_key, preference_conditions, thread_groups)
+    nutrient_key, preference_conditions, thread_groups, ThreadExecutor)
 
 
 def food(fdc_id: int, name: str, product: str, price: float, protein: float) -> dict:
@@ -279,3 +279,51 @@ def test_the_food_datas_diet_columns_win_over_the_word_screen():
     assert bitmaps["diet:vegetarian"].tolist() == [True, False, True]
     assert bitmaps["diet:halal"].tolist() == [False, True, True]
     assert bitmaps["diet:Hinduism"].tolist() == [True, True, True]
+
+
+def test_the_executor_runs_every_bucket_once_and_can_run_again():
+    import threading as threads
+
+    executor = ThreadExecutor(4)
+    for _ in range(2):  # a second run on the same sub-threads: the semaphore and queues are back to free
+        seen, lock = [], threads.Lock()
+
+        def work(bucket):
+            with lock:
+                seen.append(bucket)
+
+        ran_by = executor.run(500, work)
+        assert sorted(seen) == list(range(500))
+        assert set(ran_by) <= {0, 1, 2, 3} and None not in ran_by
+
+
+def test_a_free_sub_thread_gets_buckets_redirected_from_the_back_of_the_busiest():
+    import time as clock
+
+    executor = ThreadExecutor(4)
+    # 40 buckets, groups of 10; sub-thread 0's buckets are slow, the others' instant, so the others put 0 early
+    ran_by = executor.run(40, lambda bucket: clock.sleep(0.01) if bucket < 10 else None)
+
+    # every bucket ran; sub-thread 0 started at the front of its group, and free sub-threads took over part of it
+    # (redirected buckets can move again, even back to sub-thread 0 once it is free, so no exact split is fixed)
+    assert None not in ran_by
+    assert ran_by[0] == 0
+    assert any(ran_by[bucket] != 0 for bucket in range(10))
+
+
+def test_an_error_in_a_bucket_is_raised_and_the_executor_still_runs():
+    executor = ThreadExecutor(4)
+
+    def work(bucket):
+        if bucket == 25:
+            raise ValueError("bucket 25 failed")
+
+    with pytest.raises(ValueError, match="bucket 25 failed"):
+        executor.run(40, work)
+    assert len(executor.run(8, lambda bucket: None)) == 8
+
+
+def test_fewer_buckets_than_sub_threads():
+    # 2 buckets on 4 sub-threads: the two with no group start free, so a bucket can be redirected to them at once
+    ran_by = ThreadExecutor(4).run(2, lambda bucket: None)
+    assert len(ran_by) == 2 and None not in ran_by

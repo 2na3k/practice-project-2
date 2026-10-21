@@ -35,9 +35,10 @@ import logging
 import math
 import re
 import tempfile
+import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -113,8 +114,8 @@ TAG_CLUSTER_THRESHOLD = 0.4
 # m = sqrt(k * N): 9.7% of the catalog for k = 100.
 BROAD_MATCH_SHARE = 0.10
 # The exact scan's distance calculation runs in buckets of SCAN_BUCKET rows on a pool of SCAN_THREADS threads (1 runs
-# it inline): each thread owns a contiguous group of buckets (thread_groups) and scores them in order, and the priority
-# queue then takes the k nearest. Measured whole scans (64 dimensions, k = 100), 4 threads against inline:
+# it inline): each thread owns a contiguous group of buckets (thread_groups) and scores them in order, a main thread
+# redirects buckets to any that runs out (ThreadExecutor), and the priority queue then takes the k nearest. Measured whole scans (64 dimensions, k = 100), 4 threads against inline:
 #   catalog, 839 rows:                                0.20 ms against 0.14 ms: one or two buckets are too little to share
 #   2M-row synthetic, 200,000 rows in contiguous groups:  6.6 ms against 9.2 ms (a task per bucket took 9.2 ms)
 #   2M-row synthetic, 1,000,000 rows in contiguous groups: 27 ms against 35 ms (a task per bucket took 48 ms)
@@ -525,18 +526,146 @@ def thread_groups(num_buckets, num_threads):
         first += count
     return groups
 
+class ThreadExecutor:
+    """Sub-threads that run buckets, kept track of by a main thread (recommender.MD).
 
-_scan_pool = None
-_scan_pool_lock = threading.Lock()
+    Each sub-thread owns a queue of buckets: _allocate() puts its contiguous group there (thread_groups), and it takes
+    them from the front, so it reads memory in order; with its queue empty it sleeps until buckets are put in it. A
+    semaphore counts the free sub-threads: +1 when one is free, -1 when one is given buckets. Every sub-thread reports
+    its status to a queue.Queue, (thread, buckets left in its queue), after each bucket, and puts 0 there when it has
+    none left. The main thread, run(), waits on the semaphore, reads the statuses to find which sub-thread put 0, and
+    puts buckets in its queue: half of those left in the busiest queue, from its back (so the busy sub-thread's next
+    buckets stay its own and in order). Half rather than one, as each redirect is a round trip through the main thread:
+    on 200,000 rows it took 19.9 ms against 22.4 ms with uneven buckets, 8.3 against 9.0 ms with even ones. One run at
+    a time."""
+
+    def __init__(self, num_threads):
+        self.num_threads = num_threads
+        self.threads = []
+        # each sub-thread's buckets: a deque, as the sub-thread takes the front and a redirect takes the back
+        self.thread_queue = [deque() for _ in range(num_threads)]  # list of queue
+        self.lock = threading.Lock()  # guards the thread queues
+        # one per sub-thread, on the queues' lock: putting buckets in a queue wakes its sub-thread
+        self.ready = [threading.Condition(self.lock) for _ in range(num_threads)]
+        # set when the main thread puts buckets in a sub-thread's queue (taking its semaphore slot), cleared when the
+        # sub-thread wakes for them: it then frees itself once, even if its buckets were redirected away before it ran
+        self.assigned = [False] * num_threads
+        self.semaphore = threading.Semaphore(num_threads)  # the free sub-threads
+        self.status = queue.Queue()  # (thread, buckets left in its queue); 0 once it is free
+        self.run_lock = threading.Lock()  # one run at a time
+        self.work = None  # what the current run does with a bucket
+        self.error = None
+        self.ran_by = []
+        self.closed = False
+        # allocate threads here and put to self.threads
+        for index in range(num_threads):
+            thread = threading.Thread(target=self._thread_run, args=(index,), name=f"remymy-scan-{index}", daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+    def _thread_run(self, index):
+        """A sub-thread: sleeps until buckets are put in its queue, then takes them from the front, reporting what it has
+        left after each one. Once its queue is empty, its buckets done or the rest redirected away, it puts 0 and frees
+        itself on the semaphore: every time, so the main thread is never left waiting for it."""
+        own, ready = self.thread_queue[index], self.ready[index]
+        while True:
+            with ready:
+                while not self.assigned[index] and not self.closed:
+                    ready.wait()
+                if self.closed:
+                    return
+                self.assigned[index] = False
+            while True:
+                with self.lock:
+                    if not own:
+                        break
+                    bucket = own.popleft()
+                    left = len(own)
+                try:
+                    self.work(bucket)
+                    self.ran_by[bucket] = index
+                except Exception as error:  # stop the run: no bucket more, and run() raises it
+                    self.error = error
+                    with self.lock:
+                        for other in self.thread_queue:
+                            other.clear()
+                if left:
+                    self.status.put((index, left))
+            self.status.put((index, 0))  # free, before the semaphore says so
+            self.semaphore.release()
+
+    def _allocate(self, groups):
+        """Each sub-thread's contiguous group of buckets into its queue, waking it; the sub-threads past the groups
+        get none."""
+        with self.lock:
+            for index, own in enumerate(self.thread_queue):
+                own.clear()
+                own.extend(groups[index] if index < len(groups) else ())
+                if own:
+                    self.assigned[index] = True
+                    self.ready[index].notify()
+
+    def _redirect(self, index, left):
+        """Half the buckets left in the queue with the most, by the last statuses (at least one), from its back into
+        sub-thread index's queue, in their order, waking it; how many moved, 0 when every queue is empty."""
+        with self.lock:
+            for donor in sorted(range(self.num_threads), key=lambda other: -left[other]):
+                own = self.thread_queue[donor]
+                if own:
+                    moved = [own.pop() for _ in range(max(1, len(own) // 2))]
+                    left[donor] = len(own)
+                    self.thread_queue[index].extend(reversed(moved))
+                    self.assigned[index] = True
+                    self.ready[index].notify()
+                    return len(moved)
+                left[donor] = 0
+            return 0
+
+    def run(self, num_buckets, work):
+        """The main thread: work(bucket) for every bucket, on the sub-threads; which sub-thread ran each one."""
+        with self.run_lock:
+            groups = thread_groups(num_buckets, self.num_threads)
+            self.work, self.error, self.ran_by = work, None, [None] * num_buckets
+            for _ in groups:
+                self.semaphore.acquire()  # each sub-thread with a group has buckets now
+            self._allocate(groups)
+            left = [len(group) for group in groups] + [0] * (self.num_threads - len(groups))
+            idle = deque(range(len(groups), self.num_threads))  # free from the start: no group of their own
+            done = 0
+            while done < self.num_threads:
+                self.semaphore.acquire()  # a sub-thread is free: it gets buckets, or is done
+                while not idle:  # the free sub-thread put its 0 before releasing, so it is in the queue
+                    index, count = self.status.get()
+                    left[index] = count
+                    if count == 0:
+                        idle.append(index)
+                index = idle.popleft()
+                if self.error is not None or not self._redirect(index, left):
+                    done += 1
+            for _ in range(self.num_threads):  # every sub-thread is free again for the next run
+                self.semaphore.release()
+            if self.error is not None:
+                raise self.error
+            return self.ran_by
+
+    def close(self):
+        """End the sub-threads."""
+        with self.lock:
+            self.closed = True
+            for ready in self.ready:
+                ready.notify()
 
 
-def scan_pool():
-    """The thread pool the exact scan scores its buckets on: made on first use and shared by every search."""
-    global _scan_pool
-    with _scan_pool_lock:
-        if _scan_pool is None:
-            _scan_pool = ThreadPoolExecutor(max_workers=SCAN_THREADS, thread_name_prefix="remymy-scan")
-        return _scan_pool
+_scan_executors = {}
+_scan_executors_lock = threading.Lock()
+
+
+def scan_executor(num_threads):
+    """The ThreadExecutor of num_threads sub-threads the exact scan runs its buckets on: made on first use, shared."""
+    with _scan_executors_lock:
+        if num_threads not in _scan_executors:
+            _scan_executors[num_threads] = ThreadExecutor(num_threads)
+        return _scan_executors[num_threads]
 
 
 class RecipeIndex:
@@ -752,19 +881,17 @@ class RecipeIndex:
         offsets = np.cumsum([0] + [len(scored) for _, scored in buckets])
         similarities = np.empty(offsets[-1], dtype=np.float32)
 
-        def score_group(group):
-            # a thread's own buckets, one after another: one multiply-add per dimension over each bucket's contiguous
-            # run of it, straight into the bucket's slice of the similarities
-            for bucket in group:
-                columns, offset = buckets[bucket][0], offsets[bucket]
-                np.dot(query, columns, out=similarities[offset:offset + columns.shape[1]])
+        def score(bucket):
+            # one multiply-add per dimension over the bucket's contiguous run of it, straight into its slice
+            columns, offset = buckets[bucket][0], offsets[bucket]
+            np.dot(query, columns, out=similarities[offset:offset + columns.shape[1]])
 
         # the distance calculation, every bucket of it, before the priority queue sees any
-        groups = thread_groups(num_buckets, SCAN_THREADS)
-        if len(groups) > 1:
-            list(scan_pool().map(score_group, groups))
+        if SCAN_THREADS > 1 and num_buckets > 1:
+            scan_executor(SCAN_THREADS).run(num_buckets, score)
         else:
-            score_group(groups[0])
+            for bucket in range(num_buckets):
+                score(bucket)
 
         best = []  # (similarity, row) of the k most similar so far, the least similar on top
         for bucket, (_, scored) in enumerate(buckets):
