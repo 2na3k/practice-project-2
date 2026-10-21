@@ -530,14 +530,14 @@ class ThreadExecutor:
     """Sub-threads that run buckets, kept track of by a main thread (recommender.MD).
 
     Each sub-thread owns a queue of buckets: _allocate() puts its contiguous group there (thread_groups), and it takes
-    them from the front, so it reads memory in order; with its queue empty it sleeps until buckets are put in it. A
-    semaphore counts the free sub-threads: +1 when one is free, -1 when one is given buckets. Every sub-thread reports
-    its status to a queue.Queue, (thread, buckets left in its queue), after each bucket, and puts 0 there when it has
-    none left. The main thread, run(), waits on the semaphore, reads the statuses to find which sub-thread put 0, and
-    puts buckets in its queue: half of those left in the busiest queue, from its back (so the busy sub-thread's next
-    buckets stay its own and in order). Half rather than one, as each redirect is a round trip through the main thread:
-    on 200,000 rows it took 19.9 ms against 22.4 ms with uneven buckets, 8.3 against 9.0 ms with even ones. One run at
-    a time."""
+    them from the front, so it reads memory in order; with its queue empty it sleeps until buckets are put in it. Every
+    sub-thread reports its status to a queue.Queue, (thread, buckets left in its queue), after each bucket, and puts 0
+    there when it has none left. The main thread, run(), reads the statuses; when a sub-thread puts 0 it assigns
+    buckets to it: half of those left in the busiest queue, from its back (so the busy sub-thread's next buckets stay
+    its own and in order). Assigning is the critical part, guarded by a semaphore of num_threads: an assignment enters
+    it, puts the buckets in the sub-thread's queue, and releases it. Half rather than one bucket, as each redirect is a
+    round trip through the main thread: on 200,000 rows it took 19.9 ms against 22.4 ms with uneven buckets, 8.3
+    against 9.0 ms with even ones. One run at a time."""
 
     def __init__(self, num_threads):
         self.num_threads = num_threads
@@ -547,10 +547,10 @@ class ThreadExecutor:
         self.lock = threading.Lock()  # guards the thread queues
         # one per sub-thread, on the queues' lock: putting buckets in a queue wakes its sub-thread
         self.ready = [threading.Condition(self.lock) for _ in range(num_threads)]
-        # set when the main thread puts buckets in a sub-thread's queue (taking its semaphore slot), cleared when the
-        # sub-thread wakes for them: it then frees itself once, even if its buckets were redirected away before it ran
+        # set when the main thread puts buckets in a sub-thread's queue, cleared when the sub-thread wakes for them: it
+        # then puts its 0 once, even if its buckets were redirected away before it ran
         self.assigned = [False] * num_threads
-        self.semaphore = threading.Semaphore(num_threads)  # the free sub-threads
+        self.semaphore = threading.Semaphore(num_threads)  # guards assigning buckets to a sub-thread
         self.status = queue.Queue()  # (thread, buckets left in its queue); 0 once it is free
         self.run_lock = threading.Lock()  # one run at a time
         self.work = None  # what the current run does with a bucket
@@ -565,8 +565,8 @@ class ThreadExecutor:
 
     def _thread_run(self, index):
         """A sub-thread: sleeps until buckets are put in its queue, then takes them from the front, reporting what it has
-        left after each one. Once its queue is empty, its buckets done or the rest redirected away, it puts 0 and frees
-        itself on the semaphore: every time, so the main thread is never left waiting for it."""
+        left after each one. Once its queue is empty, its buckets done or the rest redirected away, it puts 0: every
+        time, so the main thread is never left waiting for it."""
         own, ready = self.thread_queue[index], self.ready[index]
         while True:
             with ready:
@@ -591,8 +591,7 @@ class ThreadExecutor:
                             other.clear()
                 if left:
                     self.status.put((index, left))
-            self.status.put((index, 0))  # free, before the semaphore says so
-            self.semaphore.release()
+            self.status.put((index, 0))  # free: the main thread assigns it buckets, or it is done
 
     def _allocate(self, groups):
         """Each sub-thread's contiguous group of buckets into its queue, waking it; the sub-threads past the groups
@@ -626,24 +625,22 @@ class ThreadExecutor:
         with self.run_lock:
             groups = thread_groups(num_buckets, self.num_threads)
             self.work, self.error, self.ran_by = work, None, [None] * num_buckets
-            for _ in groups:
-                self.semaphore.acquire()  # each sub-thread with a group has buckets now
-            self._allocate(groups)
+            with self.semaphore:  # the critical part: assigning each sub-thread its group
+                self._allocate(groups)
             left = [len(group) for group in groups] + [0] * (self.num_threads - len(groups))
             idle = deque(range(len(groups), self.num_threads))  # free from the start: no group of their own
             done = 0
             while done < self.num_threads:
-                self.semaphore.acquire()  # a sub-thread is free: it gets buckets, or is done
-                while not idle:  # the free sub-thread put its 0 before releasing, so it is in the queue
+                while not idle:  # wait for a sub-thread to put 0: it is free
                     index, count = self.status.get()
                     left[index] = count
                     if count == 0:
                         idle.append(index)
                 index = idle.popleft()
-                if self.error is not None or not self._redirect(index, left):
+                with self.semaphore:  # the critical part: assigning that sub-thread buckets, then released
+                    assigned = self.error is None and self._redirect(index, left)
+                if not assigned:
                     done += 1
-            for _ in range(self.num_threads):  # every sub-thread is free again for the next run
-                self.semaphore.release()
             if self.error is not None:
                 raise self.error
             return self.ran_by
