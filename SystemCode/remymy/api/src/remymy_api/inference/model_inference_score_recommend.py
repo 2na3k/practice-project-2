@@ -87,6 +87,14 @@ DIET_EXCLUDES = {
 }
 # A food is rich in a nutrient when it has at least this quantile of the catalog's values (per 100 g).
 RICH_QUANTILE = 0.75
+# Agglomerative clustering of the catalog (average linkage, cosine distance of the item embeddings), cut where the two
+# nearest clusters are farther apart than this. On the 10,658-food catalog: 0.1 gives 2,681 clusters, 0.2 793, 0.3
+# 265 (median 7 foods, largest 1,194).
+CLUSTER_DISTANCE_THRESHOLD = 0.3
+# A probing search takes the clusters nearest the query until they hold this many times k rows it may return. Probing
+# is off by default: on the catalog, 50 user embeddings' 100 nearest foods came back with recall 0.66 at coverage 3 and
+# 0.91 at 20 (worst query 0.49), against 1.00 for plain HNSW, which already answers in under a millisecond.
+CLUSTER_PROBE_COVERAGE = 20
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -308,6 +316,60 @@ def encode_catalog(reranker, recipes, batch_size=1024):
                       for start in range(0, len(recipes), batch_size)])
 
 
+def agglomerative_clusters(embeddings, threshold=CLUSTER_DISTANCE_THRESHOLD):
+    """The cluster of each row (0 to C - 1): average-linkage agglomerative clustering on the cosine distance between
+    every two rows, cut at threshold. The same clusters as scipy's linkage(method="average", metric="cosine") with
+    fcluster(threshold, "distance"), without scipy.
+
+    Nearest-neighbour chain: follow each cluster's nearest neighbour until two are each other's nearest, merge them
+    and update the merged row's distances by Lance-Williams (the size-weighted mean of the two). O(n^2) time, and one
+    n x n float32 matrix: 450 MB for the catalog, built only with the index."""
+    unit = np.asarray(embeddings, dtype=np.float32)
+    unit = unit / (np.linalg.norm(unit, axis=1, keepdims=True) + 1e-12)
+    n = len(unit)
+    distance = unit @ unit.T
+    np.subtract(1.0, distance, out=distance)  # in place: one matrix, not two
+    np.fill_diagonal(distance, np.inf)
+    size = np.ones(n)
+    active = np.ones(n, dtype=bool)
+    merges = []  # (height, a, b): a and b merged at that distance
+    chain = []
+    for _ in range(n - 1):
+        while True:
+            if not chain:
+                chain.append(int(np.flatnonzero(active)[0]))
+            a = chain[-1]
+            b = int(np.argmin(distance[a]))
+            # ties go to the previous cluster on the chain, so the chain always ends
+            if len(chain) > 1 and distance[a, chain[-2]] <= distance[a, b]:
+                b = chain[-2]
+            if len(chain) > 1 and b == chain[-2]:
+                break
+            chain.append(b)
+        chain.pop()
+        chain.pop()
+        merges.append((float(distance[a, b]), a, b))
+        merged = (size[a] * distance[a] + size[b] * distance[b]) / (size[a] + size[b])
+        distance[a], distance[:, a] = merged, merged
+        distance[a, a] = np.inf
+        distance[b], distance[:, b] = np.inf, np.inf
+        size[a] += size[b]
+        active[b] = False
+    # average linkage is monotone, so the cut keeps every merge at or below the threshold, whatever order they came in
+    parent = np.arange(n)
+
+    def root(row):
+        while parent[row] != row:
+            parent[row] = parent[parent[row]]
+            row = parent[row]
+        return row
+
+    for height, a, b in merges:
+        if height <= threshold:
+            parent[root(a)] = root(b)
+    return np.unique([root(row) for row in range(n)], return_inverse=True)[1]
+
+
 def recipe_words(recipe):
     """The lowercased words of a recipe's name and product terms, which the diet conditions screen."""
     products = recipe.get("entities", {}).get("product", [])
@@ -352,9 +414,13 @@ def preference_conditions(preferences):
 class RecipeIndex:
     """Item embeddings of the catalog and an HNSW (cosine) index over them. Labels are catalog row positions. Next to
     it, an inverted bitmap index of the preference conditions (condition_bitmaps) and each row's price, which narrow
-    a search to the rows a user's preferences allow."""
+    a search to the rows a user's preferences allow.
 
-    def __init__(self, fdc_ids, embeddings, index, recipes=None):
+    The rows are also clustered (agglomerative_clusters), each cluster a "cluster:<id>" bitmap, with a second HNSW
+    index over the clusters' centroids: a search first finds the clusters nearest the query there, then searches
+    only their rows."""
+
+    def __init__(self, fdc_ids, embeddings, index, recipes=None, labels=None):
         self.fdc_ids = list(fdc_ids)
         self.embeddings = embeddings  # (N, d) float32, not normalized: the reranker takes them as they are.
         self.index = index
@@ -362,6 +428,35 @@ class RecipeIndex:
         self.bitmaps = condition_bitmaps(recipes) if recipes is not None else {}
         self.prices = (np.array([float(recipe.get("price", 0.0)) for recipe in recipes]) if recipes is not None
                        else None)
+        self.labels = np.asarray(labels) if labels is not None else agglomerative_clusters(embeddings)
+        self.bitmaps.update({f"cluster:{cluster}": self.labels == cluster for cluster in range(self.n_clusters)})
+        # each centroid the mean of its rows' unit embeddings, as cosine compares directions
+        unit = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12)
+        self.centroids = np.stack([unit[self.labels == cluster].mean(0) for cluster in range(self.n_clusters)])
+        self.centroid_index = hnswlib.Index(space="cosine", dim=embeddings.shape[1])
+        self.centroid_index.init_index(max_elements=self.n_clusters, ef_construction=HNSW_EF_CONSTRUCTION, M=HNSW_M,
+                                       random_seed=SEED)
+        self.centroid_index.add_items(self.centroids.astype(np.float32), np.arange(self.n_clusters))
+
+    @property
+    def n_clusters(self):
+        return int(self.labels.max()) + 1 if len(self.labels) else 0
+
+    def probe_clusters(self, query, searchable, need):
+        """The bitmap of the rows of the clusters nearest the query (by their centroids, through HNSW), nearest first
+        until they hold `need` searchable rows or every cluster is in; and how many clusters that took."""
+        self.centroid_index.set_ef(max(HNSW_EF_SEARCH, self.n_clusters))
+        clusters, _ = self.centroid_index.knn_query(np.asarray(query, dtype=np.float32).reshape(1, -1),
+                                                    k=self.n_clusters)
+        probed = np.zeros(len(self.labels), dtype=bool)
+        found = 0
+        for used, cluster in enumerate(clusters[0], start=1):
+            members = self.bitmaps[f"cluster:{cluster}"]
+            probed |= members
+            found += int((members & searchable).sum())
+            if found >= need:
+                break
+        return probed, used
 
     def allowed_rows(self, preferences, exclude=()):
         """The bitmap of the rows a search may return: every condition's bitmap ANDed together, a budget's price limit
@@ -385,23 +480,41 @@ class RecipeIndex:
         index.add_items(embeddings, np.arange(len(recipes)))
         return cls([recipe["fdc_id"] for recipe in recipes], embeddings, index, recipes)
 
+    def save_clusters(self, index_dir):
+        np.savez(Path(index_dir) / "clusters.npz", labels=self.labels, threshold=CLUSTER_DISTANCE_THRESHOLD)
+
+    @staticmethod
+    def saved_clusters(index_dir):
+        """The saved cluster labels when they were cut at today's CLUSTER_DISTANCE_THRESHOLD, else None."""
+        path = Path(index_dir) / "clusters.npz"
+        if not path.exists():
+            return None
+        saved = np.load(path)
+        return saved["labels"] if float(saved["threshold"]) == CLUSTER_DISTANCE_THRESHOLD else None
+
     def save(self, index_dir, source_fingerprint):
         index_dir = Path(index_dir)
         index_dir.mkdir(parents=True, exist_ok=True)
         np.save(index_dir / "item_embeddings.npy", self.embeddings)
         self.index.save_index(str(index_dir / "hnsw.bin"))
+        self.save_clusters(index_dir)
         (index_dir / "meta.json").write_text(json.dumps({
             "fingerprint": source_fingerprint, "dim": int(self.embeddings.shape[1]), "M": HNSW_M,
             "ef_construction": HNSW_EF_CONSTRUCTION, "fdc_ids": self.fdc_ids}))
 
     @classmethod
     def load(cls, index_dir, recipes=None):
-        """The saved index; with the recipes it was built from, their bitmaps and prices too."""
+        """The saved index; with the recipes it was built from, their bitmaps and prices too. Clusters saved before, or
+        at another threshold, are clustered again and saved."""
         index_dir = Path(index_dir)
         meta = json.loads((index_dir / "meta.json").read_text())
         index = hnswlib.Index(space="cosine", dim=meta["dim"])
         index.load_index(str(index_dir / "hnsw.bin"), max_elements=len(meta["fdc_ids"]))
-        return cls(meta["fdc_ids"], np.load(index_dir / "item_embeddings.npy"), index, recipes)
+        labels = cls.saved_clusters(index_dir)
+        loaded = cls(meta["fdc_ids"], np.load(index_dir / "item_embeddings.npy"), index, recipes, labels)
+        if labels is None:
+            loaded.save_clusters(index_dir)
+        return loaded
 
     @classmethod
     def load_or_build(cls, reranker, recipes, index_dir, source_fingerprint, rebuild=False):
@@ -418,11 +531,21 @@ class RecipeIndex:
                     time.perf_counter() - started, reason, index_dir)
         return built
 
-    def search(self, query, k, conditions=None, exclude=(), ef=HNSW_EF_SEARCH):
+    def search(self, query, k, conditions=None, exclude=(), ef=HNSW_EF_SEARCH, probe=False):
         """Up to k (row, cosine similarity) nearest to query, most similar first, rows in exclude left out. With
-        conditions (the user's preferences), only rows their bitmaps allow are searched."""
+        conditions (the user's preferences), only rows their bitmaps allow are searched. With probe, only the rows of
+        the clusters nearest the query, until they hold CLUSTER_PROBE_COVERAGE * k such rows."""
         # the bitmaps of the preferences' conditions ANDed into one: 1 for a row the search may return, 0 otherwise
         inv_bitmap_cond = self.allowed_rows(conditions or {}, exclude)
+        if probe and self.n_clusters:
+            searchable = inv_bitmap_cond
+            if searchable is None:
+                searchable = np.ones(len(self.labels), dtype=bool)
+                searchable[list(exclude)] = False
+            probed, used = self.probe_clusters(query, searchable, CLUSTER_PROBE_COVERAGE * k)
+            logger.debug("Probed %d of %d clusters: %d searchable rows.", used, self.n_clusters,
+                         int((probed & searchable).sum()))
+            return self._search_allowed(query, k, probed & searchable, ef)
         if inv_bitmap_cond is not None:
             return self._search_allowed(query, k, inv_bitmap_cond, ef)
 

@@ -62,3 +62,35 @@ def test_search_returns_only_the_rows_the_preferences_allow(recipe_index):
     assert recipe_index.search(query, 6, conditions={"budget": 0.5}) == []
     # a budget of 0 is no limit
     assert rows(recipe_index.search(query, 6, conditions={"budget": 0})) == [0, 1, 2, 3, 4, 5]
+
+
+def test_agglomerative_clusters_cut_where_groups_are_far_apart():
+    from remymy_api.inference.model_inference_score_recommend import agglomerative_clusters
+
+    # three directions, a few rows near each: within a group the cosine distance is tiny, between groups about 1
+    rng = np.random.default_rng(0)
+    directions = np.eye(3, 8)
+    rows = np.repeat(directions, [4, 3, 5], axis=0) + 0.01 * rng.normal(size=(12, 8))
+    labels = agglomerative_clusters(rows, threshold=0.3)
+
+    assert len(set(labels[:4])) == len(set(labels[4:7])) == len(set(labels[7:])) == 1
+    assert len(set(labels)) == 3
+    # a threshold below every distance leaves each row on its own; one above all of them, one cluster
+    assert len(set(agglomerative_clusters(rows, threshold=0.0))) == 12
+    assert len(set(agglomerative_clusters(rows, threshold=2.0))) == 1
+
+
+def test_a_probing_search_stays_inside_the_nearest_clusters(recipe_index, monkeypatch):
+    from remymy_api.inference import model_inference_score_recommend as pipeline
+
+    # three clusters of two rows; probing for k rows (coverage 1) searches only the nearest cluster
+    monkeypatch.setattr(pipeline, "CLUSTER_PROBE_COVERAGE", 1)
+    clustered = RecipeIndex(recipe_index.fdc_ids, recipe_index.embeddings, recipe_index.index, RECIPES,
+                            labels=np.array([0, 0, 1, 1, 2, 2]))
+    query = clustered.centroids[1]
+
+    assert rows(clustered.search(query, 2, probe=True)) == [2, 3]
+    # conditions still apply inside the probed clusters: of the beef (2) and the salmon (3), Hinduism keeps the salmon
+    assert rows(clustered.search(query, 1, conditions={"special_diet": "Hinduism"}, probe=True)) == [3]
+    # without probing, the whole catalog is searched
+    assert len(clustered.search(query, 6)) == 6
