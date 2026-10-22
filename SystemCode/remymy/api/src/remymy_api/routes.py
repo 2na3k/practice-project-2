@@ -10,7 +10,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .db import close_database, open_database, split_preview
 from .clustering import cluster
-from .cache import drop_recommendation, drop_recommendations, read_recommendations, write_recommendations
+from .cache import (
+    RATINGS_BEFORE_REFRESH,
+    count_rating,
+    drop_recommendation,
+    drop_recommendations,
+    read_recommendations,
+    reset_ratings,
+    write_recommendations,
+)
 from .dependencies import Catalog, Users
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
@@ -396,8 +404,9 @@ def rate_recipe(
     catalog: Catalog,
 ) -> UserRating:
     """Record whether the user liked a recipe they cooked, or a catalog food by its fdc_id (a recommended grocery). Rating
-    the same one again changes the like in their history rather than adding another. A recommendation they did not
-    like also leaves their cached recommendations."""
+    the same one again changes the like in their history rather than adding another. Each rating is counted in Redis;
+    once the user has rated more than RATINGS_BEFORE_REFRESH since their recommendations were cached, those are
+    dropped, so the next request recommends again from the history the ratings changed, and the count starts over."""
     try:
         if not users.user_exists(user_id):
             raise HTTPException(status_code=404, detail="User not found.")
@@ -408,6 +417,12 @@ def rate_recipe(
     except SQLAlchemyError:
         logger.exception("Recording whether user %d liked recipe %s failed.", user_id, recipe_id)
         raise HTTPException(status_code=503, detail="User data is unavailable.")
-    if not like and drop_recommendation(request.app.state.cache, user_id, recipe_id):
-        logger.debug("Dropped %s, which user %d did not like, from their cached recommendations.", recipe_id, user_id)
+    cache = request.app.state.cache
+    ratings = count_rating(cache, user_id)
+    if ratings is not None and ratings > RATINGS_BEFORE_REFRESH:
+        if drop_recommendations(cache, user_id):
+            logger.debug("Refreshed recommendation for %d", user_id)
+        reset_ratings(cache, user_id)
+    # if not like and drop_recommendation(request.app.state.cache, user_id, recipe_id):
+    #     logger.debug("Dropped %s, which user %d did not like, from their cached recommendations.", recipe_id, user_id)
     return entry

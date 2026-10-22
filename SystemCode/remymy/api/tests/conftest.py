@@ -35,6 +35,21 @@ class FakeCache:
         self.store[key] = str(value).encode()
         self.ttls[key] = ex
 
+    def incr(self, key: str) -> int:
+        if self.down:
+            raise redis.ConnectionError("down")
+        value = int(self.store.get(key, b"0")) + 1
+        self.store[key] = str(value).encode()
+        return value
+
+    def expire(self, key: str, seconds: int) -> bool:
+        if self.down:
+            raise redis.ConnectionError("down")
+        if key not in self.store:
+            return False
+        self.ttls[key] = seconds
+        return True
+
     def delete(self, key: str) -> int:
         if self.down:
             raise redis.ConnectionError("down")

@@ -319,25 +319,32 @@ def test_the_recommender_is_built_on_the_catalog_database(tmp_path, monkeypatch)
     assert load_recommender() == {1, 2}
 
 
-def test_a_disliked_pick_leaves_the_cached_recommendations(stores, models, repository, cache):
+def test_the_recommendations_are_refreshed_once_more_than_ten_ratings_are_counted(stores, models, repository, cache):
     alice = seed_alice(stores)
-    key = f"recommendations:{alice}"
+    recommendations = f"recommendations:{alice}"
+    ratings = f"number_of_ratings:{alice}"
 
     with TestClient(app) as client:
-        first = client.get("/api/recommend/alice", params={"top_k": 3}).json()
-        # the cached entry has been there a while
-        cache.ttls[key] = 1234
-        disliked = client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": False})
-        liked = client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
-        second = client.get("/api/recommend/alice", params={"top_k": 3}).json()
+        client.get("/api/recommend/alice", params={"top_k": 3})
+        for like in [False, True] * 5:
+            assert client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": like}).status_code == 200
+        # ten ratings, likes and dislikes alike, each counted and each keeping the count a day from then
+        counted = int(cache.store[ratings]), cache.ttls[ratings]
+        still_cached = recommendations in cache.store
+        client.get("/api/recommend/alice", params={"top_k": 3})
+        calls_before_refresh = len(models.calls)
+        client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
+        # the eleventh drops the recommendations and the count
+        refreshed = recommendations not in cache.store and ratings not in cache.store
+        client.get("/api/recommend/alice", params={"top_k": 3})
+        client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": False})
 
-    assert disliked.status_code == liked.status_code == 200
-    assert [item["id"] for item in first["items"]] == ["167516", "175237", "168516"]
-    # served from the cache without the disliked one; the liked one stays
-    assert [item["id"] for item in second["items"]] == ["167516", "168516"]
-    assert len(models.calls) == 1
-    assert cache.ttls[key] == 1234
-    assert second["profile"] == first["profile"]
+    assert counted == (10, 86400)
+    assert still_cached and calls_before_refresh == 1
+    assert refreshed
+    assert len(models.calls) == 2
+    # the next rating counts from 1 again
+    assert int(cache.store[ratings]) == 1
 
 
 def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache):
