@@ -14,12 +14,21 @@ training cluster and labels are shown next to the prediction.
 """
 from functools import lru_cache
 import json
+import logging
 from pathlib import Path
 import re
 import sys
+import threading
 
 import nltk
 from nltk.corpus import stopwords
+
+try:
+    from .singleton import Singleton
+except ImportError:  # run as a file, as the inference scripts are
+    from singleton import Singleton
+
+logger = logging.getLogger(__name__)
 
 NUTRIENT_COLS = ["protein_g", "fat_g", "carb_g", "energy_kcal", "fiber_g", "sodium_mg",
                  "cholesterol_mg", "satfat_g", "sugars_g"]
@@ -117,35 +126,56 @@ def _norm_span(span, skip):
     return " ".join(w for w in normalize_description(span).split() if w not in skip)
 
 
-class TermExtractor:
-    """product / adj / verb terms of a description, with GLiNER and stanza loaded by load() or else on first use."""
+class TermExtractor(Singleton):
+    """product / adj / verb terms of a description, with GLiNER and stanza loaded by load() or else on first use.
 
-    def __init__(self, ner_model=NER_MODEL):
+    One per process: every TermExtractor() is the same instance, so the classifier and the clusterer share one copy of
+    GLiNER and stanza rather than each loading its own. Its lock lets one description through at a time, as neither
+    model is meant to be shared across threads and the two services each hold only their own lock."""
+
+    def _load(self, ner_model=NER_MODEL):
         self.ner_model = ner_model
         self._ner_pipeline = None
         self._pos_pipeline = None
+        self._lock = threading.Lock()
 
     def load(self):
-        """Load GLiNER and stanza now, downloading any not cached yet, rather than on the first description."""
-        self._ner()
-        self._pos()
+        """Load GLiNER and stanza now, downloading any not cached yet, rather than on the first description. Loading
+        them again does nothing."""
+        with self._lock:
+            self._ner()
+            self._pos()
         return self
 
     # held on the instance, not in an lru_cache(maxsize=1) shared by every extractor: two extractors would evict
     # each other's models and reload them on alternate calls
     def _ner(self):
         if self._ner_pipeline is None:
-            from gliner import GLiNER
-            self._ner_pipeline = GLiNER.from_pretrained(self.ner_model)
+            try:
+                from gliner import GLiNER
+                self._ner_pipeline = GLiNER.from_pretrained(self.ner_model)
+            except Exception as error:
+                # e.g. no network to download it, or a broken cache: the caller's service then answers 503, and the
+                # next call tries again
+                logger.exception("Loading GLiNER (%s) failed.", self.ner_model)
+                raise RuntimeError(f"GLiNER ({self.ner_model}) could not be loaded: {error}") from error
         return self._ner_pipeline
 
     def _pos(self):
         if self._pos_pipeline is None:
-            import stanza
-            self._pos_pipeline = stanza.Pipeline("en", processors="tokenize,pos", verbose=False)
+            try:
+                import stanza
+                self._pos_pipeline = stanza.Pipeline("en", processors="tokenize,pos", verbose=False)
+            except Exception as error:
+                logger.exception("Loading stanza's English tokenize and POS pipeline failed.")
+                raise RuntimeError(f"stanza could not be loaded: {error}") from error
         return self._pos_pipeline
 
     def __call__(self, description):
+        with self._lock:
+            return self._extract(description)
+
+    def _extract(self, description):
         text = NER_PREFIX + description
         entities = self._ner().inference([text], NER_LABELS, threshold=NER_THRESHOLD, flat_ner=True,
                                          multi_label=True)[0]

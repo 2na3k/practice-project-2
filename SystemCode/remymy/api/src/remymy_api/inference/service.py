@@ -131,32 +131,29 @@ class Clusterer(Singleton):
     # the model's neighbours are training foods, and not every one is in the priced catalog, so it is asked for more
     CANDIDATES_PER_ITEM = 4
 
-    def _load(self, recipe_clusterer: RecipeClusterer | None = None, extractor: TermExtractor | None = None,
+    def _load(self, 
               lookup: Path | None = None) -> None:
         """Loads what is not given: the clustering bundle and the encoder for a term it has not seen, and GLiNER and
-        stanza for a query's terms, downloading any not cached yet; then warms the loaded models up. One given its
-        recipe clusterer, as tests give a fake, is not warmed up."""
+        stanza for a query's terms, downloading any not cached yet; then warms the loaded models up."""
         started = time.perf_counter()
-        warm = recipe_clusterer is None
-        if recipe_clusterer is None:
-            recipe_clusterer = RecipeClusterer(clustering_dir(), lookup_path())
-            logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
-                        len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
-            recipe_clusterer.load_encoder()
+        recipe_clusterer = RecipeClusterer(clustering_dir(), lookup_path())
+        logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
+                    len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
+        recipe_clusterer.load_encoder()
         self.clusterer = recipe_clusterer
-        self.extractor = extractor or TermExtractor().load()
+        self.extractor = TermExtractor().load()
         self.lookup = lookup or lookup_path()
         # One query at a time, as for the classifier: neither the extractor's models nor the encoder are meant to be
         # shared across threads.
         self.lock = threading.Lock()
-        if warm:
-            logger.info("Clusterer models loaded in %.1fs.", time.perf_counter() - started)
-            self.warm_up()
+        logger.info("Clusterer models loaded in %.1fs.", time.perf_counter() - started)
+        self.warm_up()
 
     def warm_up(self) -> None:
         """One query through the whole pipeline, so the first person to open a recipe does not wait for what only a
         first call does: numba compiling UMAP's transform and the nearest-neighbour search."""
         started = time.perf_counter()
+        logger.info("Warming up clusterer")
         with self.lock:
             # an invented product term, so the encoder of unseen terms runs too
             item = build_item("Tomato soup, canned", self.extractor, terms={"product": ["remymy warm up"]},
@@ -170,7 +167,7 @@ class Clusterer(Singleton):
         try:
             with self.lock:
                 item = build_item(title, self.extractor, lookup=self.lookup)
-                result = self.clusterer.predict(item, k=top_k * self.CANDIDATES_PER_ITEM)
+            result = self.clusterer.predict(item, k=top_k * self.CANDIDATES_PER_ITEM)
         except EmptyQuery:
             raise
         except Exception:

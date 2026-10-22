@@ -16,6 +16,28 @@ from .schema import init_database
 logger = logging.getLogger(__name__)
 
 
+def load_term_extractor():
+    """GLiNER and stanza, which the classifier and the clusterer both read the terms of a description with, loaded
+    once: TermExtractor is a singleton, so their TermExtractor() is then this instance. None when their packages
+    (requirements-classifier.txt) are not installed or the models cannot be loaded; the classifier and the clusterer
+    then try loading them again themselves."""
+    started = time.perf_counter()
+    try:
+        from .inference.food_query import TermExtractor
+
+        # the singleton's first construction, with GLiNER and stanza loaded (downloaded the first time)
+        extractor = TermExtractor().load()
+    except ImportError as error:
+        logger.warning("The term extractor's packages are not installed (%s).", error)
+        return None
+    except Exception:
+        # e.g. GLiNER or stanza could not be downloaded
+        logger.exception("Loading the term extractor failed.")
+        return None
+    logger.info("Term extractor ready in %.1fs.", time.perf_counter() - started)
+    return extractor
+
+
 def load_recommender():
     """The inference service over the database's catalog, or None when there is no catalog to load."""
     with Session(database_engine()) as session:
@@ -59,8 +81,8 @@ def load_classifier():
 
 def load_clusterer():
     """The recipe clusterer with all its models loaded and warmed up, or None when its weights, packages or models are
-    missing (the cluster routes then answer 503). It needs the classifier's packages, and loads its own term extractor
-    so clustering does not wait on classification."""
+    missing (the cluster routes then answer 503). It needs the classifier's packages, and shares the classifier's term
+    extractor (TermExtractor is a singleton too), so GLiNER and stanza are loaded once."""
     started = time.perf_counter()
     try:
         from .inference.service import Clusterer, clustering_dir
@@ -82,24 +104,30 @@ def load_clusterer():
 
 
 def load_models() -> None:
-    """Load (and warm up) the recommender, the classifier and the clusterer, one after another: each is a singleton, so
-    a route's Recommender(), FoodClassifier() or Clusterer() is then the loaded instance, and a request only infers.
-    Until one is loaded, and if it cannot load, its routes answer 503."""
+    """Load (and warm up) the term extractor, the recommender, the clusterer and the classifier, one after another: each
+    is a singleton, so a route's Recommender(), FoodClassifier() or Clusterer() is then the loaded instance, and a
+    request only infers. The term extractor goes first, as the clusterer and the classifier share it. Until one is
+    loaded, and if it cannot load, its routes answer 503."""
     started = time.perf_counter()
     logger.info("Loading the models on thread %s.", threading.current_thread().name)
     loaded = []
 
-    try:
-        # each on its own: one that fails does not keep the others from loading
-        for name, load in (("recommender", load_recommender), ("classifier", load_classifier),
-                        ("clusterer", load_clusterer)):
-                loaded.append(load())
-    except Exception:
-        logger.exception("Loading the %s failed; its routes answer 503.", name)
-        loaded.append(None)
-    recommender, classifier, clusterer = loaded
-    logger.info("Models loaded in %.1fs; recommendations %s, classification %s, clustering %s.",
+    # each on its own: one that fails does not keep the others from loading
+    for name, load in (("term extractor", load_term_extractor), ("recommender", load_recommender),
+                       ("clusterer", load_clusterer), ("classifier", load_classifier)):
+        try:
+            logger.info(f"Loading {name}")
+            loaded.append(load())
+            logger.info(f"Loaded {name} successfully")
+        except Exception:
+            logger.exception("Loading the %s failed; its routes answer 503.", name)
+            loaded.append(None)
+            continue
+    # in the order loaded above
+    extractor, recommender, clusterer, classifier = loaded
+    logger.info("Models loaded in %.1fs; term extractor %s, recommendations %s, classification %s, clustering %s.",
                 time.perf_counter() - started,
+                "on" if extractor else "off",
                 "on" if recommender else "off (no catalog)",
                 "on" if classifier else "off",
                 "on" if clusterer else "off")
