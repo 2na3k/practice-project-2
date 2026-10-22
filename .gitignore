@@ -139,3 +139,149 @@ docs/drafts
 
 # Local Codex artifacts
 .codex-remymy/
+
+# --- OS / editors ---
+.DS_Store
+.DS_Store?
+.Trashes
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Environment / secrets ---
+.env
+.env.*
+.env.prod
+!.env.example
+!.env.sample
+*.local
+*.secret
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.python-version
+.venv/
+venv/
+env/
+ENV/
+.build/
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- uv ---
+# Keep uv.lock committed for reproducible applications.
+# Uncomment if this repository is a reusable library instead:
+# uv.lock
+
+# --- Node / npm / Next.js ---
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.yarn/cache/
+.yarn/install-state.gz
+.yarn/build-state.yml
+.nyc_output/
+coverage/
+.next/
+out/
+.turbo/
+.vercel/
+.svelte-kit/
+*.tsbuildinfo
+.eslintcache
+
+# Keep package manager lockfiles tracked:
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# --- Test / tooling output ---
+test-results/
+playwright-report/
+blob-report/
+vitest.config.*.timestamp-*
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Build, deploy, and local infrastructure ---
+*.local
+*.override.yml
+docker-compose.override.yml
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+.serverless/
+.aws-sam/
+
+# --- Generated / temporary files ---
+*.tmp
+*.temp
+*.bak
+*.swp
+.cache/
+tmp/
+temp/
+
+# --- Data and local databases ---
+*.db
+*.sqlite
+*.sqlite3
+*.mdb
+SystemCode/remymy/data/
+
+# --- Certificates and credentials ---
+*.p12
+*.pfx
+*.crt
+*.csr
+credentials.json
+service-account*.json
+
+# --- macOS / Linux runtime files ---
+*.pid
+*.seed
+*.pid.lock
+
+# user added
+docs/drafts
+
+# Local Codex artifacts
+.codex-remymy/
+
+# data and model outputs stay local: every CSV, and any model_artifacts folder at any depth
+*.csv
+model_artifacts/
