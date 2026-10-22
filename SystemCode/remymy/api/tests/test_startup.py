@@ -19,6 +19,8 @@ def test_the_api_answers_while_the_models_load_in_the_background(monkeypatch, ca
         release.wait(timeout=10)
         loaded.append(("recommender", threading.current_thread().name))
 
+    monkeypatch.setattr(main, "load_term_extractor",
+                        lambda: loaded.append(("term extractor", threading.current_thread().name)))
     monkeypatch.setattr(main, "load_recommender", slow_recommender)
     monkeypatch.setattr(main, "load_classifier", lambda: loaded.append(("classifier", threading.current_thread().name)))
     monkeypatch.setattr(main, "load_clusterer", lambda: loaded.append(("clusterer", threading.current_thread().name)))
@@ -32,10 +34,11 @@ def test_the_api_answers_while_the_models_load_in_the_background(monkeypatch, ca
         loader.join(timeout=10)
 
     assert health.status_code == 200
-    assert loading == []
-    # one after another, on their own thread
-    assert loaded == [("recommender", "remymy-model-loading"), ("classifier", "remymy-model-loading"),
-                      ("clusterer", "remymy-model-loading")]
+    # the term extractor loaded, the recommender not yet
+    assert loading == [("term extractor", "remymy-model-loading")]
+    # one after another, on their own thread, the term extractor first
+    assert loaded == [("term extractor", "remymy-model-loading"), ("recommender", "remymy-model-loading"),
+                      ("clusterer", "remymy-model-loading"), ("classifier", "remymy-model-loading")]
 
 
 def test_a_model_that_fails_to_load_does_not_keep_the_others_from_loading(monkeypatch, cache):
@@ -50,4 +53,4 @@ def test_a_model_that_fails_to_load_does_not_keep_the_others_from_loading(monkey
 
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
-    assert loaded == ["classifier", "clusterer"]
+    assert loaded == ["clusterer", "classifier"]

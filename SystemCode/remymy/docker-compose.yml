@@ -23,6 +23,8 @@ services:
       context: ./app
       dockerfile: Dockerfile
     image: remymy-app:dev
+    mem_limit: 512m
+    memswap_limit: 4096m
     restart: unless-stopped
     ports:
       - "${APP_PORT:-3000}:3000"
@@ -49,6 +51,8 @@ services:
       context: ./api
       dockerfile: Dockerfile
     image: remymy-api:dev
+    mem_limit: 512m
+    memswap_limit: 1024m
     restart: "no"
     environment:
       ENV: ${ENV:-nonprod}

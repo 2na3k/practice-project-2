@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -106,12 +108,22 @@ class FakeRecipeClusterer:
                 "neighbours": [{"fdc_id": 170000 + i} for i in range(k)]}
 
 
-def test_clusterer_keeps_the_nearest_catalog_foods():
+def clusterer_on(recipe_clusterer, extractor):
+    """A Clusterer on fakes. Made without Clusterer(), whose _load loads the real models; and not the singleton, so no
+    other test gets it."""
     from remymy_api.inference.service import Clusterer
 
+    clusterer = object.__new__(Clusterer)
+    clusterer.clusterer = recipe_clusterer
+    clusterer.extractor = extractor
+    clusterer.lookup = None
+    clusterer.lock = threading.Lock()
+    return clusterer
+
+
+def test_clusterer_keeps_the_nearest_catalog_foods():
     recipe_clusterer = FakeRecipeClusterer()
-    clusterer = Clusterer(recipe_clusterer, extractor=lambda description: {"product": ["chicken"], "adj": [], "verb": []},
-                          lookup=None)
+    clusterer = clusterer_on(recipe_clusterer, lambda description: {"product": ["chicken"], "adj": [], "verb": []})
 
     found = clusterer.cluster("Roast Chicken with Carrots", 2, FakeCatalog())
 
@@ -120,9 +132,7 @@ def test_clusterer_keeps_the_nearest_catalog_foods():
 
 
 def test_clusterer_lets_an_empty_title_through_as_empty_query():
-    from remymy_api.inference.service import Clusterer
-
-    clusterer = Clusterer(FakeRecipeClusterer(), extractor=lambda description: {}, lookup=None)
+    clusterer = clusterer_on(FakeRecipeClusterer(), lambda description: {})
 
     with pytest.raises(EmptyQuery):
         clusterer.cluster(", ,", 2, FakeCatalog())

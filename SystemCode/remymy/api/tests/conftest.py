@@ -11,6 +11,7 @@ from remymy_api.db import database_path
 from remymy_api.history import History
 from remymy_api.dependencies import get_recommender
 from remymy_api.inference.classification_service import FoodClassifier
+from remymy_api.inference.food_query import TermExtractor
 from remymy_api.inference.service import Clusterer, Recommender
 from remymy_api.recipe import Recipe
 from remymy_api.schema import FOOD_SCHEMA, connect, init_database
@@ -92,6 +93,7 @@ class FakeRecommender:
 def no_model(monkeypatch, tmp_path) -> None:
     """No test loads the real models and catalog unless it asks for them. Startup fills the catalog from CATALOG_PATH,
     which points at a file that is not there. Each test has a remymy.db of its own, and no old databases to import."""
+    monkeypatch.setattr(main, "load_term_extractor", lambda: None)
     monkeypatch.setattr(main, "load_recommender", lambda: None)
     monkeypatch.setattr(main, "load_classifier", lambda: None)
     monkeypatch.setattr(main, "load_clusterer", lambda: None)
@@ -99,7 +101,7 @@ def no_model(monkeypatch, tmp_path) -> None:
     # the background thread the API loads them on
     monkeypatch.setattr(main, "start_model_loading", main.load_models)
     # each test starts without the services' instances, so one a test constructs does not answer for the next
-    for service in (Recommender, FoodClassifier, Clusterer):
+    for service in (Recommender, FoodClassifier, Clusterer, TermExtractor):
         monkeypatch.setattr(service, "_instance", None)
     monkeypatch.setenv("CATALOG_PATH", str(tmp_path / "no-catalog.csv"))
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "state" / "remymy.db"))
