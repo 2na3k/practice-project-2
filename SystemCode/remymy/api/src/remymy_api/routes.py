@@ -19,9 +19,10 @@ from .cache import (
     reset_ratings,
     write_recommendations,
 )
-from .dependencies import Catalog, Users
+from .dependencies import Catalog, Classifying, Clustering, Recommending, Users
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
+from .schema import has_food_data
 from .repository.recipe_repository import is_food_id
 from .schemas import (
     CatalogFood,
@@ -36,6 +37,7 @@ from .schemas import (
     RecipeListResponse,
     RecipeSummary,
     RecommendationResponse,
+    SavedItem,
     User,
     UserProfileInput,
     UserRating,
@@ -58,10 +60,19 @@ def health() -> HealthResponse:
 
 @router.get("/ready", response_model=HealthResponse, tags=["health"])
 def ready() -> HealthResponse:
-    """Report readiness only after the normalized recipe database is usable."""
+    """Report readiness only after the database holds the normalized recipes the migration job loads."""
 
     connection = open_database()
-    close_database(connection)
+    try:
+        loaded = has_food_data(connection)
+    except sqlite3.Error:
+        logger.exception("Checking the recipes failed.")
+        loaded = False
+    finally:
+        close_database(connection)
+    if not loaded:
+        logger.warning("The database has no recipes yet; the migration job loads them.")
+        raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
     return HealthResponse(status="ok")
 
 
@@ -86,7 +97,8 @@ def list_recipes(
                 "))"
             )
             params.extend([pattern, pattern, pattern])
-        where = " WHERE r.title IS NOT NULL AND trim(r.title) <> ''"
+        # the Food.com recipes; the catalog foods' and user recipes' rows are there for saved_recipe
+        where = " WHERE r.kind = 'openrecipes' AND r.title IS NOT NULL AND trim(r.title) <> ''"
         if clauses:
             where += " AND " + " AND ".join(clauses)
         total = connection.execute(
@@ -136,7 +148,7 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     try:
         row = connection.execute(
             "SELECT recipe_id, title, quality_status FROM recipe "
-            "WHERE recipe_id = ? AND title IS NOT NULL AND trim(title) <> ''",
+            "WHERE recipe_id = ? AND kind = 'openrecipes' AND title IS NOT NULL AND trim(title) <> ''",
             (recipe_id,),
         ).fetchone()
         if row is None:
@@ -212,6 +224,7 @@ def get_recommendation(
     request: Request,
     users: Users,
     catalog: Catalog,
+    recommender: Recommending,
     top_k: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> RecommendationResponse:
     cache = request.app.state.cache
@@ -223,7 +236,6 @@ def get_recommendation(
     user_id = user_history[0].user_id
     recommendations = read_recommendations(cache, user_id)
     if recommendations is None:
-        recommender = request.app.state.recommender
         if recommender is None or catalog is None:
             logger.warning("Recommendations for user %d asked for, but no food catalog is loaded.", user_id)
             raise HTTPException(status_code=503, detail="Recommendations are unavailable: the food catalog is not loaded.")
@@ -240,13 +252,6 @@ def get_recommendation(
         logger.debug("Recommendations for user %d served from the cache.", user_id)
 
     return recommendations.model_copy(update={"items": recommendations.items[:top_k]})
-
-def loaded_classifier(request: Request):
-    classifier = request.app.state.classifier
-    if classifier is None:
-        raise HTTPException(status_code=503, detail="Classification is unavailable: the classifier is not loaded.")
-    return classifier
-
 
 def food_classification(result: dict) -> FoodClassification:
     """RecipeClassifier.predict's result → the response, with the training labels of a looked-up food."""
@@ -277,11 +282,10 @@ def classify_or_raise(classify, *args) -> FoodClassification:
 
 
 @router.post("/api/classify", response_model=FoodClassification, tags=["classification"])
-def classify_food(body: ClassifyRequest, request: Request) -> FoodClassification:
+def classify_food(body: ClassifyRequest, classifier: Classifying) -> FoodClassification:
     """Tag a food with recipe classes (the gated classifier chain of recipe_classification.ipynb). The query is a
     food description, optionally with nutrients per 100 g written into it; product / adj / verb terms are extracted
-    from it unless given. The first free-text query loads the extraction models, so it is slow."""
-    classifier = loaded_classifier(request)
+    from it unless given."""
     terms = {"product": body.product, "adj": body.adj, "verb": body.verb}
     return classify_or_raise(classifier.classify, body.query, body.nutrients, terms)
 
@@ -289,31 +293,22 @@ def classify_food(body: ClassifyRequest, request: Request) -> FoodClassification
 @router.get("/api/classify/{fdc_id}", response_model=FoodClassification, tags=["classification"])
 def classify_training_food(
     fdc_id: Annotated[int, Path(openapi_examples={"waffles": {"summary": "Waffles, buttermilk", "value": 167516}})],
-    request: Request,
+    classifier: Classifying,
 ) -> FoodClassification:
     """Tag a training food, looked up by fdc_id, with recipe classes; `training_labels` holds its labels in the
     training data for comparison."""
-    classifier = loaded_classifier(request)
     return classify_or_raise(classifier.classify_fdc, fdc_id)
-
-
-def loaded_clusterer(request: Request):
-    clusterer = request.app.state.clusterer
-    if clusterer is None:
-        raise HTTPException(status_code=503, detail="Clustering is unavailable: the clusterer is not loaded.")
-    return clusterer
 
 
 @router.post("/api/cluster", response_model=ClusteringResponse, tags=["clustering"])
 def cluster_recipe(
     body: ClusteringRequest,
-    request: Request,
+    clusterer: Clustering,
     catalog: Catalog,
     k: Annotated[int, Query(ge=1, le=50)] = 5,
 ) -> ClusteringResponse:
     """The k catalog foods nearest the item in its recipe cluster (the HDBSCAN model of recipe_clustering.ipynb). The
-    model reads the item's title as a food description; the first call loads the extraction models, so it is slow."""
-    clusterer = loaded_clusterer(request)
+    model reads the item's title as a food description; its models are loaded at startup."""
     if catalog is None:
         raise HTTPException(status_code=503, detail="Clustering is unavailable: no food catalog is loaded.")
     started = time.perf_counter()
@@ -392,6 +387,49 @@ def get_user_history(
                     title=titles.get(row.recipe_id), like=row.like, timestamp=row.timestamp)
         for row in rows
     ]
+
+
+@router.get("/api/users/{username}/saved", response_model=list[SavedItem], tags=["users"])
+def get_saved_recipes(username: str, users: Users) -> list[SavedItem]:
+    """The recipes the user saved for later, newest first: Food.com recipes, catalog foods and their own."""
+    try:
+        saved = users.fetch_saved(username)
+    except SQLAlchemyError:
+        logger.exception("Reading the saved recipes of %r failed.", username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    if saved is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return saved
+
+
+@router.put("/api/users/{username}/saved/{recipe_id}", response_model=SavedItem, tags=["users"])
+def save_recipe(username: str, recipe_id: str, users: Users) -> SavedItem:
+    """Save a recipe for later: a Food.com recipe, a catalog food by its fdc_id, or a user's own. Saving it again keeps
+    it as it was."""
+    try:
+        user_id = users.find_user_id(username)
+        if user_id is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        saved = users.save_recipe(user_id, recipe_id)
+    except SQLAlchemyError:
+        logger.exception("Saving recipe %s for %r failed.", recipe_id, username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Recipe not found.")
+    return saved
+
+
+@router.delete("/api/users/{username}/saved/{recipe_id}", status_code=204, tags=["users"])
+def unsave_recipe(username: str, recipe_id: str, users: Users) -> None:
+    """Take a recipe out of the user's saved ones; one they had not saved is gone already."""
+    try:
+        user_id = users.find_user_id(username)
+        if user_id is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        users.unsave_recipe(user_id, recipe_id)
+    except SQLAlchemyError:
+        logger.exception("Unsaving recipe %s for %r failed.", recipe_id, username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
 
 
 @router.put("/api/recipes/{recipe_id}/rating", response_model=UserRating, tags=["recipe"])

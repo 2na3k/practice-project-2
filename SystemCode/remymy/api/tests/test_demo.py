@@ -6,7 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from remymy_api.main import app
-from remymy_api.users import DEMO_USERNAME, init_user_database, open_user_database
+from remymy_api.db import database_path
+from remymy_api.schema import connect, init_database
+from remymy_api.users import DEMO_USERNAME
 
 DEMO_LIKES = [
     ("openrecipes:5210", True),
@@ -18,14 +20,13 @@ DEMO_LIKES = [
 
 
 @pytest.fixture
-def users(tmp_path, monkeypatch):
-    # no recipe database: the demo user is injected without one
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "missing-recipes.db"))
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
+def users():
+    # no recipes: the demo user is injected without them (conftest gives each test a remymy.db of its own)
+    pass
 
 
 def demo_history() -> list[tuple[str, bool]]:
-    connection = open_user_database()
+    connection = connect(database_path())
     try:
         return [
             (row["recipe_id"], bool(row["liked"]))
@@ -48,7 +49,7 @@ def test_demo_user_is_injected_once_with_the_schema(users, cache, monkeypatch, c
         pass
 
     assert demo_history() == DEMO_LIKES
-    connection = open_user_database()
+    connection = connect(database_path())
     try:
         (row,) = connection.execute(
             "SELECT json(preferences) AS preferences FROM app_user WHERE username = ?", (DEMO_USERNAME,)
@@ -64,13 +65,13 @@ def test_demo_user_is_injected_once_with_the_schema(users, cache, monkeypatch, c
 
 def test_an_existing_demo_history_is_kept(users, monkeypatch):
     monkeypatch.setenv("SEED_DEMO_USER", "true")
-    init_user_database()
-    connection = open_user_database()
+    init_database()
+    connection = connect(database_path())
     with connection:
         connection.execute("DELETE FROM user_history WHERE recipe_id <> 'openrecipes:5210'")
     connection.close()
 
-    init_user_database()
+    init_database()
 
     assert demo_history() == [("openrecipes:5210", True)]
 

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from conftest import add_recipes
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import event
@@ -13,35 +14,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from remymy_api import users as users_module
-from remymy_api.db import users_engine
+from remymy_api.db import database_engine, database_path
 from remymy_api.dependencies import get_recipe_repository
 from remymy_api.main import app
 from remymy_api.repository.user_repository import UserRepository
 from remymy_api.schemas import Preferences, UserRating
-from remymy_api.users import init_user_database, open_user_database, rate_item
+from remymy_api.schema import connect, init_database
+from remymy_api.users import rate_item
 
 
 @pytest.fixture
 def users(tmp_path, monkeypatch):
-    """A plain connection to a new users database, for the SQL schema's own tests. The recipe database holds
-    openrecipes:1 and openrecipes:2."""
-    recipes = tmp_path / "recipes.db"
-    with sqlite3.connect(recipes) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE recipe (recipe_id TEXT PRIMARY KEY, title TEXT, quality_status TEXT NOT NULL);
-            CREATE TABLE recipe_ingredient (recipe_id TEXT);
-            CREATE TABLE recipe_instruction (recipe_id TEXT);
-            INSERT INTO recipe VALUES
-              ('openrecipes:1', 'Tomato Soup', 'accepted'),
-              ('openrecipes:2', 'Apple Salad', 'accepted');
-            """
-        )
-    connection.close()
-    monkeypatch.setenv("DATABASE_PATH", str(recipes))
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
-    init_user_database()
-    connection = open_user_database()
+    """A plain connection to a new database, for the SQL schema's own tests. It holds the recipes openrecipes:1 and
+    openrecipes:2."""
+    add_recipes([("openrecipes:1", "Tomato Soup", "accepted"), ("openrecipes:2", "Apple Salad", "accepted")])
+    init_database()
+    connection = connect(database_path())
     yield connection
     connection.close()
 
@@ -49,7 +37,7 @@ def users(tmp_path, monkeypatch):
 @pytest.fixture
 def repo(users, cache):
     """The UserRepository on a session of that database."""
-    with Session(users_engine()) as session:
+    with Session(database_engine()) as session:
         yield UserRepository(session, cache)
 
 
@@ -61,7 +49,7 @@ def sql(users):
     def record(connection, cursor, statement, parameters, context, executemany) -> None:
         seen.append(statement)
 
-    engine = users_engine()
+    engine = database_engine()
     event.listen(engine, "before_cursor_execute", record)
     yield seen
     event.remove(engine, "before_cursor_execute", record)
@@ -242,7 +230,7 @@ def test_history_model_needs_like_or_not(like):
         UserRating(user_id=1, timestamp="2026-09-28T00:00:00Z", like=like, recipe_id="x")
 
 
-def test_a_database_with_ratings_keeps_them_as_likes(tmp_path, monkeypatch):
+def test_the_old_users_database_is_imported_once_with_its_ratings_as_likes(tmp_path, monkeypatch):
     path = tmp_path / "old-users.db"
     liked_column = "  liked      INTEGER NOT NULL CHECK (liked IN (0, 1)),  -- UserRating.like: 1 liked, 0 not\n"
     assert liked_column in users_module.SCHEMA
@@ -257,22 +245,31 @@ def test_a_database_with_ratings_keeps_them_as_likes(tmp_path, monkeypatch):
               (1, 5, 'openrecipes:1'), (1, 3, 'openrecipes:2'), (1, 2, 'openrecipes:3'), (1, NULL, 'openrecipes:4');
             """)
     connection.close()
-    monkeypatch.setenv("USER_DATABASE_PATH", str(path))
+    monkeypatch.setenv("LEGACY_USER_DATABASE_PATH", str(path))
 
-    init_user_database()
-    init_user_database()
-
-    connection = open_user_database()
+    init_database()
+    connection = connect(database_path())
     try:
-        columns = {row["name"] for row in connection.execute("PRAGMA table_info(user_history)")}
+        users = [tuple(row) for row in connection.execute("SELECT user_id, username FROM app_user")]
         rows = connection.execute("SELECT recipe_id, liked FROM user_history ORDER BY history_id").fetchall()
+        # once imported, never again: a user deleted since stays deleted
+        with connection:
+            connection.execute("DELETE FROM app_user")
     finally:
         connection.close()
-    assert "rating" not in columns
+    init_database()
+    connection = connect(database_path())
+    try:
+        left = connection.execute("SELECT count(*) FROM app_user").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert users == [(1, "alice")]
     # 3 to 5 liked, as the model's training labels them; 0 to 2 or no rating not
     assert [tuple(row) for row in rows] == [
         ("openrecipes:1", 1), ("openrecipes:2", 1), ("openrecipes:3", 0), ("openrecipes:4", 0),
     ]
+    assert left == 0
 
 
 def test_rating_a_recipe_adds_a_like_to_the_history(repo):

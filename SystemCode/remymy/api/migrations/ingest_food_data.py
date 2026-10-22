@@ -9,7 +9,9 @@ Example:
   python migrations/ingest_food_data.py \
     --recipes /data/13k-recipes.db \
     --fdc-dir /data/FoodData_Central_foundation_food_csv_2026-04-30 \
-    --output data/remymy-food.db
+    --output data/food-ingest.db
+
+migrations.bootstrap runs it into a temporary file and merges that into remymy.db.
 """
 
 from __future__ import annotations
@@ -31,196 +33,15 @@ from typing import Any, Iterable, Iterator
 
 logger = logging.getLogger("migrations.ingest_food_data")
 
-SCHEMA = """
-PRAGMA foreign_keys = ON;
+try:
+    from remymy_api.schema import FOOD_SCHEMA
+except ModuleNotFoundError:  # run as a script from the repository, without the API's src on PYTHONPATH
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from remymy_api.schema import FOOD_SCHEMA
 
-CREATE TABLE source_snapshot (
-  snapshot_id TEXT PRIMARY KEY,
-  source_name TEXT NOT NULL,
-  source_version TEXT NOT NULL,
-  source_uri TEXT NOT NULL,
-  sha256 TEXT NOT NULL,
-  license_text TEXT,
-  retrieved_at TEXT NOT NULL,
-  row_count INTEGER NOT NULL DEFAULT 0,
-  schema_hash TEXT NOT NULL
-);
-
-CREATE TABLE source_record (
-  source_record_id TEXT PRIMARY KEY,
-  snapshot_id TEXT NOT NULL REFERENCES source_snapshot(snapshot_id),
-  source_native_id TEXT NOT NULL,
-  record_type TEXT NOT NULL,
-  raw_payload TEXT NOT NULL,
-  raw_hash TEXT NOT NULL,
-  UNIQUE (snapshot_id, source_native_id, record_type)
-);
-
-CREATE TABLE quarantine_record (
-  quarantine_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  snapshot_id TEXT NOT NULL REFERENCES source_snapshot(snapshot_id),
-  source_native_id TEXT NOT NULL,
-  record_type TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  raw_payload TEXT NOT NULL
-);
-
-CREATE TABLE recipe (
-  recipe_id TEXT PRIMARY KEY,
-  source_snapshot_id TEXT NOT NULL REFERENCES source_snapshot(snapshot_id),
-  source_record_id TEXT NOT NULL UNIQUE REFERENCES source_record(source_record_id),
-  title TEXT,
-  instructions_raw TEXT,
-  description TEXT,
-  cuisine TEXT,
-  prep_minutes INTEGER,
-  cook_minutes INTEGER,
-  total_minutes INTEGER,
-  yield_text TEXT,
-  servings REAL,
-  quality_status TEXT NOT NULL,
-  raw_hash TEXT NOT NULL,
-  normalization_version TEXT NOT NULL
-);
-
-CREATE TABLE recipe_ingredient (
-  ingredient_id TEXT PRIMARY KEY,
-  recipe_id TEXT NOT NULL REFERENCES recipe(recipe_id),
-  position INTEGER NOT NULL,
-  raw_text TEXT NOT NULL,
-  quantity_value REAL,
-  quantity_min REAL,
-  quantity_max REAL,
-  unit_raw TEXT,
-  unit_normalized TEXT,
-  ingredient_text TEXT,
-  preparation TEXT,
-  optional INTEGER,
-  parse_status TEXT NOT NULL,
-  parse_confidence REAL
-);
-
-CREATE TABLE recipe_instruction (
-  recipe_id TEXT NOT NULL REFERENCES recipe(recipe_id),
-  position INTEGER NOT NULL,
-  text TEXT NOT NULL,
-  PRIMARY KEY (recipe_id, position)
-);
-
-CREATE TABLE food_category (
-  id TEXT PRIMARY KEY,
-  code TEXT,
-  description TEXT NOT NULL
-);
-
-CREATE TABLE measure_unit (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL
-);
-
-CREATE TABLE nutrient (
-  nutrient_id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  unit_name TEXT NOT NULL,
-  nutrient_number TEXT,
-  rank INTEGER
-);
-
-CREATE TABLE food (
-  fdc_id TEXT PRIMARY KEY,
-  snapshot_id TEXT NOT NULL REFERENCES source_snapshot(snapshot_id),
-  data_type TEXT NOT NULL,
-  description TEXT,
-  food_category_id TEXT,
-  publication_date TEXT,
-  foundation_flag INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE foundation_food (
-  fdc_id TEXT PRIMARY KEY REFERENCES food(fdc_id),
-  ndb_number TEXT,
-  footnote TEXT
-);
-
-CREATE TABLE food_nutrient (
-  observation_id TEXT PRIMARY KEY,
-  fdc_id TEXT NOT NULL REFERENCES food(fdc_id),
-  nutrient_id TEXT NOT NULL REFERENCES nutrient(nutrient_id),
-  snapshot_id TEXT NOT NULL REFERENCES source_snapshot(snapshot_id),
-  amount REAL,
-  data_points INTEGER,
-  derivation_id TEXT,
-  min_amount REAL,
-  max_amount REAL,
-  median_amount REAL,
-  footnote TEXT,
-  min_year_acquired INTEGER
-);
-
-CREATE TABLE food_portion (
-  portion_id TEXT PRIMARY KEY,
-  fdc_id TEXT REFERENCES food(fdc_id),
-  seq_num INTEGER,
-  amount REAL,
-  measure_unit_id TEXT REFERENCES measure_unit(id),
-  portion_description TEXT,
-  modifier TEXT,
-  gram_weight REAL,
-  data_points INTEGER,
-  footnote TEXT,
-  min_year_acquired INTEGER
-);
-
-CREATE TABLE food_lineage (
-  lineage_id TEXT PRIMARY KEY,
-  fdc_id TEXT REFERENCES food(fdc_id),
-  fdc_of_input_food TEXT,
-  ingredient_code TEXT,
-  ingredient_description TEXT,
-  unit TEXT,
-  portion_code TEXT,
-  portion_description TEXT,
-  gram_weight REAL,
-  retention_code TEXT
-);
-
-CREATE TABLE ingredient_food_match (
-  ingredient_id TEXT NOT NULL REFERENCES recipe_ingredient(ingredient_id),
-  fdc_id TEXT NOT NULL REFERENCES food(fdc_id),
-  candidate_rank INTEGER NOT NULL,
-  match_method TEXT NOT NULL,
-  match_score REAL NOT NULL,
-  accepted INTEGER NOT NULL DEFAULT 0,
-  review_status TEXT NOT NULL DEFAULT 'unreviewed',
-  mapping_version TEXT NOT NULL,
-  PRIMARY KEY (ingredient_id, fdc_id, mapping_version)
-);
-
-CREATE TABLE recipe_nutrition (
-  recipe_id TEXT NOT NULL REFERENCES recipe(recipe_id),
-  nutrient_id TEXT NOT NULL REFERENCES nutrient(nutrient_id),
-  amount REAL,
-  unit TEXT,
-  basis TEXT NOT NULL,
-  estimated INTEGER NOT NULL DEFAULT 1,
-  ingredient_coverage_pct REAL,
-  mass_coverage_pct REAL,
-  serving_count REAL,
-  confidence REAL,
-  calculation_version TEXT,
-  calculated_at TEXT,
-  PRIMARY KEY (recipe_id, nutrient_id, basis, calculation_version)
-);
-
-CREATE INDEX recipe_title_idx ON recipe(title);
-CREATE INDEX recipe_quality_idx ON recipe(quality_status);
-CREATE INDEX recipe_ingredient_recipe_idx ON recipe_ingredient(recipe_id, position);
-CREATE INDEX recipe_ingredient_text_idx ON recipe_ingredient(ingredient_text);
-CREATE INDEX food_description_idx ON food(description);
-CREATE INDEX food_foundation_idx ON food(foundation_flag, data_type);
-CREATE INDEX food_nutrient_food_idx ON food_nutrient(fdc_id, nutrient_id);
-CREATE INDEX food_portion_food_idx ON food_portion(fdc_id);
-"""
+# The food tables of remymy.db (remymy_api.schema owns them); this script fills a database of its own with them, which
+# migrations.bootstrap then merges into remymy.db.
+SCHEMA = "PRAGMA foreign_keys = ON;\n" + FOOD_SCHEMA
 
 
 NORMALIZATION_VERSION = "recipe-normalizer-v1"

@@ -3,8 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from remymy_api import main
-from remymy_api.dependencies import get_recipe_repository
+from remymy_api.dependencies import get_clusterer, get_recipe_repository
 from remymy_api.inference.food_query import EmptyQuery
 from remymy_api.main import app
 
@@ -45,10 +44,11 @@ def client(monkeypatch, tmp_path, cache):
 
 
 @pytest.fixture
-def clusterer(monkeypatch) -> FakeClusterer:
+def clusterer() -> FakeClusterer:
     fake = FakeClusterer()
-    monkeypatch.setattr(main, "load_clusterer", lambda classifier: fake)
-    return fake
+    app.dependency_overrides[get_clusterer] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_clusterer, None)
 
 
 def test_cluster_returns_the_k_nearest_catalog_foods_of_the_title(clusterer, client):

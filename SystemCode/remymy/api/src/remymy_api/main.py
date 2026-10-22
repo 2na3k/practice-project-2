@@ -8,34 +8,35 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from .cache import connect_cache
-from .db import catalog_database_path, catalog_engine, users_engine
-from .repository.recipe_repository import RecipeRepository, init_catalog_database
+from .db import database_engine, has_catalog
+from .repository.recipe_repository import RecipeRepository
 from .routes import router
-from .users import init_user_database
+from .schema import init_database
 
 logger = logging.getLogger(__name__)
 
 
 def load_recommender():
-    """The inference service over the catalog database, or None when there is no catalog to load."""
-    if not catalog_database_path().is_file():
-        # the recipe and user routes do not need the catalog, so the API still starts
-        logger.warning("No food catalog is loaded; recommendations answer 503.")
-        return None
-    started = time.perf_counter()
-    # Imported here so torch, hnswlib and the weights load when the API starts, not whenever this module is imported.
-    from .inference.service import Recommender
+    """The inference service over the database's catalog, or None when there is no catalog to load."""
+    with Session(database_engine()) as session:
+        if not has_catalog(session):
+            # the recipe and user routes do not need the catalog, so the API still starts
+            logger.warning("No food catalog is loaded; recommendations answer 503.")
+            return None
+        started = time.perf_counter()
+        # Imported here so torch, hnswlib and the weights load when the API starts, not whenever this module is imported.
+        from .inference.service import Recommender
 
-    # reads the catalog's foods and builds its ingredient index, which the requests' repositories then share
-    with Session(catalog_engine()) as session:
-        recommender = Recommender.load(RecipeRepository(session))
+        # the singleton's first construction: reads the catalog's foods and builds its ingredient index, which the
+        # requests' repositories then share; the routes' Recommender() is then this instance
+        recommender = Recommender(RecipeRepository(session))
     logger.info("Recommender ready in %.1fs.", time.perf_counter() - started)
     return recommender
 
 
 def load_classifier():
-    """The recipe classifier, or None when its weights or packages are missing (the classify routes then answer 503).
-    Its packages (requirements-classifier.txt) are not in the API image, so it is optional."""
+    """The recipe classifier with all its models loaded and warmed up, or None when its weights, packages or models are
+    missing (the classify routes then answer 503). Its packages (requirements-classifier.txt) are not in the API image, so it is optional."""
     started = time.perf_counter()
     try:
         from .inference.classification_service import FoodClassifier, classifier_dir
@@ -43,17 +44,23 @@ def load_classifier():
         if not classifier_dir().is_dir():
             logger.warning("No classifier weights at %s; classification answers 503.", classifier_dir())
             return None
-        classifier = FoodClassifier.load()
+        # the singleton's first construction: the routes' FoodClassifier() is then this instance, its models loaded
+        classifier = FoodClassifier()
     except ImportError as error:
         logger.warning("The classifier's packages are not installed (%s); classification answers 503.", error)
+        return None
+    except Exception:
+        # e.g. GLiNER, stanza or the encoder could not be downloaded
+        logger.exception("Loading the classifier failed; classification answers 503.")
         return None
     logger.info("Classifier ready in %.1fs.", time.perf_counter() - started)
     return classifier
 
 
-def load_clusterer(classifier):
-    """The recipe clusterer, or None when its weights or packages are missing (the cluster routes then answer 503). It
-    needs the classifier's packages, and shares the classifier's term extractor when there is one."""
+def load_clusterer():
+    """The recipe clusterer with all its models loaded and warmed up, or None when its weights, packages or models are
+    missing (the cluster routes then answer 503). It needs the classifier's packages, and loads its own term extractor
+    so clustering does not wait on classification."""
     started = time.perf_counter()
     try:
         from .inference.service import Clusterer, clustering_dir
@@ -61,39 +68,67 @@ def load_clusterer(classifier):
         if not clustering_dir().is_dir():
             logger.warning("No clustering weights at %s; clustering answers 503.", clustering_dir())
             return None
-        clusterer = (Clusterer.load(classifier.extractor, classifier.lock) if classifier is not None
-                     else Clusterer.load())
+        # the singleton's first construction: the routes' Clusterer() is then this instance, its models loaded
+        clusterer = Clusterer()
     except ImportError as error:
         logger.warning("The clusterer's packages are not installed (%s); clustering answers 503.", error)
         return None
+    except Exception:
+        # e.g. GLiNER, stanza or the encoder could not be downloaded
+        logger.exception("Loading the clusterer failed; clustering answers 503.")
+        return None
     logger.info("Clusterer ready in %.1fs.", time.perf_counter() - started)
     return clusterer
+
+
+def load_models() -> None:
+    """Load (and warm up) the recommender, the classifier and the clusterer, one after another: each is a singleton, so
+    a route's Recommender(), FoodClassifier() or Clusterer() is then the loaded instance, and a request only infers.
+    Until one is loaded, and if it cannot load, its routes answer 503."""
+    started = time.perf_counter()
+    logger.info("Loading the models on thread %s.", threading.current_thread().name)
+    loaded = []
+
+    try:
+        # each on its own: one that fails does not keep the others from loading
+        for name, load in (("recommender", load_recommender), ("classifier", load_classifier),
+                        ("clusterer", load_clusterer)):
+                loaded.append(load())
+    except Exception:
+        logger.exception("Loading the %s failed; its routes answer 503.", name)
+        loaded.append(None)
+    recommender, classifier, clusterer = loaded
+    logger.info("Models loaded in %.1fs; recommendations %s, classification %s, clustering %s.",
+                time.perf_counter() - started,
+                "on" if recommender else "off (no catalog)",
+                "on" if classifier else "off",
+                "on" if clusterer else "off")
+
+
+def start_model_loading() -> threading.Thread:
+    """Start loading the models on a thread of their own, and return it."""
+    thread = threading.Thread(target=load_models, name="remymy-model-loading", daemon=True)
+    thread.start()
+    return thread
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting the API.")
     app.state.cache = connect_cache()
-    # with SEED_DEMO_USER, this also injects the demo user
-    init_user_database()
-    # builds the catalog database from the catalog CSV, or adds the CSV's new foods to it
-    init_catalog_database()
-    app.state.recommender = load_recommender()
-    app.state.classifier = load_classifier()
-    app.state.clusterer = load_clusterer(app.state.classifier)
-    if app.state.clusterer is not None and hasattr(app.state.clusterer, "warm_up"):
-        # the models its first query needs load, or download, in the background: the API answers meanwhile
-        threading.Thread(target=app.state.clusterer.warm_up, name="remymy-clusterer-warm-up", daemon=True).start()
-    logger.info("API ready; recommendations %s, classification %s, clustering %s.",
-                "on" if app.state.recommender else "off (no catalog)",
-                "on" if app.state.classifier else "off",
-                "on" if app.state.clusterer else "off")
+    # creates remymy.db's tables, imports the old databases the first time, migrates the users' data (and with
+    # SEED_DEMO_USER injects the demo user), and adds the catalog CSV's new foods
+    init_database()
+    # the models load on a thread of their own, which startup does not wait for: the API answers (and passes its health
+    # check) at once, and each model's routes answer 503 until it is loaded. Loading them takes minutes the first time
+    # (GLiNER, stanza and the encoder download).
+    start_model_loading()
+    logger.info("API ready; the models are loading in the background.")
     try:
         yield
     finally:
         app.state.cache.close()
-        users_engine().dispose()
-        catalog_engine().dispose()
+        database_engine().dispose()
         logger.info("API stopped.")
 
 

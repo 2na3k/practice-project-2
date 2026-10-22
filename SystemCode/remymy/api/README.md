@@ -68,35 +68,52 @@ not in the image: without them or the weights, both routes answer `503`. The fir
 query loads GLiNER and stanza (about 20 s, and stanza downloads its English model once); later
 queries take well under a second, one at a time.
 
-## Database availability
+## Database
 
-Set `DATABASE_PATH` to the ingested SQLite file. The container listens on port
-`8002`, with a default database path of `/data/remymy-food.db`. `/health`
-reports process liveness, while `/ready` validates database availability for
-container readiness. Recipe routes return a generic `503 Recipe data is
-unavailable.` when the file is missing, invalid, or missing required recipe
-tables. No local path or SQLite error is returned to callers.
+Everything the API keeps is in one SQLite file, `remymy.db` at `DATABASE_PATH`
+(default `/state/remymy.db`, on the `remymy-user-data` volume in compose): the
+Food.com recipes and FoodData Central tables, the priced catalog, the users,
+their history and their saved recipes. One file lets the tables refer to each
+other with real foreign keys. `src/remymy_api/schema.py` owns the schema, which
+needs SQLite 3.45 or newer for JSONB. On startup `init_database` creates the
+tables that are missing, adds the catalog CSV's new foods, and migrates the
+users' data. The first time, it also imports the old databases when they are
+there: the recipes of `LEGACY_FOOD_DATABASE_PATH` (default
+`/data/remymy-food.db`) and the users, history and recipes of
+`LEGACY_USER_DATABASE_PATH` (default `/state/remymy-users.db`). After that
+neither file is read.
 
-## Users database
+Every recipe the app knows has a row in `recipe`, whatever its `kind`:
+`openrecipes` for the Food.com recipes the migration job loads, `catalog` for
+each catalog food (by its `fdc_id`), and `user` for a recipe a user wrote
+(`user-recipe:<n>`). Triggers (`schema.RECIPE_SYNC`) add the catalog's and the
+users' rows, and remove a user recipe's row when it is deleted. The recipe
+routes list and show only the `openrecipes` ones.
 
-Users and their recipe history live in a second SQLite file,
-`USER_DATABASE_PATH` (default `/state/remymy-users.db`, on the
-`remymy-user-data` volume in compose). It is kept apart from the recipe
-database because that one is read-only and replaced on every rebuild. The API
-creates the schema on startup if it is missing, which needs SQLite 3.45 or
-newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
-recipe database; SQLite cannot enforce that across files, so `add_history`
-checks it in code.
+The container listens on port `8002`. `/health` reports process liveness, while
+`/ready` reports readiness only once the database holds the recipes. Recipe
+routes return a generic `503 Recipe data is unavailable.` when the file is
+missing or lacks the recipe tables. No local path or SQLite error is returned to
+callers.
+
+## Users and saved recipes
 
 `UserRepository` (`src/remymy_api/repository/user_repository.py`) reads and
-writes users and their history through the ORM: `models.AppUser` (its
-`preferences` written with `jsonb()` and read with `json()`) and
-`models.UserHistoryEntry`. It looks a username up in Redis before the
-database, and each write commits its own transaction. `app_user` and
-`user_history` are still created by the SQL in `users.py` (`SCHEMA`), for the
-JSON checks and triggers on `preferences`; `users.py` also keeps the rating
-migration, the demo user, and `rate_item`, which checks a rated id is a recipe
-or a catalog food before `UserRepository.add_history` records it.
+writes users, their history and their saved recipes through the ORM:
+`models.AppUser` (its `preferences` written with `jsonb()` and read with
+`json()`), `models.UserHistoryEntry` and `models.SavedRecipe`. It looks a
+username up in Redis before the database, and each write commits its own
+transaction. `app_user`, `user_history` and `saved_recipe` are still created by
+the SQL in `users.py` (`SCHEMA`), for the JSON checks and triggers on
+`preferences`. `users.py` also keeps the rating migration, the demo user, and
+`rate_item`, which checks a rated id is a recipe or a catalog food before
+`UserRepository.add_history` records it.
+
+`saved_recipe` (`user_id` → `app_user`, `recipe_id` → `recipe`, both
+`ON DELETE CASCADE`) holds the recipes a user saved for later, of any kind.
+`GET /api/users/{username}/saved` lists them newest first. `PUT` and `DELETE`
+on `/api/users/{username}/saved/{recipe_id}` save one or take it out; saving
+one twice keeps it as it was. Deleting a user or a recipe deletes its saves.
 
 The recipes users write themselves are ORM-only tables (`models.py`):
 `user_recipe` (ingredient and step lines as JSON arrays, a column per nutrient
@@ -105,18 +122,17 @@ it or the user added it). `create_tables` creates them on startup after the SQL
 schema. `POST /api/recipes` (body `UserRecipeCreate`, response
 `UserRecipeResponse`) is declared and answers `501` until it is implemented.
 
-## Catalog database
+## Catalog
 
 `RecipeRepository` (`src/remymy_api/repository/recipe_repository.py`)
-reads the priced food catalog from a third SQLite file,
-`CATALOG_DATABASE_PATH` (default `/state/remymy-catalog.db`), through the ORM
-(`models.CatalogFoodRecord`, on its own `CatalogBase`). On startup
+reads the priced food catalog, the `price_mapped_nutrients` table of
+`remymy.db`, through the ORM (`models.CatalogFoodRecord`). On startup
 `init_catalog_database` brings it up to date with the catalog CSV at
 `CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`):
 `RecipeRepository.from_csv_to_db` creates the table if it is missing and
 inserts only the CSV rows whose `fdc_id` it does not hold; stored rows are not
-updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV an
-existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
+updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV the
+stored catalog is used as it is. It exposes `fdc_ids`, `all_foods`,
 `foods_by_ids`, `food` and `search` (case-insensitive on the description), and
 `digest`, which turns a recipe's ingredient lines into a `Recipe`
 (`src/remymy_api/recipe.py`): the priced foods the lines match, each line
@@ -159,9 +175,10 @@ python3 serve.py
 ```
 
 `serve.py` fills in local defaults for anything you have not set:
-`DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./data/remymy-users.db`,
+`DATABASE_PATH=./data/remymy.db`,
+`LEGACY_FOOD_DATABASE_PATH=../data/remymy-food.db`,
+`LEGACY_USER_DATABASE_PATH=./data/remymy-users.db`,
 `CATALOG_PATH=../data/price_mapped_nutrients.csv`,
-`CATALOG_DATABASE_PATH=./data/remymy-catalog.db`,
 `REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.
@@ -174,22 +191,26 @@ its timing; failures that answer a generic `503` are logged with their cause;
 
 ## Bootstrap and ingestion
 
-The bootstrap command is idempotent for an existing valid database. It runs
-SQLite `quick_check` and verifies the required recipe tables, then exits 0. If
-the database is missing, it fails with an actionable message unless both
-source paths are explicitly supplied:
+The bootstrap command (`api-migrate` in compose) makes sure `remymy.db` holds
+the recipes. It is idempotent: a database that holds them passes SQLite
+`quick_check` and the recipe-table checks, then the command exits 0. A database
+without them gets the old recipe database's when there is one
+(`--legacy-database`, default `LEGACY_FOOD_DATABASE_PATH`). Otherwise the
+command ingests the sources, which must be supplied explicitly:
 
 ```bash
-DATABASE_PATH=/data/remymy-food.db \
+DATABASE_PATH=/state/remymy.db \
 RECIPES_SOURCE=/data/13k-recipes.db \
 FDC_SOURCE_DIR=/data/FoodData_Central_foundation_food_csv_2026-04-30 \
 python migrations/bootstrap.py
 ```
 
 The same values can be passed with `--database-path`, `--recipes`, and
-`--fdc-dir`. A missing database is written to a temporary file in the target
-directory, validated, and atomically replaced into place only after ingestion
-completes. Use `--validate-only` to prohibit ingestion.
+`--fdc-dir`. The ingest is written to a temporary file next to `remymy.db` and
+validated. `schema.merge_food_data` then merges it in, in one transaction, with
+upserts: a row already there is updated, never replaced or deleted, so the
+saves and history that refer to a recipe stay. The file is never swapped, as it
+also holds the users. Use `--validate-only` to prohibit loading.
 
 The ingestion CLI can also be run directly:
 
@@ -198,5 +219,5 @@ python migrations/ingest_food_data.py \
   --recipes /data/13k-recipes.db \
   --fdc-dir /data/FoodData_Central_foundation_food_csv_2026-04-30 \
   --fdc-release 2026-04 \
-  --output /data/remymy-food.db
+  --output /tmp/food-ingest.db
 ```

@@ -187,9 +187,9 @@ next to it.
 
 At startup the API:
 
-1. Creates the shared `recipe_repository`, which builds the catalog database
-   (`CATALOG_DATABASE_PATH`) from `price_mapped_nutrients.csv` or adds the CSV's
-   new foods to it, and reads every food from it: 10,658 FDC foods, each with a
+1. Creates the shared `recipe_repository`, which fills the catalog table of
+   `remymy.db` (`DATABASE_PATH`) from `price_mapped_nutrients.csv` or adds the
+   CSV's new foods to it, and reads every food from it: 10,658 FDC foods, each with a
    price (the sum of its FairPrice item prices, in SGD) and nutrients per 100 g.
    Missing nutrients take the catalog median.
 2. Embeds every catalog food with the ItemEncoder and builds an HNSW index with
@@ -453,16 +453,14 @@ Storage:
 
 | Store | Location | Contents |
 | --- | --- | --- |
-| Recipe database | `data/remymy-food.db`, mounted read-only | `recipe`, `recipe_ingredient`, `recipe_instruction`, plus FDC Foundation Foods tables. Built by `api/migrations/bootstrap.py` and replaced on rebuild |
-| Users database | `USER_DATABASE_PATH`, the `remymy-user-data` volume in compose | `app_user` (`user_id`, unique `username`, `preferences` as SQLite JSONB, `created_at`) and `user_history` (`user_id` → `app_user`, `timestamp`, `liked` 1 or 0, `recipe_id`). A database from before likes has its 0–5 ratings turned into likes on startup, 3 to 5 liked |
-| Redis | `redis` service, 256 MB, least-recently-used eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON |
-| Catalog database | `CATALOG_DATABASE_PATH`, the `remymy-user-data` volume in compose | `price_mapped_nutrients`: the priced FDC foods, one row per `fdc_id`. `recipe_repository` creates it on startup from `data/price_mapped_nutrients.csv`, adds the CSV's new `fdc_id`s, and serves it to the inference service |
+| `remymy.db` | `DATABASE_PATH`, the `remymy-user-data` volume in compose | Everything: `recipe` (a row for every recipe the app knows, by `kind`: the Food.com recipes, each catalog food, each user recipe), `recipe_ingredient`, `recipe_instruction` and the FDC Foundation Foods tables, loaded by `api/migrations/bootstrap.py` with upserts; `price_mapped_nutrients`, the priced FDC foods, one row per `fdc_id`, filled on startup from `data/price_mapped_nutrients.csv`; `app_user` (`user_id`, unique `username`, `preferences` as SQLite JSONB, `created_at`), `user_history` (`user_id` → `app_user`, `timestamp`, `liked` 1 or 0, `recipe_id`) and `saved_recipe` (`user_id` → `app_user`, `recipe_id` → `recipe`, both `ON DELETE CASCADE`). The old `remymy-food.db` and `remymy-users.db` are imported once, the first time |
+| Redis | `redis` service, 256 MB, least-recently-used eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON; `number_of_ratings:{user_id}` → ratings since the recommendations were cached |
 
-The users database enforces the preference rules itself: a `CHECK` constraint
-holds `preferences` to exactly the three keys and their allowed values, and a
-trigger rejects non-string cuisines. `user_history.recipe_id` points at
-`recipe.recipe_id` in the recipe database. SQLite cannot enforce a foreign key
-across files, so `add_history` checks it in code.
+The database enforces the preference rules itself: `CHECK` constraints hold
+each key of `preferences` to its allowed values, and triggers reject
+non-string cuisines and unknown allergens. With everything in one file,
+`saved_recipe` refers to its user and recipe with real foreign keys.
+`user_history.recipe_id` has none, so `add_history` checks it in code.
 
 ### Configuration
 
@@ -470,10 +468,10 @@ Data API:
 
 | Variable | Docker default | `api/serve.py` default | Purpose |
 | --- | --- | --- | --- |
-| `DATABASE_PATH` | `/data/remymy-food.db` | `../data/remymy-food.db` | Recipe database |
-| `USER_DATABASE_PATH` | `/state/remymy-users.db` | `./data/remymy-users.db` | Users database, created on startup |
-| `CATALOG_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog database is built from |
-| `CATALOG_DATABASE_PATH` | `/state/remymy-catalog.db` | `./data/remymy-catalog.db` | Catalog database, created and updated on startup |
+| `DATABASE_PATH` | `/state/remymy.db` | `./data/remymy.db` | The one database, created on startup |
+| `LEGACY_FOOD_DATABASE_PATH` | `/data/remymy-food.db` | `../data/remymy-food.db` | Old recipe database, merged in once when `remymy.db` has no recipes |
+| `LEGACY_USER_DATABASE_PATH` | `/state/remymy-users.db` | `./data/remymy-users.db` | Old users database, imported once into a `remymy.db` without users |
+| `CATALOG_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog is filled from |
 | `ARTIFACT_DIR` | `weights/gru_xattn_reranker` | same | Model weights and config |
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
 | `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Cache |
@@ -484,7 +482,8 @@ Data API:
 
 ### Building the recipe database
 
-`api/migrations/bootstrap.py` builds `data/remymy-food.db` from two sources:
+`api/migrations/bootstrap.py` loads the recipes into `remymy.db` from two sources (or, the first time, from the old
+`data/remymy-food.db`):
 
 - **`--recipes`:** the 13k Open Recipes dataset, as a `.csv` with `id`,
   `title`, `ingredients` and `instructions` columns, or as a `.db` with a

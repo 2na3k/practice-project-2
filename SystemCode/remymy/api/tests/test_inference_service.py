@@ -53,7 +53,7 @@ def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatc
     init_catalog_database(tmp_path / "catalog.db", write_catalog(tmp_path / "catalog.csv", rows))
     with Session(sqlite_engine(tmp_path / "catalog.db")) as session:
         repository = RecipeRepository(session)
-        recommender = Recommender.load(repository)
+        recommender = Recommender(repository)
         soup = repository.digest("openrecipes:1", ["chicken breast", "tomatoes", "unknown thing"])
     history = History(1)
     history.add(UserRating(user_id=1, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=True,

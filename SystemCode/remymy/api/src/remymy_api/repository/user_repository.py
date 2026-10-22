@@ -1,4 +1,5 @@
-"""The users database's users and their history, through the ORM (models.AppUser and models.UserHistoryEntry)."""
+"""The users, their history and their saved recipes, through the ORM (models.AppUser, models.UserHistoryEntry and
+models.SavedRecipe)."""
 from __future__ import annotations
 
 import logging
@@ -6,14 +7,17 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 from redis import Redis
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ..cache import read_user_id, write_user_id
-from ..models import NOW, AppUser, UserHistoryEntry
-from ..schemas import Preferences, User, UserRating
+from ..models import NOW, AppUser, RecipeEntry, SavedRecipe, UserHistoryEntry
+from ..schemas import Preferences, SavedItem, User, UserRating
 
 logger = logging.getLogger(__name__)
+
+# recipe.kind as a SavedItem's kind
+SAVED_KINDS = {"openrecipes": "recipe", "catalog": "food", "user": "user"}
 
 
 class UserRepository:
@@ -127,3 +131,42 @@ class UserRepository:
             user.preferences = preferences.model_dump()
         logger.debug("Set the preferences of user %d.", user_id)
         return User(id=user.user_id, username=user.username, preferences=preferences)
+
+    def fetch_saved(self, username: str) -> list[SavedItem] | None:
+        """The recipes the user saved, newest first; None for an unknown username."""
+        user_id = self.find_user_id(username)
+        if user_id is None:
+            return None
+        rows = self.session.execute(
+            select(SavedRecipe.recipe_id, SavedRecipe.saved_at, RecipeEntry.title, RecipeEntry.kind)
+            .join(RecipeEntry, RecipeEntry.recipe_id == SavedRecipe.recipe_id)
+            .where(SavedRecipe.user_id == user_id)
+            .order_by(SavedRecipe.saved_at.desc(), SavedRecipe.recipe_id)
+        )
+        return [SavedItem(recipe_id=recipe_id, kind=SAVED_KINDS[kind], title=title, saved_at=saved_at)
+                for recipe_id, saved_at, title, kind in rows]
+
+    def save_recipe(self, user_id: int, recipe_id: str) -> SavedItem | None:
+        """Save a recipe of any kind for the user; one saved already keeps the time it was. None for a recipe the
+        database does not know. Callers check the user exists; an unknown user_id is an IntegrityError."""
+        with self._transaction():
+            recipe = self.session.get(RecipeEntry, recipe_id)
+            if recipe is None:
+                return None
+            saved = self.session.get(SavedRecipe, (user_id, recipe_id))
+            if saved is None:
+                saved = SavedRecipe(user_id=user_id, recipe_id=recipe_id)
+                self.session.add(saved)
+                self.session.flush()
+            item = SavedItem(recipe_id=recipe_id, kind=SAVED_KINDS[recipe.kind], title=recipe.title,
+                             saved_at=saved.saved_at)
+        logger.debug("User %d saved recipe %s.", user_id, recipe_id)
+        return item
+
+    def unsave_recipe(self, user_id: int, recipe_id: str) -> bool:
+        """Take a recipe out of the user's saved ones; whether it was saved."""
+        with self._transaction():
+            removed = self.session.execute(
+                delete(SavedRecipe).where(SavedRecipe.user_id == user_id, SavedRecipe.recipe_id == recipe_id)
+            ).rowcount
+        return bool(removed)

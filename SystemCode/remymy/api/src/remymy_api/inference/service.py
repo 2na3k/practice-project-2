@@ -13,6 +13,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from statistics import median
 
+from sqlalchemy.orm import Session
+
+from ..db import database_engine
 from ..history import History
 from ..recipe import Recipe
 from ..repository.recipe_repository import RecipeRepository
@@ -24,6 +27,7 @@ from .classification_service import lookup_path
 from .food_query import NUTRIENT_COLS, EmptyQuery, TermExtractor, build_item
 from .model_inference_recipe_clustering import DEFAULT_ARTIFACTS as CLUSTERING_ARTIFACTS
 from .model_inference_recipe_clustering import RecipeClusterer
+from .singleton import Singleton
 
 logger = logging.getLogger(__name__)
 
@@ -70,21 +74,29 @@ def catalog_recipes(foods: list[CatalogFood]) -> list[dict]:
     return recipes
 
 
-class Recommender:
-    """The retrieval pipeline, built from the repository's catalog."""
+class Recommender(Singleton):
+    """The retrieval pipeline, built from the catalog, one per process: every Recommender() is the same instance.
+    Startup constructs it on the database's catalog; a route's Recommender() is then that loaded instance."""
 
-    def __init__(self, pipeline: RetrievalPipeline) -> None:
+    def _load(self, repository: RecipeRepository | None = None, pipeline: RetrievalPipeline | None = None) -> None:
+        """The given pipeline, or one over the repository's catalog (the database's when no repository is given).
+        The repository's session is only read during the load."""
+        if pipeline is None:
+            if repository is None:
+                with Session(database_engine()) as session:
+                    pipeline = self._build(RecipeRepository(session))
+            else:
+                pipeline = self._build(repository)
         self.pipeline = pipeline
 
-    @classmethod
-    def load(cls, repository: RecipeRepository) -> Recommender:
-        """The pipeline over the catalog's foods. The repository's session is only read during the load."""
+    @staticmethod
+    def _build(repository: RecipeRepository) -> RetrievalPipeline:
         foods = repository.all_foods()
         pipeline = RetrievalPipeline.from_recipes(catalog_recipes(foods), artifact_dir(), index_dir())
         # at startup, so the first recommendation does not wait for the catalog's index to be built
         keys = repository.load_ingredient_index()
         logger.info("Recommender loaded: %d catalog foods, %d ingredient keys.", len(foods), keys)
-        return cls(pipeline)
+        return pipeline
 
     def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
                   candidates: int = 100, preferences: Mapping | None = None) -> list[dict]:
@@ -113,41 +125,44 @@ class Recommender:
             for result in results
         ]
 
-class Clusterer:
+class Clusterer(Singleton):
+    """The recipe clusterer, one per process: every Clusterer() is the same instance. The first construction, at
+    startup, loads and warms up every model a query reads, so a query only infers; later ones ignore their arguments."""
     # the model's neighbours are training foods, and not every one is in the priced catalog, so it is asked for more
     CANDIDATES_PER_ITEM = 4
 
-    def __init__(self, recipe_clusterer: RecipeClusterer, extractor: TermExtractor, lookup: Path,
-                 lock: threading.Lock | None = None) -> None:
+    def _load(self, recipe_clusterer: RecipeClusterer | None = None, extractor: TermExtractor | None = None,
+              lookup: Path | None = None) -> None:
+        """Loads what is not given: the clustering bundle and the encoder for a term it has not seen, and GLiNER and
+        stanza for a query's terms, downloading any not cached yet; then warms the loaded models up. One given its
+        recipe clusterer, as tests give a fake, is not warmed up."""
+        started = time.perf_counter()
+        warm = recipe_clusterer is None
+        if recipe_clusterer is None:
+            recipe_clusterer = RecipeClusterer(clustering_dir(), lookup_path())
+            logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
+                        len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
+            recipe_clusterer.load_encoder()
         self.clusterer = recipe_clusterer
-        self.extractor = extractor
-        self.lookup = lookup
-        # One query at a time, as for the classifier; when the two share an extractor they share this lock too.
-        self.lock = lock or threading.Lock()
-
-    @classmethod
-    def load(cls, extractor: TermExtractor | None = None, lock: threading.Lock | None = None) -> Clusterer:
-        """The clusterer, on the classifier's extractor and lock when given, so GLiNER and stanza load only once."""
-        recipe_clusterer = RecipeClusterer(clustering_dir(), lookup_path())
-        logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
-                    len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
-        return cls(recipe_clusterer, extractor or TermExtractor(), lookup_path(), lock)
+        self.extractor = extractor or TermExtractor().load()
+        self.lookup = lookup or lookup_path()
+        # One query at a time, as for the classifier: neither the extractor's models nor the encoder are meant to be
+        # shared across threads.
+        self.lock = threading.Lock()
+        if warm:
+            logger.info("Clusterer models loaded in %.1fs.", time.perf_counter() - started)
+            self.warm_up()
 
     def warm_up(self) -> None:
-        """Load every model a first query reads, GLiNER and stanza for its terms and the encoder for a term the
-        clusterer has not seen, downloading any not cached yet, so the first person to open a recipe does not wait for
-        them. Run on a background thread at startup; a failure only leaves the loading to that first query."""
+        """One query through the whole pipeline, so the first person to open a recipe does not wait for what only a
+        first call does: numba compiling UMAP's transform and the nearest-neighbour search."""
         started = time.perf_counter()
-        try:
-            with self.lock:
-                # an invented product term, so the encoder of unseen terms loads too
-                item = build_item("Tomato soup, canned", self.extractor, terms={"product": ["remymy warm up"]},
-                                  lookup=self.lookup)
-                self.clusterer.predict(item, k=1)
-        except Exception:
-            logger.exception("Warming up the clusterer failed; the first query will load its models.")
-            return
-        logger.info("Clusterer warmed up in %.1fs: its models are loaded.", time.perf_counter() - started)
+        with self.lock:
+            # an invented product term, so the encoder of unseen terms runs too
+            item = build_item("Tomato soup, canned", self.extractor, terms={"product": ["remymy warm up"]},
+                              lookup=self.lookup)
+            self.clusterer.predict(item, k=1)
+        logger.info("Clusterer warmed up in %.1fs.", time.perf_counter() - started)
 
     def cluster(self, title: str, top_k: int, catalog: RecipeRepository) -> list[CatalogFood]:
         """The top_k catalog foods nearest a recipe, by its title, in its cluster. EmptyQuery for a title with no food

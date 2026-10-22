@@ -52,7 +52,7 @@ import type {
 } from "@/lib/chat-types";
 import { fetchRecipeDetail, fetchRecipeLikes, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
 import { RECOMMENDATION_USERNAME, fetchRecommendations, formatPrice, nutrientHighlights, type BuyingProfile } from "@/lib/recommendations";
-import { parseLikes, parseSavedFoods, type SavedFood } from "@/lib/saved";
+import { fetchSaved, parseLikes, parseSavedFoods, saveItem, unsaveItem, type SavedFood } from "@/lib/saved";
 import { saveUserPreferences } from "@/lib/user-preferences";
 import { fetchHistory, formatHistoryDate, type HistoryItem } from "@/lib/history";
 import { fetchCatalogItem, type CatalogItem } from "@/lib/catalog";
@@ -329,12 +329,10 @@ export default function HomePage() {
     mountedRef.current = true;
     let storedPreferences: Preferences | null = null;
     let storedSaved: string[] | null = null;
-    let storedFoods: SavedFood[] = [];
     let storedMealLikes: Record<string, boolean> = {};
     try {
       const preferencesValue = window.localStorage.getItem("remymy-preferences");
       const savedValue = window.localStorage.getItem("remymy-saved-meals");
-      storedFoods = parseSavedFoods(JSON.parse(window.localStorage.getItem("remymy-saved-foods") ?? "[]"));
       const mealLikes = parseLikes(JSON.parse(window.localStorage.getItem("remymy-meal-likes") ?? "{}"));
       storedMealLikes = Object.fromEntries(Object.entries(mealLikes).filter(([id]) => MEALS.some((meal) => meal.id === id)));
       if (preferencesValue) {
@@ -355,8 +353,6 @@ export default function HomePage() {
       if (!mountedRef.current) return;
       if (storedPreferences) setPreferences(storedPreferences);
       if (storedSaved) setSavedIds(storedSaved);
-      // merged under anything chosen before storage was read
-      setSavedFoods((current) => [...storedFoods.filter((food) => !current.some((item) => item.id === food.id)), ...current]);
       setMealLikes((current) => ({ ...storedMealLikes, ...current }));
       setIsHydrated(true);
     });
@@ -380,11 +376,34 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    try {
-      window.localStorage.setItem("remymy-saved-foods", JSON.stringify(savedFoods));
-      window.localStorage.setItem("remymy-meal-likes", JSON.stringify(mealLikes));
-    } catch { /* best effort */ }
-  }, [isHydrated, mealLikes, savedFoods]);
+    try { window.localStorage.setItem("remymy-meal-likes", JSON.stringify(mealLikes)); } catch { /* best effort */ }
+  }, [isHydrated, mealLikes]);
+
+  // The saved recipes live in the Data API's database. Those this browser kept from before go up to it once, and then
+  // leave the browser; one the database does not know is dropped.
+  useEffect(() => {
+    if (!isHydrated) return;
+    const controller = new AbortController();
+    let kept: SavedFood[] = [];
+    try { kept = parseSavedFoods(JSON.parse(window.localStorage.getItem("remymy-saved-foods") ?? "[]")); } catch { /* optional */ }
+    void fetchSaved(RECOMMENDATION_USERNAME, controller.signal)
+      .then(async (saved) => {
+        const missing = kept.filter((food) => !saved.some((item) => item.id === food.id));
+        const results = await Promise.allSettled(missing.map((food) => saveItem(RECOMMENDATION_USERNAME, food.id, controller.signal)));
+        const added = results.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+        // a save that failed keeps the browser's copy for the next load
+        if (results.every((result) => result.status === "fulfilled")) {
+          try { window.localStorage.removeItem("remymy-saved-foods"); } catch { /* best effort */ }
+        }
+        if (!mountedRef.current || controller.signal.aborted) return;
+        const loaded = [...added, ...saved];
+        // merged over anything saved before the list came back
+        setSavedFoods((current) => [...current.filter((food) => !loaded.some((item) => item.id === food.id)), ...loaded]);
+      })
+      // without the Data API, Saved shows none of them until the next load
+      .catch(() => {});
+    return () => controller.abort();
+  }, [isHydrated]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -404,7 +423,8 @@ export default function HomePage() {
 
   // The recipe likes live in the Data API: read them again each time the picks or Saved come up, so the buttons show
   // what the database holds. A like still being saved keeps its choice until the save answers.
-  const showsRecipeLikes = view === "saved" || (view === "discover" && chat.length === 0);
+  // an open recipe shows its like too, from whichever view it was opened
+  const showsRecipeLikes = view === "saved" || (view === "discover" && chat.length === 0) || activeRecipe !== null;
   useEffect(() => {
     if (!showsRecipeLikes) return;
     const controller = new AbortController();
@@ -446,9 +466,21 @@ export default function HomePage() {
     flashNotice(isSaved ? `${meal.title} removed from saved meals` : `${meal.title} saved for later`);
   }, [flashNotice, savedIds]);
 
+  // Saved at once on screen, and in the Data API's database behind it; one it could not save goes back as it was.
   const toggleSavedFood = useCallback((food: SavedFood) => {
     const isSaved = savedFoods.some((item) => item.id === food.id);
-    setSavedFoods((current) => current.some((item) => item.id === food.id) ? current.filter((item) => item.id !== food.id) : [...current, food]);
+    const others = (current: SavedFood[]) => current.filter((item) => item.id !== food.id);
+    setSavedFoods((current) => isSaved ? others(current) : [food, ...others(current)]);
+    const request = isSaved
+      ? unsaveItem(RECOMMENDATION_USERNAME, food.id)
+      : saveItem(RECOMMENDATION_USERNAME, food.id).then((saved) => {
+        if (!saved) throw new Error(`${food.title} could not be saved.`);
+      });
+    void request.catch((error) => {
+      if (!mountedRef.current) return;
+      setSavedFoods((current) => isSaved ? [food, ...others(current)] : others(current));
+      flashNotice(error instanceof Error ? error.message : "Your saved recipes could not be updated.");
+    });
     flashNotice(isSaved ? `${food.title} removed from saved recipes` : `${food.title} saved for later`);
   }, [flashNotice, savedFoods]);
 
@@ -613,7 +645,7 @@ export default function HomePage() {
             )}
           </>
         ) : view === "meals" ? mealShortlist ? <MealsView recommendations={browseRecommendations} preferences={preferences} isShortlist filter={filter} onFilterChange={(next) => { setMealShortlist(null); setFilter(next); }} onSave={toggleSaved} savedIds={savedIds} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} onPreferences={() => navigate("preferences")} onBrowseAll={() => setMealShortlist(null)} /> : <RecipesView page={recipePage} search={recipeSearch} busy={recipeBusy} error={recipeLoadError} pageNumber={recipePageNumber} onSearch={(next) => { setRecipeSearch(next); setRecipePageNumber(0); }} onRetry={() => setRecipeRetryNonce((current) => current + 1)} onPageChange={setRecipePageNumber} onOpen={openRecipe} />
-          : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onOpenFood={openCatalogItem} onDiscover={() => navigate("discover")} />
+          : view === "saved" ? <SavedView recommendations={savedRecommendations} onSave={toggleSaved} onOpen={setActiveMeal} mealLikes={mealLikes} onRateMeal={rateMeal} foods={savedFoods} foodRatings={foodRatings} onRateFood={rateFood} onToggleFood={toggleSavedFood} onOpenFood={openCatalogItem} onOpenRecipe={openRecipe} onDiscover={() => navigate("discover")} />
             : view === "add-recipe" ? <AddRecipePanel username={RECOMMENDATION_USERNAME} onSaved={(recipe) => flashNotice(`${recipe.title} added to your recipes`)} />
             : view === "history" ? <HistoryView items={history} profile={buyingProfile} error={historyError} onRetry={() => setHistoryNonce((current) => current + 1)} onOpenRecipe={openRecipe} onOpenFood={openCatalogItem} />
             : view === "preferences" ? <PreferencePanel preferences={preferences} onSave={savePreferences} />
@@ -621,7 +653,7 @@ export default function HomePage() {
       </main>
       {notice && <div className="notice" role="status"><Bookmark size={16} aria-hidden="true" />{notice}</div>}
       <MealDetailModal meal={activeMeal} saved={activeMeal ? savedIds.includes(activeMeal.id) : false} onClose={closeMeal} onSave={toggleSaved} />
-      <RecipeDetailModal recipe={activeRecipe} loading={recipeDetailBusy} error={recipeDetailError} onClose={closeRecipe} onOpenFood={(id) => { closeRecipe(); openCatalogItem(id); }} />
+      <RecipeDetailModal recipe={activeRecipe} loading={recipeDetailBusy} error={recipeDetailError} onClose={closeRecipe} rating={activeRecipe ? foodRatings[activeRecipe.id] : undefined} onRate={rateFood} saved={activeRecipe ? savedFoods.some((food) => food.id === activeRecipe.id) : false} onSave={(recipe) => toggleSavedFood({ id: recipe.id, title: recipe.title, kind: "recipe" })} onOpenFood={(id) => { closeRecipe(); openCatalogItem(id); }} />
       <CatalogItemModal item={activeCatalogItem} loading={catalogBusy} error={catalogError} onClose={closeCatalogItem} rating={activeCatalogItem ? foodRatings[String(activeCatalogItem.fdc_id)] : undefined} onRate={rateFood} saved={activeCatalogItem ? savedFoods.some((food) => food.id === String(activeCatalogItem.fdc_id)) : false} onSave={(item) => toggleSavedFood({ id: String(item.fdc_id), title: item.description })} />
     </div>
   );
@@ -658,12 +690,12 @@ function RecipesView({ page, search, busy, error, pageNumber, onSearch, onRetry,
   </section>;
 }
 
-function SavedView({ recommendations, onSave, onOpen, mealLikes, onRateMeal, foods, foodRatings, onRateFood, onToggleFood, onOpenFood, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; foods: SavedFood[]; foodRatings: Record<string, RecipeRatingState>; onRateFood: (id: string, like: boolean) => void; onToggleFood: (food: SavedFood) => void; onOpenFood: (id: string) => void; onDiscover: () => void; }) {
+function SavedView({ recommendations, onSave, onOpen, mealLikes, onRateMeal, foods, foodRatings, onRateFood, onToggleFood, onOpenFood, onOpenRecipe, onDiscover }: { recommendations: MealRecommendation[]; onSave: (meal: Meal) => void; onOpen: (meal: Meal) => void; mealLikes: Record<string, boolean>; onRateMeal: (meal: Meal, like: boolean) => void; foods: SavedFood[]; foodRatings: Record<string, RecipeRatingState>; onRateFood: (id: string, like: boolean) => void; onToggleFood: (food: SavedFood) => void; onOpenFood: (id: string) => void; onOpenRecipe: (recipe: { id: string }) => void; onDiscover: () => void; }) {
   const empty = recommendations.length === 0 && foods.length === 0;
   return <section className="saved-view"><div className="view-heading"><p className="eyebrow">YOUR LITTLE ARCHIVE</p><h1>Saved for later.</h1><p>The recipes that made you pause. They&apos;ll be here when you&apos;re ready.</p></div>
     {!empty && <div className="shortlist-grid">
       {recommendations.map((recommendation) => <MealCard key={recommendation.meal.id} recommendation={recommendation} saved onSave={onSave} onOpen={onOpen} like={mealLikes[recommendation.meal.id]} onRate={onRateMeal} showImage={false} />)}
-      {foods.map((food) => <article className="meal-card recipe-card saved-recipe-card" key={food.id}><div className="meal-card-body"><div className="meal-card-meta"><span><ChefHat size={14} aria-hidden="true" /> Picked for you</span></div><button className="meal-card-title" onClick={() => onOpenFood(food.id)}>{food.title}</button><div className="meal-card-footer"><span className="rank-note"><Sparkles size={14} aria-hidden="true" /> Saved by you</span><div className="meal-card-actions"><RecipeLikeButtons title={food.title} rating={foodRatings[food.id]} onRate={(like) => onRateFood(food.id, like)} /><button className="save-button is-saved" onClick={() => onToggleFood(food)} aria-pressed aria-label={`Remove ${food.title} from saved recipes`} title="Saved"><Bookmark size={17} fill="currentColor" aria-hidden="true" /></button></div></div></div></article>)}
+      {foods.map((food) => <article className="meal-card recipe-card saved-recipe-card" key={food.id}><div className="meal-card-body"><div className="meal-card-meta">{food.kind === "recipe" || food.kind === "user" ? <span><Utensils size={14} aria-hidden="true" /> Recipe</span> : <span><ChefHat size={14} aria-hidden="true" /> Picked for you</span>}</div><button className="meal-card-title" onClick={() => food.kind === "recipe" || food.kind === "user" ? onOpenRecipe({ id: food.id }) : onOpenFood(food.id)}>{food.title}</button><div className="meal-card-footer"><span className="rank-note"><Sparkles size={14} aria-hidden="true" /> Saved by you</span><div className="meal-card-actions"><RecipeLikeButtons title={food.title} rating={foodRatings[food.id]} onRate={(like) => onRateFood(food.id, like)} /><button className="save-button is-saved" onClick={() => onToggleFood(food)} aria-pressed aria-label={`Remove ${food.title} from saved recipes`} title="Saved"><Bookmark size={17} fill="currentColor" aria-hidden="true" /></button></div></div></div></article>)}
     </div>}
     {empty && <div className="empty-state"><div className="empty-state-icon"><Bookmark size={22} /></div><h3>Nothing saved yet.</h3><p>When a recipe looks good, tap the bookmark and it&apos;ll land here.</p><button className="detail-action" onClick={onDiscover}>Find something good <ArrowRight size={17} /></button></div>}
   </section>;

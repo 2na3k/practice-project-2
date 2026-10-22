@@ -1,6 +1,7 @@
-"""The users database's schema, migration and demo user, and what the user routes need beyond UserRepository: whether
-a rated id is a recipe or a catalog food, and the titles of the ids a history holds. Reading and writing users and
-their history is repository.user_repository.UserRepository's, through the ORM."""
+"""The users' tables of remymy.db, their migration and demo user, and what the user routes need beyond UserRepository:
+whether a rated id is a recipe or a catalog food, and the titles of the ids a history holds. Reading and writing users,
+their history and their saved recipes is repository.user_repository.UserRepository's, through the ORM; schema.py sets
+the database up."""
 from __future__ import annotations
 
 import logging
@@ -10,8 +11,7 @@ from collections.abc import Iterable
 
 from fastapi import HTTPException
 
-from .db import close_database, open_database, user_database_path, users_engine
-from .models import create_tables
+from .db import close_database, open_database
 from .repository.recipe_repository import RecipeRepository, is_food_id
 from .repository.user_repository import UserRepository
 from .schemas import Preferences, User, UserRating
@@ -19,7 +19,8 @@ from .schemas import Preferences, User, UserRating
 logger = logging.getLogger(__name__)
 
 # The tables created with SQL here, for their JSON checks and triggers; the ORM maps them (models.AppUser,
-# models.UserHistoryEntry). The tables only the ORM defines are created after them, by create_tables.
+# models.UserHistoryEntry, models.SavedRecipe). The tables only the ORM defines are created after them, by
+# models.create_tables. saved_recipe refers to recipe, which schema.FOOD_SCHEMA creates before this runs.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_user (
   user_id     INTEGER PRIMARY KEY,
@@ -120,6 +121,18 @@ CREATE TABLE IF NOT EXISTS user_history (
 
 CREATE INDEX IF NOT EXISTS user_history_by_user
   ON user_history (user_id, timestamp DESC);
+
+-- A recipe the user saved for later, of any kind (a Food.com recipe, a catalog food, their own): it goes when the user
+-- or the recipe does.
+CREATE TABLE IF NOT EXISTS saved_recipe (
+  user_id   INTEGER NOT NULL REFERENCES app_user (user_id) ON DELETE CASCADE,
+  recipe_id TEXT NOT NULL REFERENCES recipe (recipe_id) ON DELETE CASCADE,
+  saved_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (user_id, recipe_id)
+);
+
+CREATE INDEX IF NOT EXISTS saved_recipe_by_recipe
+  ON saved_recipe (recipe_id);
 """
 
 # A users database from before likes had a 0-5 rating per row instead: it becomes the like the model's training would
@@ -166,32 +179,17 @@ def demo_enabled() -> bool:
     return os.getenv("SEED_DEMO_USER", "false").strip().lower() in {"1", "true", "yes"}
 
 
-def open_user_database() -> sqlite3.Connection:
-    """A plain sqlite3 connection to the users database, for the SQL scripts above."""
-    connection = sqlite3.connect(user_database_path())
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
-
-
-def init_user_database() -> None:
-    user_database_path().parent.mkdir(parents=True, exist_ok=True)
-    connection = open_user_database()
-    try:
-        connection.executescript(SCHEMA)
-        if "rating" in {row["name"] for row in connection.execute("PRAGMA table_info(user_history)")}:
-            connection.executescript(RATINGS_TO_LIKES)
-            logger.info("Turned the 0-5 ratings in %s into likes: 3 to 5 liked, the rest not.", user_database_path())
-        if demo_enabled():
-            changes = connection.total_changes
-            connection.executescript(DEMO_SEED)
-            if connection.total_changes > changes:
-                logger.info("Injected the demo user %r and its liked and disliked recipes.", DEMO_USERNAME)
-    finally:
-        connection.close()
-    create_tables(users_engine())
-    logger.info("Users database ready at %s.", user_database_path())
-
+def migrate_user_data(connection: sqlite3.Connection) -> None:
+    """Bring the users' data in the database connection is on up to date: a history from before likes has its ratings
+    turned into likes, and with SEED_DEMO_USER the demo user and its history are injected."""
+    if "rating" in {row["name"] for row in connection.execute("PRAGMA table_info(user_history)")}:
+        connection.executescript(RATINGS_TO_LIKES)
+        logger.info("Turned the 0-5 ratings in the history into likes: 3 to 5 liked, the rest not.")
+    if demo_enabled():
+        changes = connection.total_changes
+        connection.executescript(DEMO_SEED)
+        if connection.total_changes > changes:
+            logger.info("Injected the demo user %r and its liked and disliked recipes.", DEMO_USERNAME)
 
 
 def item_titles(item_ids: Iterable[str], catalog: RecipeRepository | None) -> dict[str, str]:

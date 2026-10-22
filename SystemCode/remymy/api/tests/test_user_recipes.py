@@ -17,7 +17,6 @@ RECIPE = {
 
 @pytest.fixture
 def client(monkeypatch, tmp_path, cache):
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
     with TestClient(app) as test_client:
         yield test_client
 

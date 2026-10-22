@@ -90,14 +90,18 @@ class RecipeClassifier:
             self.members = [{"generic_gate": self.prep["generic_gate"], "chains": [self.prep["chain"]]}]
             self.kind = f"logistic regression (C={self.config.get('lr_C')})"
 
-    def _vector(self, term):
-        if term in self.term_index:
-            return self.term_vectors[self.term_index[term]], True
+    def load_term_model(self):
+        """The encoder of terms the vocabulary does not hold, loaded (or downloaded) on the first call."""
         if self._term_model is None:
             from sentence_transformers import SentenceTransformer
             self._term_model = SentenceTransformer(self.config["term_model"], revision=self.config["term_revision"],
                                                    device="cpu")
-        return self._term_model.encode([term], normalize_embeddings=True)[0], False
+        return self._term_model
+
+    def _vector(self, term):
+        if term in self.term_index:
+            return self.term_vectors[self.term_index[term]], True
+        return self.load_term_model().encode([term], normalize_embeddings=True)[0], False
 
     def features(self, item):
         terms = [(str(t).strip().lower(), k) for k, field in enumerate(self.token_types)

@@ -2,22 +2,22 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from datetime import datetime, timezone
 
 import pytest
+from conftest import add_recipes
 from fastapi.testclient import TestClient
 
 from sqlalchemy.orm import Session
 
 from remymy_api import main, recommend
-from remymy_api.db import users_engine
+from remymy_api.db import database_engine
 from remymy_api.dependencies import get_recipe_repository
 from remymy_api.main import app, load_recommender
 from remymy_api.recipe import Recipe
 from remymy_api.repository.user_repository import UserRepository
 from remymy_api.schemas import Ingredient
-from remymy_api.users import init_user_database
+from remymy_api.schema import init_database
 
 
 CATALOG = {
@@ -65,35 +65,24 @@ def answer(history, recipes, top_k: int) -> list[dict]:
 
 @pytest.fixture
 def stores(tmp_path, monkeypatch, cache):
-    """The recipe database with three recipes, and a UserRepository on a new users database."""
-    recipes = tmp_path / "recipes.db"
-    with sqlite3.connect(recipes) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE recipe (recipe_id TEXT PRIMARY KEY, title TEXT, quality_status TEXT NOT NULL);
-            CREATE TABLE recipe_ingredient (
-              ingredient_id TEXT PRIMARY KEY, recipe_id TEXT NOT NULL, position INTEGER NOT NULL,
-              raw_text TEXT NOT NULL, ingredient_text TEXT
-            );
-            CREATE TABLE recipe_instruction (recipe_id TEXT, position INTEGER, text TEXT);
-            INSERT INTO recipe VALUES
-              ('openrecipes:1', 'Tomato Soup', 'accepted'),
-              ('openrecipes:2', 'Apple Salad', 'accepted'),
-              ('openrecipes:3', 'Plain Water', 'accepted');
-            INSERT INTO recipe_ingredient VALUES
-              ('1:1', 'openrecipes:1', 1, '2 cups tomatoes', 'tomatoes'),
-              ('1:2', 'openrecipes:1', 2, '1 tsp salt', 'salt'),
-              ('1:3', 'openrecipes:1', 3, 'salt to taste', 'salt'),
-              ('1:4', 'openrecipes:1', 4, '4 cups water', 'water'),
-              ('2:1', 'openrecipes:2', 1, 'apple', NULL),
-              ('3:1', 'openrecipes:3', 1, '1 cup water', 'water');
-            """
-        )
-    connection.close()
-    monkeypatch.setenv("DATABASE_PATH", str(recipes))
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
-    init_user_database()
-    with Session(users_engine()) as session:
+    """The database with three recipes, and a UserRepository on it."""
+    add_recipes(
+        [
+            ("openrecipes:1", "Tomato Soup", "accepted"),
+            ("openrecipes:2", "Apple Salad", "accepted"),
+            ("openrecipes:3", "Plain Water", "accepted"),
+        ],
+        [
+            ("openrecipes:1", 1, "2 cups tomatoes", "tomatoes"),
+            ("openrecipes:1", 2, "1 tsp salt", "salt"),
+            ("openrecipes:1", 3, "salt to taste", "salt"),
+            ("openrecipes:1", 4, "4 cups water", "water"),
+            ("openrecipes:2", 1, "apple", None),
+            ("openrecipes:3", 1, "1 cup water", "water"),
+        ],
+    )
+    init_database()
+    with Session(database_engine()) as session:
         yield UserRepository(session, cache)
 
 
@@ -305,18 +294,19 @@ def test_without_a_catalog_the_api_starts_and_recommendations_are_503(stores, ca
     assert f"recommendations:{alice}" not in cache.store
 
 
-def test_the_recommender_is_built_on_the_catalog_database(tmp_path, monkeypatch):
+def test_the_recommender_is_built_on_the_databases_catalog(tmp_path, monkeypatch):
     from test_recipe_repository import food, write_catalog
 
     from remymy_api.inference import service
     from remymy_api.repository.recipe_repository import init_catalog_database
 
-    database = tmp_path / "catalog.db"
+    database = tmp_path / "remymy.db"
     init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)]))
-    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(database))
-    monkeypatch.setattr(service.Recommender, "load", classmethod(lambda cls, repository: repository.fdc_ids()))
+    monkeypatch.setenv("DATABASE_PATH", str(database))
+    monkeypatch.setattr(service.Recommender, "_load",
+                        lambda self, repository: setattr(self, "fdc_ids", repository.fdc_ids()))
 
-    assert load_recommender() == {1, 2}
+    assert load_recommender().fdc_ids == {1, 2}
 
 
 def test_the_recommendations_are_refreshed_once_more_than_ten_ratings_are_counted(stores, models, repository, cache):

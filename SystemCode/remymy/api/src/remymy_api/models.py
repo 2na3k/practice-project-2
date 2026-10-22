@@ -1,5 +1,5 @@
-"""SQLAlchemy ORM models of the two databases the API writes: the users database (USER_DATABASE_PATH, on Base) and the
-catalog database (CATALOG_DATABASE_PATH, on CatalogBase). The recipe database is still read with SQL (db.py).
+"""SQLAlchemy ORM models of remymy.db (DATABASE_PATH), the API's one database: the users and what they keep, the priced
+catalog, and the recipe rows saved recipes refer to. The Food.com recipes' own tables are still read with SQL (db.py).
 
 The API's request and response models (DTOs) stay in schemas.py. A response DTO with from_attributes reads an ORM
 object as it is, e.g. schemas.UserRecipeResponse.model_validate(user_recipe)."""
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.elements import BindParameter, ColumnElement
 from sqlalchemy.types import TypeDecorator
 
-from .db import Base, CatalogBase
+from .db import Base
 
 # The time a row is written, in the users database's format (as users.SCHEMA writes it): ISO 8601 UTC with a Z.
 NOW = text("(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
@@ -80,7 +80,24 @@ class PythonLiteral(TypeDecorator[Any]):
         return None if value is None else ast.literal_eval(value)
 
 
-# --- users database (users.SCHEMA creates app_user and user_history; create_tables the rest) ---
+# --- recipes (schema.FOOD_SCHEMA creates the table) ---
+
+
+class RecipeEntry(Base):
+    """A recipe the app knows, of any kind, as saved recipes see it: the Food.com recipes the migration job loads, and a
+    row for each catalog food and user recipe (schema.RECIPE_SYNC). Only the columns the ORM reads are mapped; the
+    recipe routes read the rest with SQL."""
+
+    __tablename__ = "recipe"
+    __table_args__ = {"info": {"created_by": "schema.FOOD_SCHEMA"}}
+
+    recipe_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str | None] = mapped_column(Text)
+    # 'openrecipes', 'catalog' or 'user'
+    kind: Mapped[str] = mapped_column(Text)
+
+
+# --- users (users.SCHEMA creates app_user, user_history and saved_recipe; create_tables the rest) ---
 
 
 class AppUser(Base):
@@ -202,17 +219,33 @@ class UserRecipeTag(Base):
     recipe: Mapped[UserRecipe] = relationship(back_populates="tags")
 
 
+class SavedRecipe(Base):
+    """A recipe a user saved for later, of any kind; it goes when the user or the recipe does (ON DELETE CASCADE).
+    users.SCHEMA creates the table."""
+
+    __tablename__ = "saved_recipe"
+    __table_args__ = {"info": {"created_by": "users.SCHEMA"}}
+    # read saved_at, a server default, back in the INSERT ... RETURNING
+    __mapper_args__ = {"eager_defaults": True}
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.user_id", ondelete="CASCADE"), primary_key=True)
+    recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id", ondelete="CASCADE"), primary_key=True)
+    saved_at: Mapped[datetime] = mapped_column(UtcTimestamp, server_default=NOW)
+
+    recipe: Mapped[RecipeEntry] = relationship()
+
+
 def create_tables(engine: Engine) -> None:
-    """Create the users database's tables only the ORM defines, where missing. The ones users.SCHEMA creates, with
-    checks and triggers the ORM does not model, are left to it: it runs first."""
+    """Create the tables only the ORM defines, where missing. The ones schema.FOOD_SCHEMA and users.SCHEMA create, with
+    checks and triggers the ORM does not model, are left to them: they run first."""
     Base.metadata.create_all(
-        engine, tables=[table for table in Base.metadata.sorted_tables if table.info.get("created_by") != "users.SCHEMA"])
+        engine, tables=[table for table in Base.metadata.sorted_tables if "created_by" not in table.info])
 
 
-# --- catalog database (created by RecipeRepository.from_csv_to_db) ---
+# --- catalog (created by create_tables, filled by RecipeRepository.from_csv_to_db) ---
 
 
-class CatalogFoodRecord(CatalogBase):
+class CatalogFoodRecord(Base):
     """A priced food of the catalog, price_mapped_nutrients.csv column for column: prices in SGD, nutrients per 100 g
     (None where FDC has no value). Its response model is schemas.CatalogFood."""
 

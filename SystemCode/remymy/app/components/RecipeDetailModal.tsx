@@ -1,7 +1,8 @@
 "use client";
 
-import { ArrowRight, Check, ChefHat, Database, LoaderCircle, X } from "lucide-react";
+import { ArrowRight, Bookmark, Check, ChefHat, Database, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import { fetchSimilarFoods, priceLabel, type CatalogItem } from "@/lib/catalog";
 import type { RecipeDetail } from "@/lib/recipes";
 
@@ -12,13 +13,18 @@ type RecipeDetailModalProps = {
   loading: boolean;
   error: string;
   onClose: () => void;
+  // whether the user liked the open recipe, saved to their history by its id
+  rating?: RecipeRatingState;
+  onRate: (id: string, like: boolean) => void;
+  saved: boolean;
+  onSave: (recipe: RecipeDetail) => void;
   // opens one of the similar catalog foods
   onOpenFood: (id: string) => void;
 };
 
 type SimilarState = { recipeId: string; items: CatalogItem[] | null; error: string };
 
-export function RecipeDetailModal({ recipe, loading, error, onClose, onOpenFood }: RecipeDetailModalProps) {
+export function RecipeDetailModal({ recipe, loading, error, onClose, rating, onRate, saved, onSave, onOpenFood }: RecipeDetailModalProps) {
   const modalRef = useRef<HTMLElement>(null);
   // the clusterer's neighbours of the open recipe; kept with its id so another recipe's never show
   const [similar, setSimilar] = useState<SimilarState | null>(null);
@@ -50,7 +56,15 @@ export function RecipeDetailModal({ recipe, loading, error, onClose, onOpenFood 
         {loading ? <div className="recipe-modal-state" role="status">Loading recipe…</div> : error ? <div className="recipe-modal-state is-error" role="alert"><h2>Recipe unavailable</h2><p>{error}</p></div> : recipe ? (
           <div className="detail-content">
             <div className="recipe-source-mark"><Database size={17} aria-hidden="true" /> Source-backed recipe</div>
-            <div className="detail-title-row"><div><p className="eyebrow">OPEN RECIPES</p><h2 id="recipe-detail-title">{recipe.title}</h2></div></div>
+            <div className="detail-title-row">
+              <div><p className="eyebrow">OPEN RECIPES</p><h2 id="recipe-detail-title">{recipe.title}</h2></div>
+              <div className="for-you-actions">
+                <RecipeLikeButtons title={recipe.title} rating={rating} onRate={(like) => onRate(recipe.id, like)} />
+                <button className={`save-button ${saved ? "is-saved" : ""}`} onClick={() => onSave(recipe)} aria-pressed={saved} aria-label={saved ? `Remove ${recipe.title} from saved recipes` : `Save ${recipe.title}`} title={saved ? "Saved" : "Save for later"}>
+                  <Bookmark size={17} fill={saved ? "currentColor" : "none"} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
             <div className="detail-stats"><span>{recipe.quality_status}</span><span>{recipe.ingredients.length} ingredients</span><span>{recipe.instructions.length} steps</span></div>
             <div className="detail-section"><h3>What you&apos;ll need</h3><ul className="ingredient-list">{recipe.ingredients.map((item, index) => <li key={`${item}-${index}`}><Check size={15} aria-hidden="true" />{item}</li>)}</ul></div>
             <div className="detail-section"><h3>How to make it</h3><ol className="step-list">{recipe.instructions.map((step, index) => <li key={`${step}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span>{step}</li>)}</ol></div>

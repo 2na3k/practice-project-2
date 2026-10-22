@@ -111,9 +111,19 @@ case "$DATA_DIR" in
   *) data_path="$ROOT/${DATA_DIR#./}" ;;
 esac
 
-if [ ! -f "$data_path/remymy-food.db" ]; then
-  fail "$data_path/remymy-food.db not found. The Data API needs it (see README.md)."
-  exit 1
+# Each service writes a log file per hour under it (logging/hourly-log.sh). Made here, as this user, so the services
+# that run as a non-root user can write to it; Docker would make a missing one owned by root.
+log_dir="${LOG_DIR_HOST:-./logs}"
+case "$log_dir" in
+  /*) ;;
+  *) log_dir="$ROOT/${log_dir#./}" ;;
+esac
+mkdir -p "$log_dir"
+
+# The recipes live in remymy.db, in the remymy-user-data volume. api-migrate loads them the first time from
+# remymy-food.db, or else from RECIPES_SOURCE and FDC_SOURCE_DIR; once loaded neither is needed.
+if [ ! -f "$data_path/remymy-food.db" ] && { [ -z "${RECIPES_SOURCE:-}" ] || [ -z "${FDC_SOURCE_DIR:-}" ]; }; then
+  warn "$data_path/remymy-food.db not found and RECIPES_SOURCE/FDC_SOURCE_DIR unset: api-migrate fails unless remymy.db already holds the recipes (see README.md)."
 fi
 
 # The recommender needs files that are not in the repository. Without them its

@@ -1,5 +1,5 @@
-"""The priced food catalog: its own SQLite database (CATALOG_DATABASE_PATH), built from the catalog CSV (CATALOG_PATH)
-and read through the ORM (models.CatalogFoodRecord), and the Recipes digested against it."""
+"""The priced food catalog: the price_mapped_nutrients table of remymy.db (DATABASE_PATH), filled from the catalog CSV
+(CATALOG_PATH) and read through the ORM (models.CatalogFoodRecord), and the Recipes digested against it."""
 from __future__ import annotations
 
 import ast
@@ -20,7 +20,7 @@ from nltk.stem import WordNetLemmatizer
 from sqlalchemy import Float, Integer, insert, select
 from sqlalchemy.orm import Session
 
-from ..db import CatalogBase, catalog_database_path, sqlite_engine
+from ..db import database_path as default_database_path, has_catalog, sqlite_engine
 from ..models import CatalogFoodRecord, PythonLiteral
 from ..recipe import Recipe
 from ..schemas import CatalogFood, Ingredient
@@ -148,7 +148,7 @@ class RecipeRepository:
             if missing:
                 raise ValueError(f"{csv_path} has no column {', '.join(missing)}")
             rows = {int(row["fdc_id"]): row for row in reader}
-        CatalogBase.metadata.create_all(self.session.connection())
+        CatalogFoodRecord.__table__.create(self.session.connection(), checkfirst=True)
         stored = self.fdc_ids()
         new = [csv_values(row) for fdc_id, row in rows.items() if fdc_id not in stored]
         if new:
@@ -227,16 +227,18 @@ class RecipeRepository:
 
 
 def init_catalog_database(database_path: Path | None = None, csv_path: Path | None = None) -> bool:
-    """Bring the catalog database up to date with the catalog CSV, as the API does at startup: a missing database is
-    created, and the CSV's foods it does not hold yet are inserted. Without a CSV an existing database is used as it
-    is. Returns whether there is a catalog database; without one, the routes that need it answer 503."""
-    database_path = database_path or catalog_database_path()
+    """Bring the database's catalog up to date with the catalog CSV, as the API does at startup: its table is created
+    where missing, and the CSV's foods it does not hold yet are inserted. Without a CSV the catalog stored is used as
+    it is. Returns whether there is a catalog; without one, the routes that need it answer 503."""
+    database_path = database_path or default_database_path()
     csv_path = csv_path or catalog_path()
     if not csv_path.is_file():
         if database_path.is_file():
-            logger.info("No catalog CSV at %s; using the catalog database %s as it is.", csv_path, database_path)
-            return True
-        logger.warning("No catalog database at %s, and no catalog CSV at %s to build it from.", database_path, csv_path)
+            with Session(sqlite_engine(database_path)) as session:
+                if has_catalog(session):
+                    logger.info("No catalog CSV at %s; using the catalog in %s as it is.", csv_path, database_path)
+                    return True
+        logger.warning("No catalog in %s, and no catalog CSV at %s to fill it from.", database_path, csv_path)
         return False
     database_path.parent.mkdir(parents=True, exist_ok=True)
     with Session(sqlite_engine(database_path)) as session:

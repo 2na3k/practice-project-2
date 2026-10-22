@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from remymy_api import main
+from remymy_api.dependencies import get_classifier
 from remymy_api.inference.food_query import NUTRIENT_COLS, EmptyQuery, UnknownFood
 from remymy_api.main import app
 
@@ -44,16 +44,16 @@ class FakeClassifier:
 
 @pytest.fixture
 def client(monkeypatch, tmp_path, cache):
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
     with TestClient(app) as test_client:
         yield test_client
 
 
 @pytest.fixture
-def classifier(monkeypatch) -> FakeClassifier:
+def classifier() -> FakeClassifier:
     fake = FakeClassifier()
-    monkeypatch.setattr(main, "load_classifier", lambda: fake)
-    return fake
+    app.dependency_overrides[get_classifier] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_classifier, None)
 
 
 def test_classify_returns_labels_scores_and_the_terms_used(classifier, client):
@@ -117,9 +117,13 @@ def test_real_classifier_reproduces_a_training_food():
     for package in ("sklearn", "umap"):
         pytest.importorskip(package)
     from remymy_api.inference.classification_service import FoodClassifier, classifier_dir, lookup_path
+    from remymy_api.inference.food_query import TermExtractor
+    from remymy_api.inference.model_inference_recipe_classification import RecipeClassifier
 
     if not classifier_dir().is_dir() or not lookup_path().exists():
         pytest.skip("no classifier weights or fdc_id lookup")
-    result = FoodClassifier.load().classify_fdc(167516)
+    # its own extractor, unloaded: a looked-up food never reaches it
+    classifier = FoodClassifier(RecipeClassifier(classifier_dir()), TermExtractor(), lookup_path())
+    result = classifier.classify_fdc(167516)
 
     assert sorted(result["labels"]) == sorted(result["item"]["training"]["labels"])

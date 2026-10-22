@@ -63,13 +63,17 @@ class RecipeClusterer:
         # price block scaler mean = training mean of log1p([price_lo, price_hi]); used when the price is unknown
         self.default_price = np.expm1(self.bundle["block_fits"]["price"][1].mean_)
 
+    def load_encoder(self):
+        """The encoder of terms the token cache does not hold, loaded (or downloaded) on the first call."""
+        if self._encoder is None:
+            from sentence_transformers import SentenceTransformer
+            self._encoder = SentenceTransformer(self.config["ENCODER_NAME"], device="cpu")
+        return self._encoder
+
     def _encode_missing(self, tokens):
         new = sorted({t for t in tokens if t not in self.tok2vec})
         if new:
-            if self._encoder is None:
-                from sentence_transformers import SentenceTransformer
-                self._encoder = SentenceTransformer(self.config["ENCODER_NAME"], device="cpu")
-            self.tok2vec.update(zip(new, self._encoder.encode(new, normalize_embeddings=True)))
+            self.tok2vec.update(zip(new, self.load_encoder().encode(new, normalize_embeddings=True)))
         return len(new)
 
     def _pool(self, tokens):

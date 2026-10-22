@@ -1,18 +1,20 @@
 """The recipe classifier the classify routes call: RecipeClassifier (model_inference_recipe_classification) behind the
 query parsing of food_query.
 
-A free-text query goes through GLiNER and stanza, which load on the first such query; a food looked up by fdc_id in the
-premade lookup needs neither."""
+A free-text query goes through GLiNER and stanza, and a term the classifier has not seen through its encoder; startup
+loads them all, so a query only infers. A food looked up by fdc_id in the premade lookup needs none of them."""
 from __future__ import annotations
 
 import logging
 import os
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .food_query import DEFAULT_LOOKUP, TermExtractor, build_item, lookup_item
 from .model_inference_recipe_classification import DEFAULT_ARTIFACTS, RecipeClassifier
+from .singleton import Singleton
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +27,36 @@ def lookup_path() -> Path:
     return Path(os.getenv("FDC_LOOKUP_PATH", str(DEFAULT_LOOKUP)))
 
 
-class FoodClassifier:
-    """The classifier, the term extractor and the fdc_id lookup it reads."""
+class FoodClassifier(Singleton):
+    """The classifier, the term extractor and the fdc_id lookup it reads, one per process: every FoodClassifier() is
+    the same instance. Startup constructs it; a route's FoodClassifier() is then that loaded instance."""
 
-    def __init__(self, classifier: RecipeClassifier, extractor: TermExtractor, lookup: Path) -> None:
+    def _load(self, classifier: RecipeClassifier | None = None, extractor: TermExtractor | None = None,
+              lookup: Path | None = None) -> None:
+        """Loads what is not given: the classifier and its encoder of unseen terms, and GLiNER and stanza for a
+        query's terms, downloading any not cached yet; then warms the loaded models up."""
+        started = time.perf_counter()
+        warm = classifier is None
+        if classifier is None:
+            classifier = RecipeClassifier(classifier_dir())
+            logger.info("Recipe classifier loaded: %s, %d labels.", classifier.kind, len(classifier.label_cols))
+            classifier.load_term_model()
         self.classifier = classifier
-        self.extractor = extractor
-        self.lookup = lookup
-        # One query at a time: the extractor loads GLiNER and stanza on first use, and neither they nor the
-        # encoder are meant to be shared across threads.
+        self.extractor = extractor or TermExtractor().load()
+        self.lookup = lookup or lookup_path()
+        # One query at a time: neither the extractor's models nor the encoder are meant to be shared across threads.
         self.lock = threading.Lock()
+        if warm:
+            logger.info("Classifier models loaded in %.1fs.", time.perf_counter() - started)
+            self.warm_up()
 
-    @classmethod
-    def load(cls) -> FoodClassifier:
-        classifier = RecipeClassifier(classifier_dir())
-        logger.info("Recipe classifier loaded: %s, %d labels.", classifier.kind, len(classifier.label_cols))
-        return cls(classifier, TermExtractor(), lookup_path())
+    def warm_up(self) -> None:
+        """One query through the whole classifier, so the first one does not wait for what only a first call does,
+        numba compiling the nutrients' UMAP transform."""
+        started = time.perf_counter()
+        # an invented product term, so the encoder of unseen terms runs too
+        self.classify("Tomato soup, canned", terms={"product": ["remymy warm up"]})
+        logger.info("Classifier warmed up in %.1fs.", time.perf_counter() - started)
 
     @property
     def model(self) -> str:

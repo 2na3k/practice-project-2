@@ -118,20 +118,32 @@ def _norm_span(span, skip):
 
 
 class TermExtractor:
-    """product / adj / verb terms of a description, with GLiNER and stanza loaded on first use."""
+    """product / adj / verb terms of a description, with GLiNER and stanza loaded by load() or else on first use."""
 
     def __init__(self, ner_model=NER_MODEL):
         self.ner_model = ner_model
+        self._ner_pipeline = None
+        self._pos_pipeline = None
 
-    @lru_cache(maxsize=1)
+    def load(self):
+        """Load GLiNER and stanza now, downloading any not cached yet, rather than on the first description."""
+        self._ner()
+        self._pos()
+        return self
+
+    # held on the instance, not in an lru_cache(maxsize=1) shared by every extractor: two extractors would evict
+    # each other's models and reload them on alternate calls
     def _ner(self):
-        from gliner import GLiNER
-        return GLiNER.from_pretrained(self.ner_model)
+        if self._ner_pipeline is None:
+            from gliner import GLiNER
+            self._ner_pipeline = GLiNER.from_pretrained(self.ner_model)
+        return self._ner_pipeline
 
-    @lru_cache(maxsize=1)
     def _pos(self):
-        import stanza
-        return stanza.Pipeline("en", processors="tokenize,pos", verbose=False)
+        if self._pos_pipeline is None:
+            import stanza
+            self._pos_pipeline = stanza.Pipeline("en", processors="tokenize,pos", verbose=False)
+        return self._pos_pipeline
 
     def __call__(self, description):
         text = NER_PREFIX + description

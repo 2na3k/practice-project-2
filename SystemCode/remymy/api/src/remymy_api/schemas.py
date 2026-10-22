@@ -94,6 +94,18 @@ class HistoryItem(BaseModel):
     timestamp: datetime
 
 
+class SavedItem(BaseModel):
+    """A recipe the user saved for later, as a client shows it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe_id: str
+    # "recipe" for a Food.com recipe, "food" for a catalog food by its fdc_id, "user" for one a user wrote
+    kind: Literal["recipe", "food", "user"]
+    title: str | None
+    saved_at: datetime
+
+
 class Ingredient(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

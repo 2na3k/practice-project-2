@@ -1,6 +1,23 @@
 name: remymy
 
 services:
+  # Writes every container's output (these services and the upstream images alike) to a log file per hour:
+  # ${LOG_DIR_HOST:-./logs}/<service>/YYYY-MM-DD_HH.log, in UTC. See logging/collect.py.
+  log-collector:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "-u", "/opt/remymy-logging/collect.py"]
+    environment:
+      COMPOSE_PROJECT: remymy
+      LOG_DIR: /var/log/remymy
+      LOG_RETENTION_HOURS: ${LOG_RETENTION_HOURS:-168}
+    volumes:
+      - ./logging/collect.py:/opt/remymy-logging/collect.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - "${LOG_DIR_HOST:-./logs}:/var/log/remymy"
+    networks:
+      - remymy
+
   app:
     build:
       context: ./app
@@ -36,13 +53,16 @@ services:
     environment:
       ENV: ${ENV:-nonprod}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_PATH: /data/remymy-food.db
+      # loads the recipes into remymy.db: from the old recipe database the first time, or else from the sources
+      DATABASE_PATH: /state/remymy.db
+      LEGACY_FOOD_DATABASE_PATH: /data/remymy-food.db
       PYTHONPATH: /opt/remymy-api/migrations:/opt/remymy-api/src
       RECIPES_SOURCE: ${RECIPES_SOURCE:-}
       FDC_SOURCE_DIR: ${FDC_SOURCE_DIR:-}
       FDC_RELEASE: ${FDC_RELEASE:-unspecified}
     volumes:
-      - "${DATA_DIR:-./data}:/data"
+      - "${DATA_DIR:-./data}:/data:ro"
+      - remymy-user-data:/state
     command: ["python", "-m", "migrations.bootstrap"]
     networks:
       - remymy
@@ -60,8 +80,10 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HOST: 0.0.0.0
       PORT: 8002
-      DATABASE_PATH: /data/remymy-food.db
-      USER_DATABASE_PATH: /state/remymy-users.db
+      # the one database: recipes, catalog, users and what they keep
+      DATABASE_PATH: /state/remymy.db
+      # read once, the first time, when remymy.db has no users yet
+      LEGACY_USER_DATABASE_PATH: /state/remymy-users.db
       REDIS_URL: redis://redis:6379/0
       SEED_DEMO_USER: ${SEED_DEMO_USER:-true}
     depends_on:
@@ -78,7 +100,7 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
-      # startup builds the catalog database from data/price_mapped_nutrients.csv, loads the model and the HNSW index
+      # startup sets the database up; the models load in the background after it
       start_period: 120s
       retries: 5
     networks:

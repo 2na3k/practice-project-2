@@ -210,21 +210,27 @@ def test_food_ids_are_fdc_ids_and_recipe_ids_are_not():
     assert not is_food_id("١٢٣")
 
 
-def test_startup_builds_the_catalog_database_from_the_csv(tmp_path, monkeypatch, cache, open_catalog):
+def test_startup_fills_the_catalog_from_the_csv_and_makes_each_food_a_recipe(tmp_path, monkeypatch, cache,
+                                                                              open_catalog):
     from fastapi.testclient import TestClient
 
+    from remymy_api.db import database_path
     from remymy_api.main import app
+    from remymy_api.schema import connect
 
-    database = tmp_path / "state" / "catalog.db"
     monkeypatch.setenv("CATALOG_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])))
-    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(database))
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
 
     with TestClient(app) as client:
         found = client.get("/api/catalog/2")
 
     assert found.status_code == 200
-    assert open_catalog(database).fdc_ids() == {1, 2}
+    assert open_catalog(database_path()).fdc_ids() == {1, 2}
+    connection = connect(database_path())
+    try:
+        recipes = [tuple(row) for row in connection.execute("SELECT recipe_id, title, kind FROM recipe ORDER BY 1")]
+    finally:
+        connection.close()
+    assert recipes == [("1", "Apples, raw", "catalog"), ("2", "Apples, raw", "catalog")]
 
 
 def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypatch):
@@ -232,13 +238,12 @@ def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypa
 
     from remymy_api.main import app
 
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
-    monkeypatch.setenv("CATALOG_DATABASE_PATH", str(tmp_path / "catalog.db"))
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "catalog.db"))
     with TestClient(app) as client:
         found = client.get("/api/catalog/2")
         missing = client.get("/api/catalog/99")
         invalid = client.get("/api/catalog/openrecipes:1")
-        monkeypatch.setenv("CATALOG_DATABASE_PATH", str(tmp_path / "gone.db"))
+        monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "gone.db"))
         unloaded = client.get("/api/catalog/2")
 
     assert found.status_code == 200
@@ -249,5 +254,5 @@ def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypa
     assert (missing.status_code, missing.json()) == (404, {"detail": "Catalog item not found."})
     assert invalid.status_code == 422
     assert unloaded.status_code == 503
-    # no empty catalog database was created for the missing one
+    # no empty database was created for the missing one
     assert not (tmp_path / "gone.db").exists()
