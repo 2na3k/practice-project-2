@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .db import close_database, open_database, split_preview
 from .clustering import cluster
-from .cache import drop_recommendation, read_recommendations, write_recommendations
+from .cache import drop_recommendation, drop_recommendations, read_recommendations, write_recommendations
 from .dependencies import Catalog, Users
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
@@ -34,7 +34,7 @@ from .schemas import (
     UserRecipeCreate,
     UserRecipeResponse,
 )
-from .users import item_titles, rate_item
+from .users import item_titles, rate_item, set_preference
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +343,24 @@ def get_user_likes(username: str, users: Users) -> dict[str, bool]:
     return likes
 
 
+@router.put("/api/users/{username}/set-preferences", response_model=User, tags=["users"])
+def set_user_preferences(username: str, preferences: Preferences, request: Request, users: Users) -> User:
+    """Replace the user's preferences with the body's. Their cached recommendations were made for the old ones, so
+    they are dropped and the next request recommends again."""
+    try:
+        user_id = users.find_user_id(username)
+        user = None if user_id is None else set_preference(users, user_id, preferences)
+    except SQLAlchemyError:
+        logger.exception("Setting the preferences of %r failed.", username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    # cache is now stale
+    if drop_recommendations(request.app.state.cache, user.id):
+        logger.debug("Dropped the cached recommendations of user %d, whose preferences changed.", user.id)
+    return user
+
+
 @router.get("/api/users/{username}/history", response_model=list[HistoryItem], tags=["users"])
 def get_user_history(
     username: str,
@@ -359,6 +377,7 @@ def get_user_history(
     except SQLAlchemyError:
         logger.exception("Reading the history of %r failed.", username)
         raise HTTPException(status_code=503, detail="User data is unavailable.")
+    
     titles = item_titles((row.recipe_id for row in rows), catalog)
     return [
         HistoryItem(recipe_id=row.recipe_id, kind="food" if is_food_id(row.recipe_id) else "recipe",

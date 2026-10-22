@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RecipeSummary(BaseModel):
@@ -42,6 +42,9 @@ class HealthResponse(BaseModel):
 
 
 Diet = Literal["vegetarian", "halal", "Hinduism"]
+# the allergen codes of the frontends' ALLERGENS lists
+Allergen = Literal["peanut", "milk", "egg", "wheat", "soy", "fish", "shellfish", "sesame", "mustard", "celery", "lupin",
+                   "sulphites"]
 
 
 class Preferences(BaseModel):
@@ -51,6 +54,15 @@ class Preferences(BaseModel):
     cuisines: list[str] = Field(default_factory=list, max_length=40)
     preferred_nutrient: str | None = Field(default=None, max_length=64)
     budget: float | None = Field(default=0)
+    allergies: list[Allergen] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="before")
+    @classmethod
+    def skip_nulls(cls, data: object) -> object:
+        """A null field, as the users schema allows for each, is skipped: the field takes its default."""
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
 
 class User(BaseModel):
     model_config = ConfigDict(extra="forbid")

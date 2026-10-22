@@ -79,6 +79,15 @@ def write_recommendations(
     return True
 
 
+def drop_recommendations(cache: redis.Redis, user_id: int) -> bool:
+    """Forget the user's cached recommendations, so the next request computes them again. True when there were some."""
+    try:
+        return bool(cache.delete(recommendations_key(user_id)))
+    except redis.RedisError as error:
+        logger.warning("Redis delete of %s failed: %s", recommendations_key(user_id), error)
+        return False
+
+
 def drop_recommendation(cache: redis.Redis, user_id: int, item_id: str) -> bool:
     """Take one item out of the user's cached recommendations, so the next request goes on without it; the entry keeps
     the time it had left. True when the item was cached and is gone."""

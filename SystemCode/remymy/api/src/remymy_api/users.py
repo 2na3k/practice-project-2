@@ -14,7 +14,7 @@ from .db import close_database, open_database, user_database_path, users_engine
 from .models import create_tables
 from .repository.recipe_repository import RecipeRepository, is_food_id
 from .repository.user_repository import UserRepository
-from .schemas import UserRating
+from .schemas import Preferences, User, UserRating
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +34,21 @@ CREATE TABLE IF NOT EXISTS app_user (
     json_type(preferences) = 'object'
   ),
   CHECK (
-    json_type(preferences, '$.special_diet') = ''
+    json_type(preferences, '$.special_diet') IS NULL
+    OR json_type(preferences, '$.special_diet') = 'null'
     OR json_extract(preferences, '$.special_diet') IN ('vegetarian', 'halal', 'Hinduism')
   ),
   CHECK (
-    json_type(preferences, '$.cuisines') = ''
-    AND json_array_length(preferences, '$.cuisines') <= 40
+    json_type(preferences, '$.cuisines') IS NULL
+    OR json_type(preferences, '$.cuisines') = 'null'
+    OR (
+      json_type(preferences, '$.cuisines') = 'array'
+      AND json_array_length(preferences, '$.cuisines') <= 40
+    )
   ),
   CHECK (
-    json_type(preferences, '$.preferred_nutrient') = ''
+    json_type(preferences, '$.preferred_nutrient') IS NULL
+    OR json_type(preferences, '$.preferred_nutrient') = 'null'
     OR (
       json_type(preferences, '$.preferred_nutrient') = 'text'
       AND length(json_extract(preferences, '$.preferred_nutrient')) <= 64
@@ -50,22 +56,58 @@ CREATE TABLE IF NOT EXISTS app_user (
   ),
   CHECK (
     json_type(preferences, '$.budget') IS NULL
-    OR json_type(preferences, '$.budget') >= 0
+    OR json_type(preferences, '$.budget') = 'null'
+    OR (
+      json_type(preference, '$.budget') = 'real'
+      AND json_extract(preferences, '$.budget') >= 0
+    )
+  ),
+  CHECK (
+    json_type(preferences, '$.allergies') IS NULL
+    OR json_type(preferences, '$.allergies') = 'null'
+    OR (
+      json_type(preferences, '$.allergies') = 'array'
+      AND json_array_length(preferences, '$.allergies') <= 12
+    )
   )
 );
 
 CREATE TRIGGER IF NOT EXISTS app_user_cuisines_are_text_on_insert
 BEFORE INSERT ON app_user
-WHEN EXISTS (SELECT 1 FROM json_each(NEW.preferences, '$.cuisines') WHERE type <> 'text')
+WHEN json_type(NEW.preferences, '$.cuisines') = 'array'
+  AND EXISTS (SELECT 1 FROM json_each(NEW.preferences, '$.cuisines') WHERE type <> 'text')
 BEGIN
   SELECT RAISE(ABORT, 'preferences.cuisines must contain only strings');
 END;
 
 CREATE TRIGGER IF NOT EXISTS app_user_cuisines_are_text_on_update
 BEFORE UPDATE OF preferences ON app_user
-WHEN EXISTS (SELECT 1 FROM json_each(NEW.preferences, '$.cuisines') WHERE type <> 'text')
+WHEN json_type(NEW.preferences, '$.cuisines') = 'array'
+  AND EXISTS (SELECT 1 FROM json_each(NEW.preferences, '$.cuisines') WHERE type <> 'text')
 BEGIN
   SELECT RAISE(ABORT, 'preferences.cuisines must contain only strings');
+END;
+
+CREATE TRIGGER IF NOT EXISTS app_user_allergies_are_known_on_insert
+BEFORE INSERT ON app_user
+WHEN json_type(NEW.preferences, '$.allergies') = 'array'
+  AND EXISTS (SELECT 1 FROM json_each(NEW.preferences, '$.allergies') WHERE value NOT IN (
+    'peanut', 'milk', 'egg', 'wheat', 'soy', 'fish', 'shellfish', 'sesame', 'mustard', 'celery', 'lupin',
+    'sulphites'
+  ) OR type <> 'text')
+BEGIN
+  SELECT RAISE(ABORT, 'preferences.allergies must contain only known allergen codes');
+END;
+
+CREATE TRIGGER IF NOT EXISTS app_user_allergies_are_known_on_update
+BEFORE UPDATE OF preferences ON app_user
+WHEN json_type(NEW.preferences, '$.allergies') = 'array'
+  AND EXISTS (SELECT 1 FROM json_each(NEW.preferences, '$.allergies') WHERE value NOT IN (
+    'peanut', 'milk', 'egg', 'wheat', 'soy', 'fish', 'shellfish', 'sesame', 'mustard', 'celery', 'lupin',
+    'sulphites'
+  ) OR type <> 'text')
+BEGIN
+  SELECT RAISE(ABORT, 'preferences.allergies must contain only known allergen codes');
 END;
 
 CREATE TABLE IF NOT EXISTS user_history (
@@ -201,3 +243,9 @@ def rate_item(
     if not known_item(recipe_id, catalog):
         raise LookupError(f"Unknown recipe: {recipe_id}")
     return users.add_history(user_id, recipe_id, like)
+
+
+
+def set_preference(users: UserRepository, user_id: int, preferences: Preferences) -> User | None:
+    """Replace the user's preferences (UserRepository.set_user_preferences); None for an unknown user_id."""
+    return users.set_user_preferences(user_id, preferences)

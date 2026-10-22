@@ -117,3 +117,13 @@ class UserRepository:
                 timestamp = entry.timestamp
         logger.debug("User %d %s recipe %s.", user_id, "liked" if like else "did not like", recipe_id)
         return UserRating(user_id=user_id, timestamp=timestamp, like=like, recipe_id=recipe_id)
+
+    def set_user_preferences(self, user_id: int, preferences: Preferences) -> User | None:
+        """Replace the user's preferences with these; None for an unknown user_id."""
+        with self._transaction():
+            user = self.session.get(AppUser, user_id)
+            if user is None:
+                return None
+            user.preferences = preferences.model_dump()
+        logger.debug("Set the preferences of user %d.", user_id)
+        return User(id=user.user_id, username=user.username, preferences=preferences)

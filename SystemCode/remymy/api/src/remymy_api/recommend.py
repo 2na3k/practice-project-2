@@ -95,18 +95,17 @@ def recommend(recommender: Recommender, user: UserProfileInput, catalog: RecipeR
     if profile is None:
         logger.debug("User %d: no ingredient matched a priced food, so there is no buying profile.", history.user_id)
 
-    budget = user.preferences.budget or 0
-    # Enforce budget constraint now (0 is no limit on budget). Cheapest first, the scan stops at the first item over
-    # the budget, since every one after it costs more.
-    if budget > 0:
-        within_budget_index = 0
-        for item in sorted(recommended_items, key=lambda item: item["price"]):
+    budget = user.preferences.budget
+    if budget and budget > 0:
+        by_price = sorted(recommended_items, key=lambda item: item["price"])
+        within_budget = 0
+        for item in by_price:
             if item["price"] > budget:
                 break
-            within_budget_index += 1
+            within_budget += 1
         logger.debug("User %d: %d of %d recommended foods within the S$%.2f budget.", history.user_id,
-                     within_budget_index, len(recommended_items), budget)
-        recommended_items = recommended_items[:within_budget_index+1]
+                     within_budget, len(recommended_items), budget)
+        recommended_items = by_price[:within_budget]
 
     # most likely to be liked first; of two as likely, the cheaper
     recommended_items = sorted(recommended_items, key=lambda item: (-item["p_like"], item["price"]))

@@ -129,7 +129,7 @@ def test_the_users_preferences_reach_the_recommender(stores, models):
 
     (call,) = models.calls
     assert call["preferences"] == {"special_diet": "halal", "cuisines": [], "preferred_nutrient": "protein",
-                                   "budget": 8.5}
+                                   "budget": 8.5, "allergies": []}
 
 
 def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models, cache):

@@ -35,6 +35,12 @@ class FakeCache:
         self.store[key] = str(value).encode()
         self.ttls[key] = ex
 
+    def delete(self, key: str) -> int:
+        if self.down:
+            raise redis.ConnectionError("down")
+        self.ttls.pop(key, None)
+        return 0 if self.store.pop(key, None) is None else 1
+
     def close(self) -> None:
         pass
 

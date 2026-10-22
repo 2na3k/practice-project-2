@@ -74,14 +74,12 @@ def store(connection, document: object) -> None:
     )
 
 
-VALID = {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": "fibre"}
+VALID = {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": "fibre", "allergies": ["peanut"]}
 
 
 @pytest.mark.parametrize(
     "document",
     [
-        {k: v for k, v in VALID.items() if k != "cuisines"},
-        {**VALID, "allergies": []},
         {**VALID, "special_diet": "vegan"},
         {**VALID, "special_diet": 1},
         {**VALID, "cuisines": "Thai"},
@@ -89,12 +87,29 @@ VALID = {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": "f
         {**VALID, "cuisines": ["Thai", 7]},
         {**VALID, "preferred_nutrient": "x" * 65},
         {**VALID, "preferred_nutrient": ["fibre"]},
+        {**VALID, "allergies": "peanut"},
+        {**VALID, "allergies": ["peanut", "nuts"]},
+        {**VALID, "allergies": ["peanut", 7]},
+        {**VALID, "allergies": ["peanut"] * 13},
         ["not", "an", "object"],
     ],
 )
 def test_schema_rejects_preferences_outside_the_model(users, document):
     with pytest.raises(sqlite3.IntegrityError):
         store(users, document)
+
+
+@pytest.mark.parametrize("field", ["special_diet", "cuisines", "preferred_nutrient", "budget", "allergies"])
+def test_schema_accepts_each_field_missing_or_null(users, field):
+    store(users, {k: v for k, v in VALID.items() if k != field})
+    users.execute("DELETE FROM app_user")
+    store(users, {**VALID, field: None})
+
+
+def test_model_skips_null_fields_to_their_defaults():
+    assert Preferences.model_validate(
+        {"special_diet": None, "cuisines": None, "preferred_nutrient": None, "budget": None, "allergies": None}
+    ) == Preferences()
 
 
 def test_schema_accepts_the_model_and_stores_binary_jsonb(users):
@@ -119,7 +134,7 @@ def test_schema_default_preferences_are_valid(users):
 
 def test_model_rejects_unknown_keys():
     with pytest.raises(ValidationError):
-        Preferences.model_validate({**VALID, "allergies": []})
+        Preferences.model_validate({**VALID, "favourite_colour": "red"})
 
 
 def test_created_preferences_are_stored_as_binary_jsonb_and_read_back(users, repo):
@@ -305,11 +320,13 @@ def test_a_user_is_looked_up_by_username(repo):
     # a user without a budget has 0, no limit
     assert found.json() == {
         "id": alice.id, "username": "alice",
-        "preferences": {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": None, "budget": 0.0},
+        "preferences": {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": None, "budget": 0.0,
+                        "allergies": []},
     }
     assert with_budget.json() == {
         "id": bob.id, "username": "bob",
-        "preferences": {"special_diet": None, "cuisines": [], "preferred_nutrient": None, "budget": 12.5},
+        "preferences": {"special_diet": None, "cuisines": [], "preferred_nutrient": None, "budget": 12.5,
+                        "allergies": []},
     }
     assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
 
@@ -392,4 +409,26 @@ def test_the_history_route_lists_ratings_newest_first_with_titles(users, repo, o
     ]
     assert [item["recipe_id"] for item in newest] == ["169286"]
     assert empty == []
+    assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
+
+
+def test_the_preferences_route_replaces_them_and_drops_cached_recommendations(repo, cache):
+    alice = repo.create_user("alice", Preferences(special_diet="halal", cuisines=["Thai"]))
+    cache.store[f"recommendations:{alice.id}"] = b"{}"
+    wanted = {"special_diet": "vegetarian", "cuisines": ["Italian"], "preferred_nutrient": "protein", "budget": 20.0,
+              "allergies": ["peanut", "shellfish"]}
+
+    with TestClient(app) as client:
+        updated = client.put("/api/users/alice/set-preferences", json=wanted)
+        found = client.get("/api/users/alice").json()
+        invalid = client.put("/api/users/alice/set-preferences", json={**wanted, "special_diet": "vegan"})
+        unknown_allergen = client.put("/api/users/alice/set-preferences", json={**wanted, "allergies": ["nuts"]})
+        missing = client.put("/api/users/nobody/set-preferences", json=wanted)
+
+    assert updated.status_code == 200
+    assert updated.json() == {"id": alice.id, "username": "alice", "preferences": wanted}
+    assert found["preferences"] == wanted
+    assert f"recommendations:{alice.id}" not in cache.store
+    assert invalid.status_code == 422
+    assert unknown_allergen.status_code == 422
     assert (missing.status_code, missing.json()) == (404, {"detail": "User not found."})
