@@ -53,7 +53,7 @@ class Preferences(BaseModel):
     special_diet: Diet | None = None
     cuisines: list[str] = Field(default_factory=list, max_length=40)
     preferred_nutrient: str | None = Field(default=None, max_length=64)
-    budget: float | None = Field(default=0.0)
+    budget: float | None = Field(default=0.)
     allergies: list[Allergen] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="before")
