@@ -2,6 +2,7 @@
 
 import { Check, RotateCcw } from "lucide-react";
 import { useState } from "react";
+import { ALLERGENS, normalizeAllergies, type AllergenCode } from "@/lib/allergens";
 import { BUDGET_MAX, BUDGET_SLIDER_MAX, NO_BUDGET_LIMIT, normalizeBudget } from "@/lib/budget";
 import { MEALS, type Preferences } from "@/lib/meals";
 
@@ -35,6 +36,9 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
     update("exclude", [...draft.exclude, next]);
     setAvoidText("");
   };
+  const allergies = normalizeAllergies(draft.allergies);
+  const toggleAllergy = (code: AllergenCode) =>
+    update("allergies", allergies.includes(code) ? allergies.filter((current) => current !== code) : normalizeAllergies([...allergies, code]));
   const cuisines = Array.from(
     new Set(MEALS.map((meal) => meal.cuisine)),
   ).filter(Boolean);
@@ -194,6 +198,22 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
             </div>
           </div>
         </div>
+        <div className="field-label">
+          I&apos;m allergic to
+          <div className="filter-chips" role="group" aria-label="Allergies">
+            {ALLERGENS.map((allergen) => (
+              <button
+                type="button"
+                key={allergen.code}
+                className={`filter-chip ${allergies.includes(allergen.code) ? "is-active" : ""}`}
+                aria-pressed={allergies.includes(allergen.code)}
+                onClick={() => toggleAllergy(allergen.code)}
+              >
+                {allergen.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="preference-actions">
           <button
             className="text-button"
@@ -208,19 +228,20 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
           <button
             className="preference-save"
             onClick={() => {
-              // the budget is always saved, 0 for no limit
+              // the budget is always saved, 0 for no limit, and so are the allergies, none for no allergy
               const next =
                 avoidText.trim().toLowerCase() &&
                 !draft.exclude.includes(avoidText.trim().toLowerCase())
                   ? {
                       ...draft,
                       budget,
+                      allergies,
                       exclude: [
                         ...draft.exclude,
                         avoidText.trim().toLowerCase(),
                       ],
                     }
-                  : { ...draft, budget };
+                  : { ...draft, budget, allergies };
               setDraft(next);
               setBudgetInput(budgetText(budget));
               setAvoidText("");

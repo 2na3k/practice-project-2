@@ -5,6 +5,8 @@
  * they are not a substitute for a nutrition label or recipe verification.
  */
 
+import type { AllergenCode } from "./allergens";
+
 export type Meal = {
   id: string;
   title: string;
@@ -28,6 +30,8 @@ export type Preferences = {
   cuisine: string;
   // most to spend on one meal, in SGD; 0 (or unset) is no limit, as in the Data API
   budget?: number;
+  // the allergens never to recommend; preferences saved before there were allergies have none
+  allergies?: AllergenCode[];
 };
 
 export const DEFAULT_PREFERENCES: Preferences = {

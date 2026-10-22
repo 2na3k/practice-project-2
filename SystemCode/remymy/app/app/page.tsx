@@ -39,6 +39,7 @@ import {
   type Meal,
   type Preferences,
 } from "@/lib/meals";
+import { normalizeAllergies, validAllergies } from "@/lib/allergens";
 import { normalizeBudget, validBudget } from "@/lib/budget";
 import { demoReply } from "@/lib/demo-chat";
 import { alignRecommendations, interpretRequest, recommendMeals } from "@/lib/recommender";
@@ -52,6 +53,7 @@ import type {
 import { fetchRecipeDetail, fetchRecipeLikes, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
 import { RECOMMENDATION_USERNAME, fetchRecommendations, formatPrice, nutrientHighlights, type BuyingProfile } from "@/lib/recommendations";
 import { parseLikes, parseSavedFoods, type SavedFood } from "@/lib/saved";
+import { saveUserPreferences } from "@/lib/user-preferences";
 import { fetchHistory, formatHistoryDate, type HistoryItem } from "@/lib/history";
 import { fetchCatalogItem, type CatalogItem } from "@/lib/catalog";
 
@@ -89,8 +91,9 @@ function validPreferences(value: unknown): value is Preferences {
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string") &&
     (candidate.goal === "balanced" || candidate.goal === "protein" || candidate.goal === "light") &&
     typeof candidate.cuisine === "string" &&
-    // preferences saved before there was a budget have none
-    validBudget(candidate.budget)
+    // preferences saved before there was a budget, or allergies, have none
+    validBudget(candidate.budget) &&
+    validAllergies(candidate.allergies)
   );
 }
 
@@ -337,7 +340,9 @@ export default function HomePage() {
       if (preferencesValue) {
         const parsed: unknown = JSON.parse(preferencesValue);
         // a budget saved as null, or none at all, is stored as 0, no limit
-        if (validPreferences(parsed)) storedPreferences = { ...parsed, budget: normalizeBudget(parsed.budget) };
+        if (validPreferences(parsed)) {
+          storedPreferences = { ...parsed, budget: normalizeBudget(parsed.budget), allergies: normalizeAllergies(parsed.allergies) };
+        }
       }
       if (savedValue) {
         const parsed: unknown = JSON.parse(savedValue);
@@ -547,9 +552,13 @@ export default function HomePage() {
     setPreferences(next);
     setMealShortlist(null);
     setFilter("all");
-    setNotice("Preferences updated");
-    window.setTimeout(() => { if (mountedRef.current) setNotice(""); }, 2600);
-  }, [stopRequest]);
+    // kept in this browser either way; the Data API's copy is what its recommendations use
+    void saveUserPreferences(RECOMMENDATION_USERNAME, next)
+      .then(() => { if (mountedRef.current) flashNotice("Preferences updated"); })
+      .catch((error) => {
+        if (mountedRef.current) flashNotice(error instanceof Error ? error.message : "Your preferences could not be saved.");
+      });
+  }, [flashNotice, stopRequest]);
   const showShortlist = useCallback((recommendations: MealRecommendation[]) => {
     setMealShortlist(recommendations.slice(0, 6));
     setView("meals");

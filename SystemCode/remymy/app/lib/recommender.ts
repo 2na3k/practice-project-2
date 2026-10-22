@@ -4,6 +4,7 @@ import {
   type Meal,
   type Preferences,
 } from "./meals";
+import { normalizeAllergies } from "./allergens";
 import { normalizeBudget } from "./budget";
 
 export { DEFAULT_PREFERENCES } from "./meals";
@@ -170,6 +171,7 @@ export function interpretRequest(
     cuisine: current.cuisine || DEFAULT_PREFERENCES.cuisine,
     // kept when the preferences have one, 0 included, so preferences without a budget keep their shape
     ...(current.budget !== undefined && { budget: normalizeBudget(current.budget) }),
+    ...(current.allergies !== undefined && { allergies: normalizeAllergies(current.allergies) }),
   };
   const normalized = normalizeText(text);
   if (/\bhalal\b/.test(normalized)) addExclusion(source.exclude, "halal");

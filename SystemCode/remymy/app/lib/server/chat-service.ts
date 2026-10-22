@@ -8,6 +8,7 @@ import {
   type Models,
 } from "@earendil-works/pi-ai";
 import type { AgentStage, ChatRequest, ChatResult } from "@/lib/chat-types";
+import { normalizeAllergies, validAllergies } from "../allergens";
 import { validBudget } from "../budget";
 import type { Preferences } from "@/lib/meals";
 import { interpretRequest, type MealRecommendation } from "@/lib/recommender";
@@ -52,7 +53,8 @@ const isPreferences = (value: unknown): value is Preferences => {
     Array.isArray(candidate.exclude) && candidate.exclude.every((item) => typeof item === "string" && item.length <= 80) &&
     (candidate.goal === "balanced" || candidate.goal === "protein" || candidate.goal === "light") &&
     typeof candidate.cuisine === "string" && candidate.cuisine.length <= 80 &&
-    validBudget(candidate.budget)
+    validBudget(candidate.budget) &&
+    validAllergies(candidate.allergies)
   );
 };
 
@@ -79,6 +81,10 @@ const preserveHardPreferences = (candidate: Preferences, baseline: Preferences):
   cuisine: candidate.cuisine,
   // the model may lower the budget but never raise or drop it
   ...((baseline.budget !== undefined || candidate.budget !== undefined) && { budget: lowerBudget(baseline.budget, candidate.budget) }),
+  // the model may add allergies but never drop one
+  ...((baseline.allergies !== undefined || candidate.allergies !== undefined) && {
+    allergies: normalizeAllergies([...(baseline.allergies ?? []), ...(candidate.allergies ?? [])]),
+  }),
 });
 
 const textFromAssistant = (message: AssistantMessage | undefined): string =>
