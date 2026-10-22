@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS app_user (
     json_type(preferences, '$.budget') IS NULL
     OR json_type(preferences, '$.budget') = 'null'
     OR (
-      json_type(preference, '$.budget') = 'real'
-      AND json_extract(preferences, '$.budget') >= 0
+      json_type(preferences, '$.budget') = ('real')
+      AND json_extract(preferences, '$.budget') >= 0.0
     )
   ),
   CHECK (

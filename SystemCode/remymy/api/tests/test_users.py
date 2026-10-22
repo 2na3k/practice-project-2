@@ -87,6 +87,8 @@ VALID = {"special_diet": "halal", "cuisines": ["Thai"], "preferred_nutrient": "f
         {**VALID, "cuisines": ["Thai", 7]},
         {**VALID, "preferred_nutrient": "x" * 65},
         {**VALID, "preferred_nutrient": ["fibre"]},
+        {**VALID, "budget": 5},
+        {**VALID, "budget": -1.5},
         {**VALID, "allergies": "peanut"},
         {**VALID, "allergies": ["peanut", "nuts"]},
         {**VALID, "allergies": ["peanut", 7]},
