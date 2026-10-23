@@ -470,7 +470,7 @@ Storage:
 | Store | Location | Contents |
 | --- | --- | --- |
 | `remymy.db` | `DATABASE_PATH`, the `remymy-user-data` volume in compose | Everything: `recipe` (a row for every recipe the app knows, by `kind`: the Food.com recipes, each catalog food, each user recipe), `recipe_ingredient`, `recipe_instruction` and the FDC Foundation Foods tables, loaded by `api/migrations/bootstrap.py` with upserts; `price_mapped_nutrients`, the priced FDC foods, one row per `fdc_id`, filled on startup from `data/price_mapped_nutrients.csv`; `app_user` (`user_id`, unique `username`, `preferences` as SQLite JSONB, `created_at`), `user_history` (`user_id` → `app_user`, `timestamp`, `liked` 1 or 0, `recipe_id`) and `saved_recipe` (`user_id` → `app_user`, `recipe_id` → `recipe`, both `ON DELETE CASCADE`). The old `remymy-food.db` and `remymy-users.db` are imported once, the first time |
-| Redis | `redis` service, 256 MB, least-recently-used eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON; `number_of_ratings:{user_id}` → ratings since the recommendations were cached |
+| Redis | `redis` service, db 1 (Langfuse has db 0), 512 MB shared, no eviction | `user:{username}` → user id; `recommendations:{user_id}` → cached response JSON; `number_of_ratings:{user_id}` → ratings since the recommendations were cached |
 
 The database enforces the preference rules itself: `CHECK` constraints hold
 each key of `preferences` to its allowed values, and triggers reject
@@ -490,7 +490,7 @@ Data API:
 | `CATALOG_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog is filled from |
 | `ARTIFACT_DIR` | `weights/window_transformer_reranker` | same | Model weights and config |
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
-| `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Cache |
+| `REDIS_URL` | `redis://:${REDIS_AUTH}@redis:6379/1` | `redis://localhost:6379/1` | Cache |
 | `CACHE_TTL_SECONDS` | `86400` | `86400` | Lifetime of cached user ids and recommendations (one day) |
 | `SEED_DEMO_USER` | `true` in compose | `true` | Inject the `demo` user and its ratings into the users database at startup |
 | `LOG_LEVEL` | `INFO` | `INFO` | Level of the API's own log (`DEBUG` adds cache hits, ingredient matching and each pipeline step); compose passes it to `api-migrate`, `mcp` and `models` too |

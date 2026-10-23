@@ -182,7 +182,7 @@ python3 serve.py
 `LEGACY_FOOD_DATABASE_PATH=../data/remymy-food.db`,
 `LEGACY_USER_DATABASE_PATH=./data/remymy-users.db`,
 `CATALOG_PATH=../data/price_mapped_nutrients.csv`,
-`REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis only
+`REDIS_URL=redis://localhost:6379/1` and `SEED_DEMO_USER=true`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.
 
