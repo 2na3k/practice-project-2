@@ -94,6 +94,14 @@ export async function fetchSimilarFoods(recipe: RecipeDetail, k: number, signal?
   return items.map(parseCatalogItem);
 }
 
+// The catalog foods nearest a catalog food: the clusterer reads only a recipe's title, so the food goes in as a recipe
+// titled by its description; the food itself is left out of its neighbours.
+export async function fetchSimilarToCatalogItem(item: CatalogItem, k: number, signal?: AbortSignal): Promise<CatalogItem[]> {
+  const recipe: RecipeDetail = { id: String(item.fdc_id), title: item.description, ingredients: item.product, instructions: [], quality_status: "catalog" };
+  const items = await fetchSimilarFoods(recipe, Math.min(k + 1, MAX_SIMILAR), signal);
+  return items.filter((near) => near.fdc_id !== item.fdc_id).slice(0, k);
+}
+
 // "100 g/ml", or "160–1000 g/ml" when the price is an average over packs of several sizes.
 export function packSize(quantity: number | number[] | null): string | null {
   const sizes = quantity === null ? [] : Array.isArray(quantity) ? quantity : [quantity];
