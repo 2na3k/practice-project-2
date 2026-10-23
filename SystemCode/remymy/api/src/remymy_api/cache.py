@@ -10,7 +10,6 @@ from .schemas import RecommendationResponse
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REDIS_URL = "redis://redis:6379/1"
 DEFAULT_TTL_SECONDS = 86400
 # A user's cached recommendations are made again once they have rated more than this many items since they were
 # cached; the count lives a day from the user's latest rating.
@@ -20,7 +19,7 @@ RATINGS_TTL_SECONDS = 86400
 
 def connect_cache() -> redis.Redis:
     return redis.Redis.from_url(
-        os.getenv("REDIS_URL", DEFAULT_REDIS_URL),
+        os.getenv("REDIS_URL"),
         socket_connect_timeout=2,
         socket_timeout=2,
     )
