@@ -18,9 +18,12 @@ and parameterized SQLite queries.
   request; tests swap them with `app.dependency_overrides`.
 - `src/remymy_api/inference/` runs the recommendation model in the API process:
   `service.py` is what the recommend route calls, over the catalog the
-  repository serves; the two `model_inference_*` modules are the GRU +
-  cross-attention reranker and its HNSW retrieval. `weights/gru_xattn_reranker/`
-  holds the trained model.
+  repository serves; `model_inference_score_recommend.py` is the HNSW retrieval
+  and the window Transformer + cross-attention reranker of
+  `ml_models/training/model_training_reranker_avgemb.ipynb`.
+  `src/remymy_api/inference/weights/window_transformer_reranker/` holds that trained model; the older
+  windowed GRU in `src/remymy_api/inference/weights/gru_xattn_reranker/` still loads with
+  `ARTIFACT_DIR=src/remymy_api/inference/weights/gru_xattn_reranker`.
 - `migrations/ingest_food_data.py` ingests Open Recipes 13k and FoodData
   Central Foundation CSVs without doing ingredient matching or nutrition
   inference.
@@ -61,8 +64,8 @@ records, quarantine rows, nutrition, or arbitrary SQL.
   its `training_labels`.
 
 A query without a food description is `422`, an fdc_id that is not a training food `404`. The
-classifier loads at startup from `CLASSIFIER_ARTIFACT_DIR` (default `weights/recipe_classifier`)
-with the lookup at `FDC_LOOKUP_PATH` (default `weights/fdc_lookup.json`, written by
+classifier loads at startup from `CLASSIFIER_ARTIFACT_DIR` (default `src/remymy_api/inference/weights/recipe_classifier`)
+with the lookup at `FDC_LOOKUP_PATH` (default `src/remymy_api/inference/weights/fdc_lookup.json`, written by
 `src/remymy_api/inference/build_fdc_lookup.py`). Its packages are in `requirements-classifier.txt`,
 not in the image: without them or the weights, both routes answer `503`. The first free-text
 query loads GLiNER and stanza (about 20 s, and stanza downloads its English model once); later
@@ -149,7 +152,7 @@ A route gets a repository on its request's session from
 database (a missing file is not opened, so SQLite does not create it empty).
 On startup the API opens one for the inference service, which loads the
 model from `ARTIFACT_DIR` (default
-`weights/gru_xattn_reranker`) and builds the HNSW index over `all_foods()`. The
+`src/remymy_api/inference/weights/window_transformer_reranker`) and builds the HNSW index over `all_foods()`. The
 index is saved under `INDEX_DIR` and reused while the model files and the
 catalog's foods are unchanged. With neither the CSV nor the database the API
 still starts, and `GET /api/recommend/{username}` answers `503`.

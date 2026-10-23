@@ -51,7 +51,7 @@ sequenceDiagram
 
 ### What it predicts
 
-The model is a **GRU + cross-attention reranker**. Given a user's dated, rated
+The model is a **window Transformer + cross-attention reranker**. Given a user's dated, rated
 history and a candidate item, it outputs **P(like)**: the probability that the
 user would rate the candidate 3 to 5 stars. It only scores candidates. Choosing
 them is the retrieval step described under
@@ -75,25 +75,31 @@ Every item, whether a history item or a candidate, is described by two things:
 
 The user is described by:
 
-- **Profile:** the mean of those eight `log1p` numbers over the whole history,
-  z-scored.
+- **Profile:** the mean of those eight `log1p` numbers over the whole history.
+  Price is z-scored and the nutrients min-max scaled, with training statistics.
+- **Preferred nutrients:** for each nutrient, the mean over the user's ratings
+  with each rating weighted by 1 / 2^(5 − rating), rounded to the nearest
+  integer, as `ml_models/training/sampling_preference.ipynb` computes it. It is
+  put on the profile's scale.
 - **History windows:** the history in date order, cut into windows wherever two
   ratings are 183 days (about six months) or more apart, so each window is one
   period of the user's taste. The last 10 windows are kept, with the last 20
   items in each. Each item carries its rating, centered on the user's mean
-  rating. A missing rating counts as the mean.
+  rating and mapped to [0, 1] as (centered + 5) / 10. A missing rating counts
+  as the mean.
 
 ### Architecture
 
 ```
 item tokens + [price, nutrients] ──► ItemEncoder ──► item_emb (64)
 
-history item_emb + centered ratings, per window ──► GRU (restarted per window)
-                                                     ──► one state per window
+history item_emb + rating + window position + position in window
+        (all windows as one sequence) ──► Transformer ──► one state per rating
 
-mean [price, nutrients] of the history ──► UserEncoder (MLP) ──► profile token
+mean [price, nutrients] of the history, each nutrient mixed with its
+        preferred value ──► UserEncoder (MLP) ──► profile token
 
-candidate item_emb ──► cross-attention over [profile token; window states]
+candidate item_emb ──► cross-attention over [profile token; rating states]
                    ──► MLP(concat(attention output, candidate item_emb))
                    ──► logit ──► sigmoid ──► P(like)
 ```
@@ -102,13 +108,17 @@ candidate item_emb ──► cross-attention over [profile token; window states]
   (no positional encoding, since ingredient order carries no meaning), mean
   pooling, a linear projection of the eight numbers, then a linear fusion to 64
   dimensions.
-- **UserEncoder:** Linear → ReLU → Linear from the 8 profile numbers to 64.
-- **History encoder:** each window's step input is `item_emb +
-  Linear(centered rating)`. The GRU starts from zero in every window, and each
-  window's final hidden state is its state.
+- **UserEncoder:** each nutrient becomes (x · history mean + y · preferred
+  value) / (x + y), with x and y learned; price passes through. Then
+  Linear → ReLU → Linear from the 8 numbers to 64.
+- **History encoder:** each rating is one token, `item_emb + Linear(rating)`
+  plus two learned positions: its window (0 = most recent) and its place in the
+  window (0 = the window's most recent rating). The tokens of all windows form
+  one sequence for a pre-norm Transformer layer (4 heads), so each rating
+  attends within its window and across the others. It gives one state per
+  rating.
 - **Reranker:** the candidate attends (4 heads) over the profile token and the
-  window states. Learned embeddings mark which key is the profile and how recent
-  each window is.
+  rating states. A learned embedding marks which key is the profile.
 
 | Setting | Value |
 | --- | --- |
@@ -116,6 +126,7 @@ candidate item_emb ──► cross-attention over [profile token; window states]
 | Attention heads | 4 |
 | Text self-attention layers | 1 |
 | Max tokens per item | 40 |
+| History self-attention layers | 1 |
 | Windows × items per window | 10 × 20 |
 | Window gap | 183 days |
 | Dropout | 0.1 |
@@ -139,9 +150,12 @@ candidate item_emb ──► cross-attention over [profile token; window states]
   before *t*, for its history, its profile and its rating centering.
 - **Optimization:** AdamW, learning rate 1e-3, weight decay 1e-5, batch size
   512, binary cross-entropy, early stopping on validation log loss. The best
-  epoch was 5 of at most 10.
+  epoch was 2 of at most 10 (training stopped after epoch 4).
 
-Artifacts in [`api/weights/gru_xattn_reranker/`](api/weights/gru_xattn_reranker/), where the API loads them from:
+Artifacts in [`api/src/remymy_api/inference/weights/window_transformer_reranker/`](api/src/remymy_api/inference/weights/window_transformer_reranker/), where the API
+loads them from. The notebook saves them to `model_artifacts/window_transformer_reranker/`; these are from its run of
+21 Oct 2026. The older windowed GRU stays in `api/src/remymy_api/inference/weights/gru_xattn_reranker/` and loads with
+`ARTIFACT_DIR=src/remymy_api/inference/weights/gru_xattn_reranker`.
 
 | File | Contents |
 | --- | --- |
@@ -156,25 +170,27 @@ Classification, over all test rows:
 
 | Metric | Value |
 | --- | --- |
-| ROC-AUC | 0.625 |
-| AUC, positives vs sampled negatives | 0.634 |
-| AUC, positives vs rated negatives | 0.514 |
-| Log loss | 0.667 |
-| Accuracy / precision / recall / F1 | 0.587 / 0.571 / 0.555 / 0.563 |
+| ROC-AUC | 0.618 |
+| AUC, positives vs sampled negatives | 0.629 |
+| AUC, positives vs rated negatives | 0.492 |
+| Log loss | 0.669 |
+| Accuracy / precision / recall / F1 | 0.584 / 0.564 / 0.583 / 0.573 |
 
 Ranking, where each held-out positive is ranked among 99 recipes the user never
 rated:
 
 | Metric | Value |
 | --- | --- |
-| HR@10 | 0.197 |
-| NDCG@10 | 0.092 |
-| MRR | 0.086 |
-| Mean rank | 38.0 of 100 |
+| HR@10 | 0.188 |
+| NDCG@10 | 0.088 |
+| MRR | 0.083 |
+| Mean rank | 38.5 of 100 |
 
-HR@10 of 0.197 is about twice what random ordering gives (0.10). The spec
+HR@10 of 0.188 is nearly twice what random ordering gives (0.10). The spec
 reports a popularity baseline of about 0.14 under the same negative sampling.
-The AUC against rated negatives, 0.514, is close to chance: the model tells
+The older windowed GRU's saved results are a little higher (ROC-AUC 0.625, HR@10
+0.197), from a separate training run. The AUC against rated negatives, 0.492, is
+at chance: the model tells
 recipes a user engages with apart from random ones, but hardly separates recipes
 the user liked from recipes they rated and disliked.
 
@@ -472,7 +488,7 @@ Data API:
 | `LEGACY_FOOD_DATABASE_PATH` | `/data/remymy-food.db` | `../data/remymy-food.db` | Old recipe database, merged in once when `remymy.db` has no recipes |
 | `LEGACY_USER_DATABASE_PATH` | `/state/remymy-users.db` | `./data/remymy-users.db` | Old users database, imported once into a `remymy.db` without users |
 | `CATALOG_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog is filled from |
-| `ARTIFACT_DIR` | `weights/gru_xattn_reranker` | same | Model weights and config |
+| `ARTIFACT_DIR` | `weights/window_transformer_reranker` | same | Model weights and config |
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
 | `REDIS_URL` | `redis://redis:6379/0` | `redis://localhost:6379/0` | Cache |
 | `CACHE_TTL_SECONDS` | `86400` | `86400` | Lifetime of cached user ids and recommendations (one day) |

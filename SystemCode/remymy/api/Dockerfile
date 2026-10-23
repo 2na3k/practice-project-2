@@ -27,10 +27,6 @@ RUN apt-get update \
 
 COPY src ./src
 COPY migrations ./migrations
-COPY weights/gru_xattn_reranker/model.pt weights/gru_xattn_reranker/config.json ./weights/gru_xattn_reranker/
-COPY weights/recipe_classifier ./weights/recipe_classifier
-COPY weights/recipe_clustering ./weights/recipe_clustering
-COPY weights/fdc_lookup.json ./weights/
 COPY README.md .
 
 EXPOSE 8002

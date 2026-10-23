@@ -1,4 +1,4 @@
-"""Build api/weights/fdc_lookup.json: every training food keyed by fdc_id, as the recipe models saw it.
+"""Build api/src/remymy_api/inference/weights/fdc_lookup.json: every training food keyed by fdc_id, as the recipe models saw it.
 
 Sources are the files the training notebooks wrote, so a lookup reproduces the training inputs exactly:
 - recipe_clusters.csv (recipe_clustering.ipynb): description, product / adj / verb, nutrients, price interval, cluster;

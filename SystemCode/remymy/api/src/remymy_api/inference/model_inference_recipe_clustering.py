@@ -29,9 +29,9 @@ except ImportError:  # run as a file
     from food_query import (DEFAULT_LOOKUP, NUTRIENT_COLS, TermExtractor, add_query_arguments, item_from_args,
                             iter_queries, load_fdc_lookup)
 
-# api/weights/recipe_clustering: recipe_clustering.joblib as the training notebook writes it. Neighbours are described
-# from the premade fdc_id lookup (api/weights/fdc_lookup.json); without it they show only their fdc_id.
-DEFAULT_ARTIFACTS = Path(__file__).resolve().parents[3] / "weights" / "recipe_clustering"
+# api/src/remymy_api/inference/weights/recipe_clustering: recipe_clustering.joblib as the training notebook writes it. Neighbours are described
+# from the premade fdc_id lookup (api/src/remymy_api/inference/weights/fdc_lookup.json); without it they show only their fdc_id.
+DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "recipe_clustering"
 DEFAULT_NEIGHBOURS = 5
 
 nltk.download("wordnet", quiet=True)

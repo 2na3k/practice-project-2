@@ -27,8 +27,8 @@ try:
 except ImportError:  # run as a file
     from food_query import TermExtractor, add_query_arguments, item_from_args, iter_queries
 
-# api/weights/recipe_classifier: recipe_classifier.pt, preprocessing.joblib and config.json as the notebook writes them.
-DEFAULT_ARTIFACTS = Path(__file__).resolve().parents[3] / "weights" / "recipe_classifier"
+# api/src/remymy_api/inference/weights/recipe_classifier: recipe_classifier.pt, preprocessing.joblib and config.json as the notebook writes them.
+DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "recipe_classifier"
 
 
 class ItemAttentionEncoder(nn.Module):

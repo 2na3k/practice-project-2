@@ -20,9 +20,8 @@ from ..history import History
 from ..recipe import Recipe
 from ..repository.recipe_repository import RecipeRepository
 from ..schemas import CatalogFood
-from .model_inference_reranker_avgemb import DEFAULT_ARTIFACTS
-from .model_inference_score_recommend import (CATALOG_NUTRIENTS, DEFAULT_INDEX_DIR, DIET_COLUMNS, TEXT_COLUMNS,
-                                              RetrievalPipeline)
+from .model_inference_score_recommend import (CATALOG_NUTRIENTS, DEFAULT_ARTIFACTS, DEFAULT_INDEX_DIR, DIET_COLUMNS,
+                                              TEXT_COLUMNS, RetrievalPipeline)
 from .classification_service import lookup_path
 from .food_query import NUTRIENT_COLS, EmptyQuery, TermExtractor, build_item
 from .model_inference_recipe_clustering import DEFAULT_ARTIFACTS as CLUSTERING_ARTIFACTS

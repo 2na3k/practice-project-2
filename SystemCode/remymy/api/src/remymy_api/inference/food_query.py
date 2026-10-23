@@ -9,7 +9,7 @@ data pipeline did:
 - adj / verb: stanza UPOS tags ADJ / VERB over the description (2_nutrient_analysis.ipynb).
 
 A training food can also be looked up by fdc_id ("--fdc-id 167516", or "fdc:167516" / "167516" as the query) in the
-premade api/weights/fdc_lookup.json (build_fdc_lookup.py): it is then used with its exact training inputs, and its
+premade api/src/remymy_api/inference/weights/fdc_lookup.json (build_fdc_lookup.py): it is then used with its exact training inputs, and its
 training cluster and labels are shown next to the prediction.
 """
 from functools import lru_cache
@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 NUTRIENT_COLS = ["protein_g", "fat_g", "carb_g", "energy_kcal", "fiber_g", "sodium_mg",
                  "cholesterol_mg", "satfat_g", "sugars_g"]
 
-# api/weights/fdc_lookup.json: fdc_id → training food, written by build_fdc_lookup.py.
-DEFAULT_LOOKUP = Path(__file__).resolve().parents[3] / "weights" / "fdc_lookup.json"
+# api/src/remymy_api/inference/weights/fdc_lookup.json: fdc_id → training food, written by build_fdc_lookup.py.
+DEFAULT_LOOKUP = Path(__file__).resolve().parent / "weights" / "fdc_lookup.json"
 FDC_QUERY = re.compile(r"(?:fdc(?:_id)?\s*[:=#]?\s*)?(\d+)", re.I)
 
 NER_MODEL = "urchade/gliner_large-v2.1"

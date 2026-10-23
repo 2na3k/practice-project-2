@@ -1,4 +1,5 @@
-"""Recommend catalog recipes to a user: HNSW retrieval over item embeddings, then the GRU + cross-attention reranker.
+"""Recommend catalog recipes to a user: HNSW retrieval over item embeddings, then the window Transformer + cross-attention
+reranker of model_training_reranker_avgemb.ipynb.
 
 1. Index (once per model and catalog): every recipe of the catalog, the foods RecipeRepository reads from the
    catalog database, is embedded by the reranker's ItemEncoder, i.e. its product / adj / verb tokens concatenated with
@@ -15,8 +16,12 @@
    candidates inside the range, and the ones at cosine MAX_SIMILARITY or more to the history recipe are dropped. (The
    catalog has many near-identical recipes under different fdc_ids, e.g. the same food as patties and as crumbles.)
 5. User state: the history is cut into windows wherever two ratings are window_gap_days (about 6 months) or more
-   apart; the GRU runs over each window from a fresh state, and each window's final hidden state is stored.
-6. Reranking: each candidate attends over [user profile; window states] and gets P(like); candidates are sorted by it.
+   apart, the last max_windows windows with their last t_max ratings each. One Transformer runs over the ratings of
+   all of them together, so each rating attends within its own window and across the others, and gives one state per
+   rating. The user profile is the history's mean [price, nutrients], each nutrient mixed with the user's preferred
+   value of it (the rating-weighted mean, as sampling_preference.ipynb computes it).
+6. Reranking: each candidate attends over [user profile; one state per history rating] and gets P(like); candidates
+   are sorted by it.
 7. Diversity: maximal marginal relevance (MMR) picks the top_k from the reranked candidates, each pick maximizing
    lambda * P(like) - (1 - lambda) * its highest cosine similarity to an earlier pick, so near-identical recipes do
    not fill the list. A candidate whose cosine to a pick is MAX_SIMILARITY or more is never picked, so the list can
@@ -51,10 +56,14 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 
-from .model_inference_reranker_avgemb import (DEFAULT_ARTIFACTS, THRESHOLD, ItemEncoder, Reranker as BaseReranker,
-                                              UserEncoder)
+from .model_inference_reranker_avgemb import THRESHOLD, ItemEncoder, Reranker as BaseReranker, UserEncoder
 
 logger = logging.getLogger(__name__)
+
+# api/src/remymy_api/inference/weights/window_transformer_reranker: model.pt and config.json as model_training_reranker_avgemb.ipynb saves its
+# window Transformer reranker (WINDOW_ARTIFACT_DIR there). The older windowed GRU in weights/gru_xattn_reranker
+# still loads: Reranker tells the two apart by their checkpoints.
+DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "window_transformer_reranker"
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_INDEX_DIR = Path(tempfile.gettempdir()) / "remymy-retrieval-index"
@@ -227,58 +236,165 @@ class WindowGRUCrossAttentionReranker(nn.Module):
         return self.head(torch.cat([attended, candidate_emb], dim=-1)).squeeze(-1)
 
 
-class Reranker(BaseReranker):
-    """The reranker, scoring candidates from item embeddings.
+# ---------------------------------------------------------------------------------------------------------------
+# The window Transformer: UserEncoder, WindowTransformerHistoryEncoder and WindowTransformerReranker of
+# model_training_reranker_avgemb.ipynb (same parameter names, so its model.pt loads as it is). The notebook's
+# reranker also holds its catalog as buffers; recipes here are the API's catalog, so items are encoded with
+# item_encoder and the index caches them.
+# ---------------------------------------------------------------------------------------------------------------
+class PreferenceUserEncoder(nn.Module):
+    """Standardized [mean log price, mean log nutrients] of the history, each nutrient a learned weighted average with
+    the user's preferred value of it → U_profile (the notebook's UserEncoder)."""
 
-    A config.json with max_windows is the windowed model of the current notebook: history cut into windows at gaps of
-    window_gap_days or more, centered ratings. Otherwise it is the older model of
-    model_inference_reranker_avgemb_approach.py: the last t_max recipes in one sequence."""
+    def __init__(self, n_profile, config):
+        super().__init__()
+        self.log_weights = nn.Parameter(torch.zeros(2))  # log [x, y]: history average, preferred value.
+        self.mlp = nn.Sequential(nn.Linear(n_profile, config["d"]), nn.ReLU(), nn.Linear(config["d"], config["d"]))
+
+    def forward(self, profile, preferences_nutrient):
+        """profile (B, n_profile) is [price, *nutrients]; preferences_nutrient (B, n) holds the preferred values of its
+        last n columns, on the same scale. Each of those columns becomes (x * profile + y * preferred) / (x + y)."""
+        n = preferences_nutrient.size(1)
+        x, y = self.log_weights.exp()
+        nutrients = (x * profile[:, -n:] + y * preferences_nutrient) / (x + y)
+        return self.mlp(torch.cat([profile[:, :-n], nutrients], dim=1))
+
+
+class WindowTransformerHistoryEncoder(nn.Module):
+    """History windows → one self-attention state per history rating (the notebook's WindowTransformerHistoryEncoder)."""
+
+    def __init__(self, config):
+        super().__init__()
+        d = config["d"]
+        self.rating_projection = nn.Linear(1, d)
+        self.window_position = nn.Embedding(config["max_windows"], d)  # 0: the most recent window.
+        self.sub_position = nn.Embedding(config["t_max"], d)  # Inside a window, 0: its most recent rating.
+        layer = nn.TransformerEncoderLayer(d, config["n_heads"], dim_feedforward=2 * d, dropout=config["dropout"],
+                                           batch_first=True, norm_first=True)
+        self.self_attention = nn.TransformerEncoder(layer, config["history_layers"], norm=nn.LayerNorm(d),
+                                                    enable_nested_tensor=False)
+
+    def forward(self, history_emb, history_rating, window_len):
+        """States (B, L, d) and their padding mask (B, L), True = padded: row b's ratings fill its first
+        window_len[b].sum() slots, in (window, step) order, window 0 the most recent and each window in date order.
+
+        history_emb (B, K, T, d) and history_rating (B, K, T) hold window k's ratings, left-aligned; window_len (B, K)
+        counts them, 0 for a window the user does not have."""
+        window_len = window_len.to(history_emb.device)
+        windows, steps = history_emb.shape[1:3]
+        steps_back = window_len.unsqueeze(-1) - 1 - torch.arange(steps, device=history_emb.device)  # (B, K, T)
+        real = steps_back >= 0
+        tokens = (history_emb + self.rating_projection(history_rating.unsqueeze(-1))
+                  + self.window_position.weight[:windows, None] + self.sub_position(steps_back.clamp(min=0)))
+        # Each row's real tokens move to its first slots, so self-attention skips the padding of short windows.
+        count = window_len.sum(1)
+        padded = torch.arange(int(count.max()), device=history_emb.device) >= count.unsqueeze(1)
+        packed = tokens.new_zeros(*padded.shape, tokens.size(-1))
+        packed[~padded] = tokens[real]
+        return self.self_attention(packed, src_key_padding_mask=padded), padded
+
+
+class WindowTransformerReranker(nn.Module):
+    """Candidate item_emb cross-attends over [U_profile; one state per history rating]."""
+
+    def __init__(self, vocab_size, n_numeric, n_profile, n_fields, config):
+        super().__init__()
+        d = config["d"]
+        self.item_encoder = ItemEncoder(vocab_size, n_numeric, n_fields, config)
+        self.user_encoder = PreferenceUserEncoder(n_profile, config)
+        self.history_encoder = WindowTransformerHistoryEncoder(config)
+        self.key_type = nn.Embedding(2, d)  # 0: profile token, 1: history state.
+        self.cross_attention = nn.MultiheadAttention(d, config["n_heads"], dropout=config["dropout"],
+                                                     batch_first=True)
+        self.head = nn.Sequential(nn.Linear(2 * d, d), nn.ReLU(), nn.Dropout(config["dropout"]), nn.Linear(d, 1))
+
+    def user_keys(self, history_emb, history_rating, window_len, profile, preferences_nutrient):
+        """Keys and values [U_profile; h_1 … h_L] (B, 1+L, d) and their padding mask (True = padded)."""
+        states, padded = self.history_encoder(history_emb, history_rating, window_len)
+        profile_token = self.user_encoder(profile, preferences_nutrient).unsqueeze(1)
+        keys = torch.cat([profile_token + self.key_type.weight[0], states + self.key_type.weight[1]], dim=1)
+        return keys, torch.cat([padded.new_zeros(len(padded), 1), padded], dim=1)
+
+    def score_candidates(self, candidate_emb, keys, key_padding_mask):
+        """Logits (B, C) for candidates (B, C, d). Each candidate attends to its own user's keys only."""
+        attended, _ = self.cross_attention(candidate_emb, keys, keys, key_padding_mask=key_padding_mask,
+                                           need_weights=False)
+        return self.head(torch.cat([attended, candidate_emb], dim=-1)).squeeze(-1)
+
+
+class Reranker(BaseReranker):
+    """The reranker, scoring candidates from item embeddings. Which model it is comes from the artifacts:
+
+    - window_transformer: the window Transformer of model_training_reranker_avgemb.ipynb (its WINDOW_ARTIFACT_DIR).
+      History cut into windows at gaps of window_gap_days or more, ratings centered on the history's mean and mapped
+      to [0, 1], and a profile with the user's preferred nutrients.
+    - window_gru: the older windowed GRU (weights/gru_xattn_reranker): the same windows, centered ratings.
+    - gru: the oldest model, of model_inference_reranker_avgemb_approach.py: the last t_max recipes in one sequence."""
 
     def __init__(self, artifact_dir=DEFAULT_ARTIFACTS, tagger=None, device=None):
         artifact_dir = Path(artifact_dir)
         saved = json.loads((artifact_dir / "config.json").read_text())
         self.windowed = "max_windows" in saved["config"]
         if not self.windowed:
+            self.kind = "gru"
             super().__init__(artifact_dir, tagger, device)
             # Models trained with [0, 1] history ratings save offset 5 and scale 10; older ones only a scale.
             self.rating_offset = saved.get("history_rating_offset", 0.0)
             return
-        # The windowed model: same attributes as the base class, another model class.
+        # A windowed model: the base class's attributes, another model class.
         self.config = saved["config"]
         self.text_fields = saved["text_fields"]
         self.nutrient_columns = saved["nutrient_columns"]
         self.token_lookup = {token: index for index, token in enumerate(saved["vocabulary"])}
         self.item_mean, self.item_std = np.array(saved["item_log1p_mean"]), np.array(saved["item_log1p_std"])
-        self.profile_mean, self.profile_std = np.array(saved["profile_mean"]), np.array(saved["profile_std"])
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         state = torch.load(artifact_dir / "model.pt", map_location="cpu", weights_only=True)
         self.n_numeric = state["item_encoder.numeric_projection.weight"].shape[1]
-        self.use_rating, self.rating_offset, self.rating_scale = True, 0.0, 1.0  # Centered, not scaled.
-        self.model = WindowGRUCrossAttentionReranker(len(self.token_lookup), self.n_numeric,
-                                                     state["user_encoder.mlp.0.weight"].shape[1],
-                                                     len(self.text_fields), self.config)
+        n_profile = state["user_encoder.mlp.0.weight"].shape[1]
+        self.use_rating = True
+        if "history_encoder.sub_position.weight" in state:
+            self.kind = "window_transformer"
+            # Price is z-scored and the nutrients min-max scaled (the notebook's profile_shift / profile_scale); the
+            # preferred nutrients are put on the nutrients' scale, columns [1:].
+            self.profile_shift, self.profile_scale = np.array(saved["profile_shift"]), np.array(saved["profile_scale"])
+            self.rating_offset, self.rating_scale = saved["history_rating_offset"], saved["history_rating_scale"]
+            self.model = WindowTransformerReranker(len(self.token_lookup), self.n_numeric, n_profile,
+                                                   len(self.text_fields), self.config)
+        else:
+            self.kind = "window_gru"
+            self.profile_shift, self.profile_scale = np.array(saved["profile_mean"]), np.array(saved["profile_std"])
+            self.rating_offset, self.rating_scale = 0.0, 1.0  # Centered, not scaled.
+            self.model = WindowGRUCrossAttentionReranker(len(self.token_lookup), self.n_numeric, n_profile,
+                                                         len(self.text_fields), self.config)
         self.model.load_state_dict(state)
         self.model.to(self.device).eval()
         self.tagger = tagger
-        logger.info("Loaded the windowed reranker from %s on %s (vocabulary %d tokens).", artifact_dir, self.device,
-                    len(self.token_lookup))
+        logger.info("Loaded the %s reranker from %s on %s (vocabulary %d tokens).", self.kind.replace("_", " "),
+                    artifact_dir, self.device, len(self.token_lookup))
 
-    def normalized_ratings(self, history):
-        """History ratings as the GRU saw them in training (spec 2.3): centered on the mean of all of them, then
-        (centered + offset) / scale. The windowed model uses them centered only (offset 0, scale 1).
+    @property
+    def history_model(self) -> str:
+        """What reads the history, for the pipeline's log."""
+        return "the Transformer" if self.kind == "window_transformer" else "the GRU"
 
-        A recipe without a rating counts as the user's mean, i.e. centered 0."""
-        if not self.use_rating:
-            return np.zeros(len(history), dtype=np.float32)  # The model has no rating input.
+    def centered_ratings(self, history):
+        """The history's ratings centered on their mean, as in training: the mean before t is the mean of the whole
+        history here. A recipe without a rating counts as the user's mean, i.e. centered 0."""
         ratings = np.array([np.nan if recipe.get("rating") is None else recipe["rating"] for recipe in history],
                            dtype=np.float64)
-        centered = np.zeros(len(history)) if np.isnan(ratings).all() else np.nan_to_num(ratings - np.nanmean(ratings))
-        return ((centered + self.rating_offset) / self.rating_scale).astype(np.float32)
+        return np.zeros(len(history)) if np.isnan(ratings).all() else np.nan_to_num(ratings - np.nanmean(ratings))
+
+    def normalized_ratings(self, history):
+        """History ratings as the model reads them: (centered + offset) / scale. The window Transformer maps them to
+        [0, 1] (offset 5, scale 10); the windowed GRU uses them centered only (offset 0, scale 1)."""
+        if not self.use_rating:
+            return np.zeros(len(history), dtype=np.float32)  # The model has no rating input.
+        return ((self.centered_ratings(history) + self.rating_offset) / self.rating_scale).astype(np.float32)
 
     def windows(self, history):
-        """The windows of history (date order) that the GRU sees, most recent first: positions into history (K, T),
-        -1 at padding; centered ratings (K, T); lengths (K,)."""
-        centered = self.normalized_ratings(history).astype(np.float64)  # Centered, missing ratings 0.
+        """The windows of history (date order) that the model sees, most recent first: positions into history
+        (K, T), -1 at padding; ratings as the model reads them (K, T), 0 at padding; lengths (K,)."""
+        centered = self.centered_ratings(history)
         days = np.array([history_day(recipe.get("date")) for recipe in history], dtype=np.int64)
         count = len(history)
         positions, ratings, lengths = history_windows(
@@ -286,12 +402,32 @@ class Reranker(BaseReranker):
             window_starts(np.zeros(count, dtype=np.int64), days, self.config["window_gap_days"]), np.arange(count),
             centered, self.config["max_windows"], self.config["t_max"])
         windows, steps = int((lengths[0] > 0).sum()), int(lengths[0].max())
-        return positions[0, :windows, :steps], ratings[0, :windows, :steps], lengths[0, :windows]
+        positions, ratings = positions[0, :windows, :steps], ratings[0, :windows, :steps]
+        # The notebook's window_batch: (centered + offset) / scale at real steps, 0 at padding.
+        ratings = np.where(positions >= 0, (ratings + self.rating_offset) / self.rating_scale, 0.0).astype(np.float32)
+        return positions, ratings, lengths[0, :windows]
 
     def _profile(self, history):
-        profile = np.mean([self.log_numeric(recipe) for recipe in history], axis=0)[-len(self.profile_mean):]
-        profile = (profile - self.profile_mean) / self.profile_std
+        """The standardized mean log1p [price, nutrients] of the history (1, n_profile)."""
+        profile = np.mean([self.log_numeric(recipe) for recipe in history], axis=0)[-len(self.profile_shift):]
+        profile = (profile - self.profile_shift) / self.profile_scale
         return torch.as_tensor(profile, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+    def _preferences(self, history):
+        """The user's preferred nutrients (1, n), as sampling_preference.ipynb computes them and the notebook's
+        rerank_candidates serves them: the mean of the history's nutrients, each rating weighted by 1 / 2^(5 - rating),
+        rounded to the nearest integer (a half up), then on the profile's log1p scale and scaled with its statistics.
+        A recipe without a rating weighs as the user's mean rating; with no ratings at all, every recipe weighs the
+        same."""
+        ratings = np.array([np.nan if recipe.get("rating") is None else recipe["rating"] for recipe in history],
+                           dtype=np.float64)
+        ratings = np.full(len(history), 5.0) if np.isnan(ratings).all() else np.where(np.isnan(ratings),
+                                                                                       np.nanmean(ratings), ratings)
+        weights = 1 / 2.0 ** (5 - ratings)
+        nutrients = np.expm1(np.stack([self.log_numeric(recipe) for recipe in history])[:, 1:])
+        preferences = np.log1p(np.floor(weights @ nutrients / weights.sum() + 0.5))
+        preferences = (preferences - self.profile_shift[1:]) / self.profile_scale[1:]
+        return torch.as_tensor(preferences, dtype=torch.float32, device=self.device).unsqueeze(0)
 
     def _window_inputs(self, history, history_emb):
         positions, ratings, lengths = self.windows(history)
@@ -302,20 +438,32 @@ class Reranker(BaseReranker):
 
     @torch.no_grad()
     def window_states(self, history, history_emb):
-        """The hidden state (K, d) of each window of the windowed model, most recent first."""
-        states, _ = self.model.history_encoder(*self._window_inputs(history, history_emb))
-        return states[0].cpu()
+        """One state (K, d) per window of the history, most recent first. The windowed GRU's is each window's final
+        hidden state; the window Transformer has one state per rating, so a window's is the mean of its ratings'."""
+        window_emb, ratings, lengths = self._window_inputs(history, history_emb)
+        states, _ = self.model.history_encoder(window_emb, ratings, lengths)
+        if self.kind == "window_gru":
+            return states[0].cpu()
+        # The Transformer's states are in (window, step) order: window 0's ratings first.
+        per_window = torch.split(states[0, :int(lengths.sum())], lengths[0].tolist())
+        return torch.stack([window.mean(0) for window in per_window]).cpu()
 
     @torch.no_grad()
     def user_keys(self, history, history_emb):
         """The user's attention keys and their padding mask, for history (date order) and its item embeddings."""
-        if self.windowed:
+        if self.kind == "window_transformer":
+            return self.model.user_keys(*self._window_inputs(history, history_emb), self._profile(history),
+                                        self._preferences(history))
+        if self.kind == "window_gru":
             return self.model.user_keys(*self._window_inputs(history, history_emb), self._profile(history))
-        # Older model: the last t_max history recipes in date order go to the GRU as one sequence.
+        # Oldest model: the last t_max history recipes in date order go to the GRU as one sequence.
         t_max = self.config["t_max"]
         recent = history_emb[-t_max:].to(self.device).unsqueeze(0)
         history_rating = torch.as_tensor(self.normalized_ratings(history)[-t_max:], device=self.device).unsqueeze(0)
-        return self.model.user_keys(recent, history_rating, torch.tensor([recent.size(1)]), self._profile(history))
+        profile = (np.mean([self.log_numeric(recipe) for recipe in history], axis=0)[-len(self.profile_mean):]
+                   - self.profile_mean) / self.profile_std
+        return self.model.user_keys(recent, history_rating, torch.tensor([recent.size(1)]),
+                                    torch.as_tensor(profile, dtype=torch.float32, device=self.device).unsqueeze(0))
 
     @torch.no_grad()
     def score(self, history, history_emb, candidate_emb):
@@ -1004,7 +1152,7 @@ class RetrievalPipeline:
         self.recipes = recipes
         self.recipe_index = recipe_index
         self.row_of = {fdc_id: row for row, fdc_id in enumerate(recipe_index.fdc_ids)}
-        self.user_states = {}  # user_id → windows and their GRU hidden states, from the last recommend call.
+        self.user_states = {}  # user_id → windows and the model's state of each, from the last recommend call.
 
     @classmethod
     def from_recipes(cls, recipes, artifacts=DEFAULT_ARTIFACTS, index_dir=DEFAULT_INDEX_DIR, rebuild=False,
@@ -1044,7 +1192,8 @@ class RetrievalPipeline:
         return resolved, torch.stack(embeddings)
 
     def user_state(self, history, history_emb):
-        """The windows of a history (date order) and the GRU hidden state of each, most recent first."""
+        """The windows of a history (date order) and the model's state of each (Reranker.window_states), most recent
+        first."""
         positions, _, lengths = self.reranker.windows(history)
         states = self.reranker.window_states(history, history_emb)
         windows = []
@@ -1088,14 +1237,15 @@ class RetrievalPipeline:
         history, history_emb = self.resolve_history(user["history"])
         ratings = self.reranker.normalized_ratings(history)
         t_max = self.reranker.config["t_max"]
-        window_of = {}  # History position → window number (1 = most recent), for the recipes the GRU sees.
+        window_of = {}  # History position → window number (1 = most recent), for the recipes the model sees.
         if self.reranker.windowed:
             positions, _, _ = self.reranker.windows(history)
             window_of = {int(position): window + 1 for window, row in enumerate(positions) for position in row
                          if position >= 0}
             log(f"\n=== Step 1. History of user {user.get('user_id', '?')}: {len(history)} recipes, date order; a gap "
                 f"of {self.reranker.config['window_gap_days']}+ days starts a window (the last "
-                f"{self.reranker.config['max_windows']} windows, last {t_max} recipes each, feed the GRU) ===")
+                f"{self.reranker.config['max_windows']} windows, last {t_max} recipes each, feed "
+                f"{self.reranker.history_model}) ===")
         else:
             log(f"\n=== Step 1. History of user {user.get('user_id', '?')}: {len(history)} recipes, date order "
                 f"(the last {t_max} feed the GRU) ===")
@@ -1164,8 +1314,9 @@ class RetrievalPipeline:
 
         if self.reranker.windowed:
             self.user_states[user.get("user_id")] = state = self.user_state(history, history_emb)
-            log(f"\n=== Step 5. User state: GRU hidden state of each window (restarted per window), stored in "
-                f"pipeline.user_states ===")
+            state_of = ("the Transformer's states of its ratings, averaged" if self.reranker.kind == "window_transformer"
+                        else "the GRU's final hidden state (restarted per window)")
+            log(f"\n=== Step 5. User state: for each window, {state_of}; stored in pipeline.user_states ===")
             log(f"  {'window':>6}  {'from':<10}  {'to':<10} {'recipes':>7} {'mean rating':>11} {'|state|':>8}  first 6 dims")
             for window in state["windows"]:
                 log(f"  {window['window']:>6}  {window['from']:<10}  {window['to']:<10} {window['recipes']:>7} "
@@ -1185,8 +1336,14 @@ class RetrievalPipeline:
         for rank, result in enumerate(reranked, start=1):
             result["rerank_rank"] = rank
 
-        keys = (f"the hidden states of {len(self.user_states[user.get('user_id')]['windows'])} windows"
-                if self.reranker.windowed else f"GRU states of the last {min(len(history), t_max)} history recipes")
+        windows = self.user_states.get(user.get("user_id"), {}).get("windows", [])
+        if self.reranker.kind == "window_transformer":
+            keys = (f"the Transformer's states of the {sum(window['recipes'] for window in windows)} ratings in "
+                    f"{len(windows)} window{'' if len(windows) == 1 else 's'}")
+        elif self.reranker.windowed:
+            keys = f"the hidden states of {len(windows)} windows"
+        else:
+            keys = f"GRU states of the last {min(len(history), t_max)} history recipes"
         log(f"\n=== Step 6. Reranker: each candidate attends over [user profile; {keys}] -> P(like) ===")
         log(f"  {'new':>4} {'was':>4} {'move':>5}  {'fdc_id':>8}  {'recipe':<48} {'cosine':>7} {'P(like)':>8}")
         for new_rank, result in enumerate(reranked[:show], start=1):

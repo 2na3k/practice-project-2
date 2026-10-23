@@ -1,2 +1,6 @@
 .venv/
 __pycache__/
+**/item_cache.pt
+**/training_history.csv
+**/.DS_Store
+src/remymy_api/inference/weights/gru_xattn_reranker
