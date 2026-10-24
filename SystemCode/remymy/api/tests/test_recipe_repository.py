@@ -218,7 +218,7 @@ def test_startup_fills_the_catalog_from_the_csv_and_makes_each_food_a_recipe(tmp
     from remymy_api.main import app
     from remymy_api.schema import connect
 
-    monkeypatch.setenv("CATALOG_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])))
+    monkeypatch.setenv("RECIPE_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])))
 
     with TestClient(app) as client:
         found = client.get("/api/catalog/2")

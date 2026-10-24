@@ -14,7 +14,7 @@ from remymy_api.schema import connect, init_database, merge_food_data
 def client(tmp_path, monkeypatch, cache):
     """The API on a database with two Food.com recipes, the catalog food 170138, and the users alice and bob."""
     add_recipes([("openrecipes:1", "Tomato Soup", "accepted"), ("openrecipes:2", "Apple Salad", "accepted")])
-    monkeypatch.setenv("CATALOG_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(170138, "Spinach, raw")])))
+    monkeypatch.setenv("RECIPE_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(170138, "Spinach, raw")])))
     with TestClient(app) as test_client:
         connection = connect(database_path())
         with connection:

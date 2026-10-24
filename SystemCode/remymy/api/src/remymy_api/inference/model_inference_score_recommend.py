@@ -1403,7 +1403,7 @@ def main():
     parser.add_argument("command", choices=["build", "recommend"],
                         help="build: embed the catalog and save the HNSW index; recommend: score one user")
     parser.add_argument("--catalog", type=Path,
-                        help="database holding the catalog (default DATABASE_PATH); filled from CATALOG_PATH if missing")
+                        help="database holding the catalog (default DATABASE_PATH); filled from RECIPE_PATH if missing")
     parser.add_argument("--artifacts", type=Path, default=DEFAULT_ARTIFACTS,
                         help="folder holding the reranker's model.pt and config.json")
     parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR, help="where the index is saved")
@@ -1431,7 +1431,7 @@ def main():
 
     database = args.catalog or database_path()
     if not init_catalog_database(database):
-        parser.error("no catalog: pass --catalog, or set DATABASE_PATH or CATALOG_PATH")
+        parser.error("no catalog: pass --catalog, or set DATABASE_PATH or RECIPE_PATH")
     with Session(sqlite_engine(database)) as session:
         recipes = catalog_recipes(RecipeRepository(session).all_foods())
     pipeline = RetrievalPipeline.from_recipes(recipes, args.artifacts, args.index_dir,

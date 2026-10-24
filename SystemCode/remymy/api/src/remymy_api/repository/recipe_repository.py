@@ -1,5 +1,5 @@
 """The priced food catalog: the price_mapped_nutrients table of remymy.db (DATABASE_PATH), filled from the catalog CSV
-(CATALOG_PATH) and read through the ORM (models.RecipeRecord), and the recipes digested against it (DigestedRecipe)."""
+(RECIPE_PATH) and read through the ORM (models.RecipeRecord), and the recipes digested against it (DigestedRecipe)."""
 from __future__ import annotations
 
 import ast
@@ -28,7 +28,7 @@ from ..schemas import Ingredient, Recipe
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CATALOG_PATH = "/data/price_mapped_nutrients.csv"
+DEFAULT_RECIPE_PATH = "/data/price_mapped_nutrients.csv"
 
 # The nutrients a matched ingredient reports, for its recipe's nutrient values and the buying profile.
 NUTRIENT_COLUMNS = (
@@ -44,8 +44,8 @@ _ingredient_indexes: dict[str, dict[str, Ingredient]] = {}
 _ingredient_indexes_lock = threading.Lock()
 
 
-def catalog_path() -> Path:
-    return Path(os.getenv("CATALOG_PATH", DEFAULT_CATALOG_PATH))
+def recipe_path() -> Path:
+    return Path(os.getenv("RECIPE_PATH", DEFAULT_RECIPE_PATH))
 
 
 def csv_values(row: dict[str, str]) -> dict[str, object]:
@@ -248,7 +248,7 @@ def init_catalog_database(database_path: Path | None = None, csv_path: Path | No
     where missing, and the CSV's foods it does not hold yet are inserted. Without a CSV the catalog stored is used as
     it is. Returns whether there is a catalog; without one, the routes that need it answer 503."""
     database_path = database_path or default_database_path()
-    csv_path = csv_path or catalog_path()
+    csv_path = csv_path or recipe_path()
     if not csv_path.is_file():
         if database_path.is_file():
             with Session(sqlite_engine(database_path)) as session:

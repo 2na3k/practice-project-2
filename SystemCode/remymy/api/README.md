@@ -131,7 +131,7 @@ schema. `POST /api/recipes` (body `UserRecipeCreate`, response
 reads the priced food catalog, the `price_mapped_nutrients` table of
 `remymy.db`, through the ORM (`models.RecipeRecord`). On startup
 `init_catalog_database` brings it up to date with the catalog CSV at
-`CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`):
+`RECIPE_PATH` (default `/data/price_mapped_nutrients.csv`):
 `RecipeRepository.from_csv_to_db` creates the table if it is missing and
 inserts only the CSV rows whose `fdc_id` it does not hold; stored rows are not
 updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV the
@@ -181,7 +181,7 @@ python3 serve.py
 `DATABASE_PATH=./data/remymy.db`,
 `LEGACY_FOOD_DATABASE_PATH=../data/remymy-food.db`,
 `LEGACY_USER_DATABASE_PATH=./data/remymy-users.db`,
-`CATALOG_PATH=../data/price_mapped_nutrients.csv`,
+`RECIPE_PATH=../data/price_mapped_nutrients.csv`,
 `REDIS_URL=redis://localhost:6379/1` and `SEED_DEMO_USER=true`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.

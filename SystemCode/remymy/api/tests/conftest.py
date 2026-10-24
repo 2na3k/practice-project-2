@@ -91,7 +91,7 @@ class FakeRecommender:
 
 @pytest.fixture(autouse=True)
 def no_model(monkeypatch, tmp_path) -> None:
-    """No test loads the real models and catalog unless it asks for them. Startup fills the catalog from CATALOG_PATH,
+    """No test loads the real models and catalog unless it asks for them. Startup fills the catalog from RECIPE_PATH,
     which points at a file that is not there. Each test has a remymy.db of its own, and no old databases to import."""
     monkeypatch.setattr(main, "load_term_extractor", lambda: None)
     monkeypatch.setattr(main, "load_recommender", lambda: None)
@@ -103,7 +103,7 @@ def no_model(monkeypatch, tmp_path) -> None:
     # each test starts without the services' instances, so one a test constructs does not answer for the next
     for service in (Recommender, FoodClassifier, Clusterer, TermExtractor):
         monkeypatch.setattr(service, "_instance", None)
-    monkeypatch.setenv("CATALOG_PATH", str(tmp_path / "no-catalog.csv"))
+    monkeypatch.setenv("RECIPE_PATH", str(tmp_path / "no-catalog.csv"))
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "state" / "remymy.db"))
     monkeypatch.setenv("LEGACY_FOOD_DATABASE_PATH", str(tmp_path / "no-legacy-food.db"))
     monkeypatch.setenv("LEGACY_USER_DATABASE_PATH", str(tmp_path / "no-legacy-users.db"))

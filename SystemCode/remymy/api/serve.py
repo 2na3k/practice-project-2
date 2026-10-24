@@ -11,8 +11,8 @@ LOCAL_DEFAULTS = {
     "DATABASE_PATH": str(HERE / "data" / "remymy.db"),
     "LEGACY_FOOD_DATABASE_PATH": str(HERE.parent / "data" / "remymy-food.db"),
     "LEGACY_USER_DATABASE_PATH": str(HERE / "data" / "remymy-users.db"),
-    "CATALOG_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
-    "REDIS_URL": "redis://localhost:6379/0",
+    "RECIPE_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
+    "REDIS_URL": "redis://localhost:6379/1",
     "SEED_DEMO_USER": "true",
 }
 
