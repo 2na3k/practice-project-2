@@ -9,13 +9,18 @@ export type BuyingProfile = {
   avg_nutrient_values: Record<string, number>;
 };
 
-// A grocery food from the priced FDC catalog, not a recipe: id is its FDC id and
-// score the model's probability that the user likes it.
+// A food from the priced FDC catalog (id its FDC id, all digits) or a Food.com recipe (id "openrecipes:<n>"); score
+// is the model's probability that the user likes it.
 export type RecommendedFood = {
   id: string;
   title: string;
   score: number;
 };
+
+// Whether a recommended id is a catalog food's FDC id rather than a recipe's, as the Data API's is_food_id tells them.
+export function isFoodId(id: string): boolean {
+  return /^\d+$/.test(id);
+}
 
 export type Recommendations = {
   profile: BuyingProfile | null;

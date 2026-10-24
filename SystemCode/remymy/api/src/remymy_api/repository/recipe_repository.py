@@ -1,5 +1,5 @@
 """The priced food catalog: the price_mapped_nutrients table of remymy.db (DATABASE_PATH), filled from the catalog CSV
-(CATALOG_PATH) and read through the ORM (models.CatalogFoodRecord), and the Recipes digested against it."""
+(CATALOG_PATH) and read through the ORM (models.RecipeRecord), and the recipes digested against it (DigestedRecipe)."""
 from __future__ import annotations
 
 import ast
@@ -17,13 +17,14 @@ from statistics import fmean, median
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from sqlalchemy import Float, Integer, insert, select
+from sqlalchemy import Float, Integer, insert, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ..db import database_path as default_database_path, has_catalog, sqlite_engine
-from ..models import CatalogFoodRecord, PythonLiteral
-from ..recipe import Recipe
-from ..schemas import CatalogFood, Ingredient
+from ..models import PythonLiteral, RecipeRecord
+from ..recipe import DigestedRecipe
+from ..schemas import Ingredient, Recipe
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +49,9 @@ def catalog_path() -> Path:
 
 
 def csv_values(row: dict[str, str]) -> dict[str, object]:
-    """A catalog CSV row as CatalogFoodRecord's values. An empty cell is a value FDC does not have, so None."""
+    """A catalog CSV row as RecipeRecord's values. An empty cell is a value FDC does not have, so None."""
     values: dict[str, object] = {}
-    for column in CatalogFoodRecord.__table__.columns:
+    for column in RecipeRecord.__table__.columns:
         text = row[column.name]
         if text == "":
             values[column.name] = None
@@ -97,7 +98,7 @@ def is_food_id(item_id: str) -> bool:
     return item_id.isascii() and item_id.isdigit()
 
 
-def food_ingredient(food: CatalogFood, price: float | None = None) -> Ingredient:
+def food_ingredient(food: Recipe, price: float | None = None) -> Ingredient:
     """A catalog food as an Ingredient: by default its price is the sum of its items' pack prices, which is its
     total_price when every item is priced; its nutrient values are the ones FDC has a value for."""
     return Ingredient(
@@ -108,10 +109,10 @@ def food_ingredient(food: CatalogFood, price: float | None = None) -> Ingredient
     )
 
 
-def ingredient_index(foods: Iterable[CatalogFood]) -> dict[str, Ingredient]:
+def ingredient_index(foods: Iterable[Recipe]) -> dict[str, Ingredient]:
     """One fully priced food per name key, the first comma-separated part of the description normalized ("Waffles,
     buttermilk, frozen" → "waffle"): of a key's foods, the one whose total_price is nearest their median."""
-    groups: dict[str, list[CatalogFood]] = {}
+    groups: dict[str, list[Recipe]] = {}
     for food in sorted(foods, key=lambda food: food.fdc_id):
         key = name_key(food.description.split(",", 1)[0].strip())
         if key and food.priced_share == 1 and food.total_price > 0:
@@ -141,18 +142,18 @@ class RecipeRepository:
     def from_csv_to_db(self, csv_path: Path) -> int:
         """Create the catalog table where it is missing and insert the CSV's foods whose fdc_id it does not hold yet,
         so a grown catalog adds just its new foods (a stored food is left as it is). Returns how many went in."""
-        columns = [column.name for column in CatalogFoodRecord.__table__.columns]
+        columns = [column.name for column in RecipeRecord.__table__.columns]
         with csv_path.open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
             missing = [column for column in columns if column not in (reader.fieldnames or ())]
             if missing:
                 raise ValueError(f"{csv_path} has no column {', '.join(missing)}")
             rows = {int(row["fdc_id"]): row for row in reader}
-        CatalogFoodRecord.__table__.create(self.session.connection(), checkfirst=True)
+        RecipeRecord.__table__.create(self.session.connection(), checkfirst=True)
         stored = self.fdc_ids()
         new = [csv_values(row) for fdc_id, row in rows.items() if fdc_id not in stored]
         if new:
-            self.session.execute(insert(CatalogFoodRecord), new)
+            self.session.execute(insert(RecipeRecord), new)
         self.session.commit()
         # an index built before has none of the new foods
         with _ingredient_indexes_lock:
@@ -161,34 +162,50 @@ class RecipeRepository:
                     self.session.get_bind().engine.url.database, len(new), csv_path, len(rows) - len(new))
         return len(new)
 
+    def recipe_lines(self) -> dict[str, tuple[str, list[str]]]:
+        """Every Food.com recipe the migration loaded, by recipe_id: its title and ingredient lines in order, the
+        parsed ingredient where the line has one. Empty when the recipe tables are not there."""
+        try:
+            rows = self.session.execute(text(
+                "SELECT r.recipe_id, r.title, COALESCE(i.ingredient_text, i.raw_text) AS line FROM recipe r "
+                "JOIN recipe_ingredient i ON i.recipe_id = r.recipe_id "
+                "WHERE r.kind = 'openrecipes' ORDER BY r.recipe_id, i.position")).all()
+        except OperationalError:
+            logger.warning("No recipe tables in %s; only catalog foods can be recommended.", self._database)
+            return {}
+        recipes: dict[str, tuple[str, list[str]]] = {}
+        for recipe_id, title, line in rows:
+            recipes.setdefault(recipe_id, (title or recipe_id, []))[1].append(line)
+        return recipes
+
     def fdc_ids(self) -> set[int]:
-        return set(self.session.scalars(select(CatalogFoodRecord.fdc_id)))
+        return set(self.session.scalars(select(RecipeRecord.fdc_id)))
 
-    def all_foods(self) -> list[CatalogFood]:
-        records = self.session.scalars(select(CatalogFoodRecord).order_by(CatalogFoodRecord.fdc_id))
-        return [CatalogFood.model_validate(record) for record in records]
+    def all_foods(self) -> list[Recipe]:
+        records = self.session.scalars(select(RecipeRecord).order_by(RecipeRecord.fdc_id))
+        return [Recipe.model_validate(record) for record in records]
 
-    def foods_by_ids(self, fdc_ids: Iterable[int]) -> list[CatalogFood]:
+    def foods_by_ids(self, fdc_ids: Iterable[int]) -> list[Recipe]:
         """The foods of those fdc_ids, in the order asked; an id the catalog does not have is left out."""
         wanted = list(dict.fromkeys(fdc_ids))
         if not wanted:
             return []
-        records = self.session.scalars(select(CatalogFoodRecord).where(CatalogFoodRecord.fdc_id.in_(wanted)))
+        records = self.session.scalars(select(RecipeRecord).where(RecipeRecord.fdc_id.in_(wanted)))
         by_id = {record.fdc_id: record for record in records}
-        return [CatalogFood.model_validate(by_id[fdc_id]) for fdc_id in wanted if fdc_id in by_id]
+        return [Recipe.model_validate(by_id[fdc_id]) for fdc_id in wanted if fdc_id in by_id]
 
-    def food(self, fdc_id: int) -> CatalogFood | None:
-        record = self.session.get(CatalogFoodRecord, fdc_id)
-        return None if record is None else CatalogFood.model_validate(record)
+    def food(self, fdc_id: int) -> Recipe | None:
+        record = self.session.get(RecipeRecord, fdc_id)
+        return None if record is None else Recipe.model_validate(record)
 
-    def search(self, query: str, limit: int = 20, offset: int = 0) -> list[CatalogFood]:
+    def search(self, query: str, limit: int = 20, offset: int = 0) -> list[Recipe]:
         """Foods whose description contains the query, case-insensitively, in fdc_id order."""
         records = self.session.scalars(
-            select(CatalogFoodRecord)
-            .where(CatalogFoodRecord.description.ilike(f"%{query.strip()}%"))
-            .order_by(CatalogFoodRecord.fdc_id).limit(limit).offset(offset)
+            select(RecipeRecord)
+            .where(RecipeRecord.description.ilike(f"%{query.strip()}%"))
+            .order_by(RecipeRecord.fdc_id).limit(limit).offset(offset)
         )
-        return [CatalogFood.model_validate(record) for record in records]
+        return [Recipe.model_validate(record) for record in records]
 
     def _ingredients(self) -> dict[str, Ingredient]:
         """This catalog database's ingredient_index, built from its foods the first time it is needed and kept."""
@@ -203,8 +220,8 @@ class RecipeRepository:
         count. Building it again does nothing."""
         return len(self._ingredients())
 
-    def digest(self, recipe_id: str, lines: Iterable[str]) -> Recipe:
-        """A recipe's ingredient lines → the Recipe the recommender reads. Each line's name key is matched to the
+    def digest(self, recipe_id: str, lines: Iterable[str]) -> DigestedRecipe:
+        """A recipe's ingredient lines → the DigestedRecipe the recommender reads. Each line's name key is matched to the
         food the ingredient index holds for it, a key once however many lines share it; a line no priced food
         matches is left out. The recipe's nutrient values are the mean of its matched foods'."""
         index = self._ingredients()
@@ -214,16 +231,16 @@ class RecipeRepository:
         for ingredient in ingredients:
             for name, value in ingredient.nutrient_values.items():
                 nutrients[name].append(value)
-        return Recipe(recipe_id, ingredients, {name: fmean(values) for name, values in sorted(nutrients.items())})
+        return DigestedRecipe(recipe_id, ingredients, {name: fmean(values) for name, values in sorted(nutrients.items())})
 
-    def digest_food(self, food_id: str) -> Recipe:
-        """A catalog food the user rated itself, such as a recommended grocery, by its fdc_id: the Recipe whose one
+    def digest_food(self, food_id: str) -> DigestedRecipe:
+        """A catalog food the user rated itself, such as a recommended grocery, by its fdc_id: the DigestedRecipe whose one
         ingredient is the food, or none when the catalog does not have it."""
         food = self.food(int(food_id))
         if food is None:
-            return Recipe(food_id, [])
+            return DigestedRecipe(food_id, [])
         ingredient = food_ingredient(food)
-        return Recipe(food_id, [ingredient], ingredient.nutrient_values)
+        return DigestedRecipe(food_id, [ingredient], ingredient.nutrient_values)
 
 
 def init_catalog_database(database_path: Path | None = None, csv_path: Path | None = None) -> bool:

@@ -1142,6 +1142,12 @@ def mmr(relevance, similarity, k, lambda_=MMR_LAMBDA, max_similarity=MAX_SIMILAR
     return picked
 
 
+def item_key(item_id):
+    """An item's key in the pipeline: a catalog food's fdc_id as an int, whether given as 169286 or "169286", and any
+    other item (a recipe, "openrecipes:5210") by its id as given."""
+    return int(item_id) if isinstance(item_id, str) and item_id.isascii() and item_id.isdigit() else item_id
+
+
 class RetrievalPipeline:
     """User profile → HNSW candidates → reranked → diversified (MMR) recommendations."""
 
@@ -1153,6 +1159,10 @@ class RetrievalPipeline:
         self.recipe_index = recipe_index
         self.row_of = {fdc_id: row for row, fdc_id in enumerate(recipe_index.fdc_ids)}
         self.user_states = {}  # user_id → windows and the model's state of each, from the last recommend call.
+
+    def holds(self, item_id):
+        """Whether the item (a food's fdc_id or a recipe's id) is one the pipeline recommends from."""
+        return item_key(item_id) in self.row_of
 
     @classmethod
     def from_recipes(cls, recipes, artifacts=DEFAULT_ARTIFACTS, index_dir=DEFAULT_INDEX_DIR, rebuild=False,
@@ -1168,18 +1178,19 @@ class RetrievalPipeline:
     def resolve_history(self, history):
         """History recipes in date order and their item embeddings (len(history), d).
 
-        An entry with "fdc_id" is that catalog recipe, with the entry's "rating" and "date"; its embedding comes from
-        the index. Any other entry is a full recipe ("ingredients", "price", "nutrients", as in the inference
+        An entry with "fdc_id" is that item of the index (a catalog food by its fdc_id, or a recipe by its id), with the
+        entry's "rating" and "date"; its embedding comes from the index. Any other entry is a full recipe ("ingredients", "price", "nutrients", as in the inference
         script), tagged and encoded here."""
         # Stable sort: entries without a date keep their given order.
         history = sorted(history, key=lambda entry: str(entry.get("date", "")))
         resolved, embeddings, off_catalog = [], [None] * len(history), []
         for position, entry in enumerate(history):
             if "fdc_id" in entry:
-                row = self.row_of.get(int(entry["fdc_id"]))
+                key = item_key(entry["fdc_id"])
+                row = self.row_of.get(key)
                 if row is None:
                     raise KeyError(f"fdc_id {entry['fdc_id']} is not in the catalog.")
-                resolved.append({**self.recipes[row], **entry, "fdc_id": int(entry["fdc_id"])})
+                resolved.append({**self.recipes[row], **entry, "fdc_id": key})
                 embeddings[position] = torch.from_numpy(self.recipe_index.embeddings[row])
             else:
                 resolved.append(dict(entry))

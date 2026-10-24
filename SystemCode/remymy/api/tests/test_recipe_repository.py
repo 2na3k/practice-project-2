@@ -14,7 +14,7 @@ from remymy_api.repository.recipe_repository import (
     is_food_id,
     name_key,
 )
-from remymy_api.schemas import CatalogFood, ItemPrice
+from remymy_api.schemas import ItemPrice, Recipe
 
 
 def food(fdc_id: int, description: str = "Apples, raw", sugars_g: str = "10.4") -> dict[str, str]:
@@ -29,7 +29,7 @@ def food(fdc_id: int, description: str = "Apples, raw", sugars_g: str = "10.4") 
     }
 
 
-def catalog_food(fdc_id: int, description: str, **values: object) -> CatalogFood:
+def catalog_food(fdc_id: int, description: str, **values: object) -> Recipe:
     fields = {
         "fdc_id": fdc_id, "description": description, "product": ["apple"],
         "item_prices": {"apple": ItemPrice(price=2.5, quantity=500.0)}, "item_unit_prices": {"apple": 0.5},
@@ -40,7 +40,7 @@ def catalog_food(fdc_id: int, description: str, **values: object) -> CatalogFood
         "sodium_mg": 1.0, "cholesterol_mg": 0.0, "satfat_g": 0.1, "sugars_g": 10.0,
     }
     fields.update(values)
-    return CatalogFood(**fields)
+    return Recipe(**fields)
 
 
 def write_catalog(path: Path, rows: list[dict[str, str]]) -> Path:

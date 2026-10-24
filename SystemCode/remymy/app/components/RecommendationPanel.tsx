@@ -4,14 +4,14 @@ import { useEffect, useState } from "react";
 import { Bookmark, ChefHat, LoaderCircle, RotateCcw } from "lucide-react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import type { SavedFood } from "@/lib/saved";
-import { RECOMMENDATION_USERNAME, fetchRecommendations, type Recommendations } from "@/lib/recommendations";
+import { RECOMMENDATION_USERNAME, fetchRecommendations, isFoodId, type Recommendations } from "@/lib/recommendations";
 
 const TOP_K = 6;
 
 type RecommendationPanelProps = {
   // hears how many foods each successful load returned; pass a stable function, such as a state setter
   onItemCount?: (count: number) => void;
-  // the like or not of each pick, by its fdc_id, and saving a new one through the rating route
+  // the like or not of each pick, by its id, and saving a new one through the rating route
   ratings: Record<string, RecipeRatingState>;
   onRate: (id: string, like: boolean) => void;
   savedIds: string[];
@@ -71,7 +71,7 @@ export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, on
                     <RecipeLikeButtons title={item.title} rating={ratings[item.id]} onRate={(like) => onRate(item.id, like)} />
                     <button
                       className={`save-button ${saved ? "is-saved" : ""}`}
-                      onClick={() => onSave({ id: item.id, title: item.title })}
+                      onClick={() => onSave({ id: item.id, title: item.title, kind: isFoodId(item.id) ? "food" : "recipe" })}
                       aria-pressed={saved}
                       aria-label={saved ? `Remove ${item.title} from saved recipes` : `Save ${item.title}`}
                       title={saved ? "Saved" : "Save for later"}

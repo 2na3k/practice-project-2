@@ -4,7 +4,7 @@ from collections import deque
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from .recipe import Recipe
+from .recipe import DigestedRecipe
 
 # As many rated recipes as users.fetch_user_history reads for a recommendation.
 DEFAULT_MAX_ENTRIES = 50

@@ -245,9 +245,9 @@ def create_tables(engine: Engine) -> None:
 # --- catalog (created by create_tables, filled by RecipeRepository.from_csv_to_db) ---
 
 
-class CatalogFoodRecord(Base):
-    """A priced food of the catalog, price_mapped_nutrients.csv column for column: prices in SGD, nutrients per 100 g
-    (None where FDC has no value). Its response model is schemas.CatalogFood."""
+class RecipeRecord(Base):
+    """A priced recipe of the catalog, price_mapped_nutrients.csv column for column: prices in SGD, nutrients per 100 g
+    (None where FDC has no value). Its response model is schemas.Recipe."""
 
     __tablename__ = "price_mapped_nutrients"
     __table_args__ = (

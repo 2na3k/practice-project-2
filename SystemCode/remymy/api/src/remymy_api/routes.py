@@ -19,13 +19,12 @@ from .cache import (
     reset_ratings,
     write_recommendations,
 )
-from .dependencies import Catalog, Classifying, Clustering, Recommending, Users
+from .dependencies import Classifying, Clustering, Recipes, Recommending, Users
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
 from .schema import has_food_data
 from .repository.recipe_repository import is_food_id
 from .schemas import (
-    CatalogFood,
     ClassifyRequest,
     ClusteringRequest,
     ClusteringResponse,
@@ -33,6 +32,7 @@ from .schemas import (
     HealthResponse,
     HistoryItem,
     Preferences,
+    Recipe,
     RecipeDetail,
     RecipeListResponse,
     RecipeSummary,
@@ -199,8 +199,8 @@ def create_recipe(body: UserRecipeCreate, users: Users) -> UserRecipeResponse:
     raise HTTPException(status_code=501, detail="Saving your own recipes is not implemented yet.")
 
 
-@router.get("/api/catalog/{fdc_id}", response_model=CatalogFood, tags=["recipes"])
-def get_catalog_item(fdc_id: int, catalog: Catalog) -> CatalogFood:
+@router.get("/api/catalog/{fdc_id}", response_model=Recipe, tags=["recipes"])
+def get_catalog_recipe(fdc_id: int, catalog: Recipes) -> Recipe:
     """One item of the priced catalog the recommendations come from: its ingredients with their FairPrice packs and
     prices, and its nutrients per 100 g."""
     if catalog is None:
@@ -223,7 +223,7 @@ def get_recommendation(
     ],
     request: Request,
     users: Users,
-    catalog: Catalog,
+    catalog: Recipes,
     recommender: Recommending,
     top_k: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> RecommendationResponse:
@@ -304,7 +304,7 @@ def classify_training_food(
 def cluster_recipe(
     body: ClusteringRequest,
     clusterer: Clustering,
-    catalog: Catalog,
+    catalog: Recipes,
     k: Annotated[int, Query(ge=1, le=50)] = 5,
 ) -> ClusteringResponse:
     """The k catalog foods nearest the item in its recipe cluster (the HDBSCAN model of recipe_clustering.ipynb). The
@@ -368,7 +368,7 @@ def set_user_preferences(username: str, preferences: Preferences, request: Reque
 def get_user_history(
     username: str,
     users: Users,
-    catalog: Catalog,
+    catalog: Recipes,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[HistoryItem]:
     """The user's history, newest first: each recipe or recommended food they rated, its title, and whether they liked
@@ -439,7 +439,7 @@ def rate_recipe(
     like: bool,
     request: Request,
     users: Users,
-    catalog: Catalog,
+    catalog: Recipes,
 ) -> UserRating:
     """Record whether the user liked a recipe they cooked, or a catalog food by its fdc_id (a recommended grocery). Rating
     the same one again changes the like in their history rather than adding another. Each rating is counted in Redis;

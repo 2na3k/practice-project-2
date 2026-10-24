@@ -14,7 +14,7 @@ from remymy_api import main, recommend
 from remymy_api.db import database_engine
 from remymy_api.dependencies import get_recipe_repository
 from remymy_api.main import app, load_recommender
-from remymy_api.recipe import Recipe
+from remymy_api.recipe import DigestedRecipe
 from remymy_api.repository.user_repository import UserRepository
 from remymy_api.schemas import Ingredient
 from remymy_api.schema import init_database
@@ -41,9 +41,9 @@ class FakeRepository:
     def __init__(self) -> None:
         self.digested: list[str] = []
 
-    def digest(self, recipe_id: str, lines: list[str]) -> Recipe:
+    def digest(self, recipe_id: str, lines: list[str]) -> DigestedRecipe:
         self.digested.append(recipe_id)
-        return Recipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
+        return DigestedRecipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
 
     def food(self, fdc_id: int) -> dict | None:
         found = next((food for food in CATALOG.values() if food["fdc_id"] == fdc_id), None)
@@ -53,10 +53,10 @@ class FakeRepository:
                           for item in RECOMMENDED if item["fdc_id"] == fdc_id), None)
         return found
 
-    def digest_food(self, food_id: str) -> Recipe:
+    def digest_food(self, food_id: str) -> DigestedRecipe:
         self.digested.append(food_id)
         food = self.food(int(food_id))
-        return Recipe(food_id, [] if food is None else [Ingredient(**food)])
+        return DigestedRecipe(food_id, [] if food is None else [Ingredient(**food)])
 
 
 def answer(history, recipes, top_k: int) -> list[dict]:

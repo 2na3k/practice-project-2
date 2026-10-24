@@ -36,7 +36,7 @@ sequenceDiagram
     A->>R: recommendations:{user_id}
     alt cache miss
         A->>D: ingredient lines of each history recipe
-        A->>A: the likes go into a History; recipe_repository digests each recipe into a Recipe
+        A->>A: the likes go into a History; recipe_repository digests each recipe into a DigestedRecipe
         A->>M: recommend(history, recipes, top_k=50)
         M-->>A: scored items
         A->>A: compute UserProfileOutput from the History
@@ -227,7 +227,7 @@ For each recommendation (one at a time) it:
    recipe, like or not, timestamp), oldest first.
 2. Digests each of its recipes with `recipe_repository.digest`: normalizes each
    ingredient line with `name_key` and looks it up in the ingredient index, a
-   food once per recipe. The result is a `Recipe` holding the matched foods and
+   food once per recipe. The result is a `DigestedRecipe` holding the matched foods and
    the mean of their nutrients. A recipe in the history twice is digested once.
 3. Turns every food of each entry's recipe into a history item with that
    entry's date and its like as a rating on the model's 0–5 scale: 5 liked, 0
@@ -310,7 +310,7 @@ For each recommendation (one at a time) it:
 | GET | `/ready` | none | `{"status": "ok"}` once the recipe database is usable, otherwise 503 |
 | GET | `/api/recipes` | `q` (optional, max 200 characters), `limit` 1–100 (default 20), `offset` ≥ 0 | Paged recipe summaries. `q` searches titles and ingredient lines, case-insensitive |
 | GET | `/api/recipes/{recipe_id}` | none | Title, ingredient lines, instruction steps; 404 if unknown |
-| GET | `/api/catalog/{fdc_id}` | none | One item of the priced catalog (`CatalogFood`): its ingredients with their FairPrice pack prices and sizes, and nutrients per 100 g; 404 if unknown, 503 without a catalog |
+| GET | `/api/catalog/{fdc_id}` | none | One item of the priced catalog (`Recipe`): its ingredients with their FairPrice pack prices and sizes, and nutrients per 100 g; 404 if unknown, 503 without a catalog |
 | GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
 | GET | `/api/users/{username}/history` | `limit` 1–200 (default 50) | The user's history, newest first: each rated recipe or catalog food's `recipe_id`, `kind` (`recipe` or `food`), `title` (`null` when its database lacks it), `like` and `timestamp`; 404 if unknown |
@@ -376,10 +376,10 @@ one call at a time.
 | Argument | Type | Meaning |
 | --- | --- | --- |
 | `history` | `History` | The user's `UserRating` rows, oldest first |
-| `history[].recipe_id` | string | The recipe; `recipes` holds its digested `Recipe` |
+| `history[].recipe_id` | string | The recipe; `recipes` holds its `DigestedRecipe` |
 | `history[].like` | boolean | Goes to the model as rating 5 (liked) or 0 (not) |
 | `history[].timestamp` | datetime | Its date orders the history and cuts the windows |
-| `recipes` | `recipe_id` → `Recipe` | Each history recipe as `recipe_repository.digest` made it; its `ingredients` are the catalog foods its lines matched |
+| `recipes` | `recipe_id` → `DigestedRecipe` | Each history recipe as `recipe_repository.digest` made it; its `ingredients` are the catalog foods its lines matched |
 | `top_k` | integer | Recommendations kept; the route asks for 50 |
 | `candidates` | integer | Foods retrieved before reranking, default 100 |
 
@@ -428,7 +428,7 @@ vector. When no recipe in the history matched a food, `items` is empty.
    1. Read the ingredient lines of each history recipe from the recipe database.
    2. Put the rows in the user's `History`, oldest first, and digest each of
       its recipes with `recipe_repository.digest`.
-   3. Call the inference service with the `History`, the `Recipe`s and
+   3. Call the inference service with the `History`, the `DigestedRecipe`s and
       `top_k=50`.
    4. Compute the `UserProfileOutput` from the foods of the `History`'s recipes.
    5. Store the result in Redis for `CACHE_TTL_SECONDS` (default 86400, one
@@ -462,7 +462,7 @@ What the recommend route hands the inference service, in
 
 | Class | Holds |
 | --- | --- |
-| `Recipe` | `recipe_id`, `ingredients` (the `Ingredient`s its lines matched), `nutrient_values` (their mean, per 100 g) |
+| `DigestedRecipe` | `recipe_id`, `ingredients` (the `Ingredient`s its lines matched), `nutrient_values` (their mean, per 100 g) |
 | `History` | `user_id` and `history`, a queue of `UserRating`, oldest first; past 50, each new entry drops the oldest |
 
 Storage:

@@ -7,7 +7,7 @@ from typing import Any
 from .schemas import Ingredient
 
 
-class Recipe:
+class DigestedRecipe:
     """A recipe as the recommender reads it: the priced catalog foods its ingredient lines matched, and its nutrient
     values, the mean of theirs per 100 g. RecipeRepository.digest makes one from a recipe's ingredient lines."""
 
@@ -36,7 +36,7 @@ class Recipe:
         return json.dumps(self.to_dict(), **kwargs)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> Recipe:
+    def from_dict(cls, data: Mapping[str, Any]) -> DigestedRecipe:
         """The recipe to_dict made, back; each ingredient is validated as an Ingredient."""
         return cls(
             data["recipe_id"],
@@ -45,5 +45,5 @@ class Recipe:
         )
 
     @classmethod
-    def from_json(cls, text: str | bytes) -> Recipe:
+    def from_json(cls, text: str | bytes) -> DigestedRecipe:
         return cls.from_dict(json.loads(text))

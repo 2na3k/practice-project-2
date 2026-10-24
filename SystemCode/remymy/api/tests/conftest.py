@@ -13,7 +13,7 @@ from remymy_api.dependencies import get_recommender
 from remymy_api.inference.classification_service import FoodClassifier
 from remymy_api.inference.food_query import TermExtractor
 from remymy_api.inference.service import Clusterer, Recommender
-from remymy_api.recipe import Recipe
+from remymy_api.recipe import DigestedRecipe
 from remymy_api.schema import FOOD_SCHEMA, connect, init_database
 
 
@@ -78,12 +78,12 @@ class FakeRecommender:
     """Stands in for inference.service.Recommender, recording what each recommend call was given."""
 
     def __init__(self) -> None:
-        self.handler: Callable[[History, Mapping[str, Recipe], int], list[dict]] = (
+        self.handler: Callable[[History, Mapping[str, DigestedRecipe], int], list[dict]] = (
             lambda history, recipes, top_k: []
         )
         self.calls: list[dict] = []
 
-    def recommend(self, history: History, recipes: Mapping[str, Recipe], top_k: int,
+    def recommend(self, history: History, recipes: Mapping[str, DigestedRecipe], top_k: int,
                   preferences: Mapping | None = None) -> list[dict]:
         self.calls.append({"history": history, "recipes": recipes, "top_k": top_k, "preferences": preferences})
         return self.handler(history, recipes, top_k)

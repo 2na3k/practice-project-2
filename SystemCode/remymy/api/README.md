@@ -129,7 +129,7 @@ schema. `POST /api/recipes` (body `UserRecipeCreate`, response
 
 `RecipeRepository` (`src/remymy_api/repository/recipe_repository.py`)
 reads the priced food catalog, the `price_mapped_nutrients` table of
-`remymy.db`, through the ORM (`models.CatalogFoodRecord`). On startup
+`remymy.db`, through the ORM (`models.RecipeRecord`). On startup
 `init_catalog_database` brings it up to date with the catalog CSV at
 `CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`):
 `RecipeRepository.from_csv_to_db` creates the table if it is missing and
@@ -137,7 +137,7 @@ inserts only the CSV rows whose `fdc_id` it does not hold; stored rows are not
 updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV the
 stored catalog is used as it is. It exposes `fdc_ids`, `all_foods`,
 `foods_by_ids`, `food` and `search` (case-insensitive on the description), and
-`digest`, which turns a recipe's ingredient lines into a `Recipe`
+`digest`, which turns a recipe's ingredient lines into a `DigestedRecipe`
 (`src/remymy_api/recipe.py`): the priced foods the lines match, each line
 normalized by `name_key` and looked up in the ingredient index, and the mean
 of their nutrients. The index is built once per catalog database and shared

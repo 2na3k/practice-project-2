@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from .db import close_database, open_database
 from .history import History
-from .recipe import Recipe
+from .recipe import DigestedRecipe
 from .repository.recipe_repository import RecipeRepository, is_food_id
 from .schemas import (
     RecommendationResponse,
@@ -48,7 +48,7 @@ def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
     return ingredients
 
 
-def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserProfileOutput | None:
+def buying_profile(history: History, recipes: Mapping[str, DigestedRecipe]) -> UserProfileOutput | None:
     """The average price and nutrient values of every priced food the user's recipes matched, a food once per time
     its recipe is in the history."""
     prices: list[float] = []
@@ -67,8 +67,8 @@ def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserProfi
     )
 
 
-def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, Recipe]:
-    """The Recipe of each recipe or catalog food in the history: the catalog digests it once, however often it is in
+def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, DigestedRecipe]:
+    """The DigestedRecipe of each recipe or catalog food in the history: the catalog digests it once, however often it is in
     the history."""
     ids = list(dict.fromkeys(entry.recipe_id for entry in history))
     # a catalog food the user rated itself, such as a recommended grocery, is digested as itself

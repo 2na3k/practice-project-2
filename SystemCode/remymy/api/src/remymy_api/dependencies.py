@@ -43,7 +43,7 @@ def get_clusterer() -> Clusterer:
 
 
 Users = Annotated[UserRepository, Depends(get_user_repository)]
-Catalog = Annotated[RecipeRepository | None, Depends(get_recipe_repository)]
+Recipes = Annotated[RecipeRepository | None, Depends(get_recipe_repository)]
 Recommending = Annotated[Recommender | None, Depends(get_recommender)]
 Classifying = Annotated[FoodClassifier, Depends(get_classifier)]
 Clustering = Annotated[Clusterer, Depends(get_clusterer)]

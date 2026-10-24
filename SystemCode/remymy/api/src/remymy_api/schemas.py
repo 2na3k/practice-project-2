@@ -143,7 +143,7 @@ class ClusteringRequest(BaseModel):
 class ClusteringResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    near_items: list[CatalogFood]
+    near_items: list[Recipe]
 
 class RecommendedRecipe(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -166,8 +166,8 @@ class ItemPrice(BaseModel):
     quantity: float | list[float] | None
 
 
-class CatalogFood(BaseModel):
-    # also read from the ORM's models.CatalogFoodRecord
+class Recipe(BaseModel):
+    # also read from the ORM's models.RecipeRecord
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     fdc_id: int
