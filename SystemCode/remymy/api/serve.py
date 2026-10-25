@@ -12,6 +12,7 @@ LOCAL_DEFAULTS = {
     "LEGACY_FOOD_DATABASE_PATH": str(HERE.parent / "data" / "remymy-food.db"),
     "LEGACY_USER_DATABASE_PATH": str(HERE / "data" / "remymy-users.db"),
     "RECIPE_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
+    "FOODCOM_RECIPE_PATH": str(HERE.parent / "data" / "foodcom_recipes.csv"),
     "REDIS_URL": "redis://localhost:6379/1",
     "SEED_DEMO_USER": "true",
 }

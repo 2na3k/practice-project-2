@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import ast
 import csv
+import json
 import logging
+import math
 import os
 import re
+import sys
 import threading
 from collections import defaultdict
 from collections.abc import Iterable
@@ -29,6 +32,16 @@ from ..schemas import Ingredient, Recipe
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECIPE_PATH = "/data/price_mapped_nutrients.csv"
+# The Food.com recipes the recommender adds to the catalog when it starts: foodcom_recipe_ratings_ingredients.csv's
+# recipes, one row each, as foodcom_map_recipe_review_price.ipynb writes them.
+DEFAULT_FOODCOM_RECIPE_PATH = "/data/foodcom_recipes.csv"
+# Food.com recipe ids overlap FDC ids, so in the catalog a Food.com recipe's fdc_id is this plus its recipe_id.
+FOODCOM_ID_OFFSET = 1_000_000_000
+# foodcom_recipes.csv nutrient column, per serving (kcal; mg of sodium; g of the rest) -> catalog column, per 100 g.
+FOODCOM_NUTRIENTS = {
+    "calories (g)": "energy_kcal", "total fat (g)": "fat_g", "sugar (g)": "sugars_g", "sodium (g)": "sodium_mg",
+    "protein (g)": "protein_g", "saturated fat (g)": "satfat_g", "carbohydrates (g)": "carb_g",
+}
 
 # The nutrients a matched ingredient reports, for its recipe's nutrient values and the buying profile.
 NUTRIENT_COLUMNS = (
@@ -46,6 +59,58 @@ _ingredient_indexes_lock = threading.Lock()
 
 def recipe_path() -> Path:
     return Path(os.getenv("RECIPE_PATH", DEFAULT_RECIPE_PATH))
+
+
+def foodcom_recipe_path() -> Path:
+    return Path(os.getenv("FOODCOM_RECIPE_PATH", DEFAULT_FOODCOM_RECIPE_PATH))
+
+
+def is_foodcom_id(fdc_id: int) -> bool:
+    """Whether a catalog fdc_id is a Food.com recipe's (FOODCOM_ID_OFFSET + its recipe_id) rather than an FDC food's."""
+    return fdc_id >= FOODCOM_ID_OFFSET
+
+
+def floor3(value: float) -> float:
+    return math.floor(value * 1000) / 1000
+
+
+def foodcom_values(row: dict[str, str]) -> dict[str, object] | None:
+    """A foodcom_recipes.csv row as RecipeRecord's values, or None unless every ingredient of the recipe is priced.
+
+    Its ingredients are the price_breakdown's (the product spans, with item_prices on the same names), each priced
+    by its FairPrice price; an ingredient priced through a broader term ({term: price}) takes that price. adj and verb
+    are its ingredients' descriptors, flattened. Nutrients are Food.com's per serving, divided by the serving's grams
+    ("1 (129 g)") for per 100 g, floored to 3 decimals; none when the grams are unknown. basket_per_100 is the total
+    price per 100 g of the whole recipe (servings x grams). Food.com has no fiber or cholesterol, and no unit prices."""
+    if row["price_coverage"] != "full":
+        return None
+    prices = {name: (sum(value for value in price.values() if value is not None) if isinstance(price, dict) else price)
+              for name, price in json.loads(row["price_breakdown"]).items()}
+    if not prices or any(price is None for price in prices.values()):
+        return None
+    match = re.search(r"\((\d+(?:\.\d+)?)\s*g\)", row["serving_size"])
+    grams = float(match.group(1)) if match else 0.0
+    servings = float(row["servings"]) if row["servings"] else 0.0
+    total = round(sum(prices.values()), 2)
+
+    def flattened(column: str) -> list[str]:
+        return list(dict.fromkeys(phrase for ingredient in json.loads(row[column]) for phrase in ingredient))
+
+    return {
+        "fdc_id": FOODCOM_ID_OFFSET + int(row["recipe_id"]),
+        "description": row["name"],
+        "product": list(prices),
+        "item_prices": {name: {"price": price, "quantity": None} for name, price in prices.items()},
+        "item_unit_prices": {}, "item_routes": {}, "matched_variations": {}, "unpriced_items": [],
+        "priced_items": len(prices), "total_items": len(prices), "priced_share": 1.0,
+        "items_without_unit_price": len(prices),
+        "adj": flattened("adj"), "verb": flattened("verb"),
+        "total_price": total,
+        "basket_per_100": floor3(total / (servings * grams) * 100) if servings > 0 and grams > 0 else 0.0,
+        **{column: floor3(float(row[source]) / grams * 100) if grams > 0 else None
+           for source, column in FOODCOM_NUTRIENTS.items()},
+        "fiber_g": None, "cholesterol_mg": None,
+    }
 
 
 def csv_values(row: dict[str, str]) -> dict[str, object]:
@@ -115,7 +180,8 @@ def ingredient_index(foods: Iterable[Recipe]) -> dict[str, Ingredient]:
     groups: dict[str, list[Recipe]] = {}
     for food in sorted(foods, key=lambda food: food.fdc_id):
         key = name_key(food.description.split(",", 1)[0].strip())
-        if key and food.priced_share == 1 and food.total_price > 0:
+        # a Food.com recipe is a dish, not an ingredient a recipe line could be
+        if key and food.priced_share == 1 and food.total_price > 0 and not is_foodcom_id(food.fdc_id):
             groups.setdefault(key, []).append(food)
     index = {}
     for key, group in groups.items():
@@ -177,6 +243,30 @@ class RecipeRepository:
         for recipe_id, title, line in rows:
             recipes.setdefault(recipe_id, (title or recipe_id, []))[1].append(line)
         return recipes
+
+    def foodcom_csv_to_db(self, csv_path: Path) -> int:
+        """Insert foodcom_recipes.csv's fully priced recipes (foodcom_values) that the catalog does not hold yet, as
+        from_csv_to_db inserts the catalog CSV's foods; the catalog table must exist. Returns how many went in."""
+        # a recipe's steps or description can be longer than the csv module's default field limit
+        csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+        with csv_path.open(newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            needed = {"recipe_id", "name", "product", "adj", "verb", "price_breakdown", "price_coverage", "servings",
+                      "serving_size", *FOODCOM_NUTRIENTS}
+            if missing := needed - set(reader.fieldnames or ()):
+                raise ValueError(f"{csv_path} has no column {', '.join(sorted(missing))}")
+            rows = [values for row in reader if row["price_coverage"] == "full" and (values := foodcom_values(row))]
+        stored = self.fdc_ids()
+        new = [values for values in rows if values["fdc_id"] not in stored]
+        if new:
+            self.session.execute(insert(RecipeRecord), new)
+        self.session.commit()
+        # an index built before has none of the new recipes
+        with _ingredient_indexes_lock:
+            _ingredient_indexes.pop(self._database, None)
+        logger.info("Catalog database %s: %d fully priced Food.com recipes inserted from %s, %d already stored.",
+                    self.session.get_bind().engine.url.database, len(new), csv_path, len(rows) - len(new))
+        return len(new)
 
     def fdc_ids(self) -> set[int]:
         return set(self.session.scalars(select(RecipeRecord.fdc_id)))
@@ -261,3 +351,13 @@ def init_catalog_database(database_path: Path | None = None, csv_path: Path | No
     with Session(sqlite_engine(database_path)) as session:
         RecipeRepository(session).from_csv_to_db(csv_path)
     return True
+
+
+def add_foodcom_recipes(session: Session, csv_path: Path | None = None) -> int:
+    """Add the fully priced Food.com recipes to the catalog, as the recommender does when it starts, after startup filled
+    the catalog from its CSV. Without a Food.com CSV the catalog stays as it is. Returns how many went in."""
+    csv_path = csv_path or foodcom_recipe_path()
+    if not csv_path.is_file():
+        logger.info("No Food.com recipes at %s; the catalog keeps only its CSV's foods.", csv_path)
+        return 0
+    return RecipeRepository(session).foodcom_csv_to_db(csv_path)

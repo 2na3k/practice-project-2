@@ -135,7 +135,17 @@ reads the priced food catalog, the `price_mapped_nutrients` table of
 `RecipeRepository.from_csv_to_db` creates the table if it is missing and
 inserts only the CSV rows whose `fdc_id` it does not hold; stored rows are not
 updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV the
-stored catalog is used as it is. It exposes `fdc_ids`, `all_foods`,
+stored catalog is used as it is.
+
+When the recommender starts, after that, `add_foodcom_recipes` adds the Food.com
+recipes of `FOODCOM_RECIPE_PATH` (default `/data/foodcom_recipes.csv`) whose
+every ingredient is priced (`price_coverage` `full`, about 3,100 of 218k) to the
+same table, so its index holds both. A recipe's `fdc_id` is `1000000000` plus its
+Food.com `recipe_id` (the two id ranges overlap). Its ingredients and their
+prices come from `price_breakdown`, its nutrients are Food.com's per serving
+divided by the serving's grams for per 100 g (no fiber or cholesterol), and it is
+never an ingredient a recipe line is matched to. Without the file nothing is
+added. The catalog exposes `fdc_ids`, `all_foods`,
 `foods_by_ids`, `food` and `search` (case-insensitive on the description), and
 `digest`, which turns a recipe's ingredient lines into a `DigestedRecipe`
 (`src/remymy_api/recipe.py`): the priced foods the lines match, each line
@@ -182,6 +192,7 @@ python3 serve.py
 `LEGACY_FOOD_DATABASE_PATH=../data/remymy-food.db`,
 `LEGACY_USER_DATABASE_PATH=./data/remymy-users.db`,
 `RECIPE_PATH=../data/price_mapped_nutrients.csv`,
+`FOODCOM_RECIPE_PATH=../data/foodcom_recipes.csv`,
 `REDIS_URL=redis://localhost:6379/1` and `SEED_DEMO_USER=true`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.

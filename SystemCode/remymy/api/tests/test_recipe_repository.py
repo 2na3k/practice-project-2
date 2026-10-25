@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from remymy_api.db import sqlite_engine
 from remymy_api.repository.recipe_repository import (
+    FOODCOM_ID_OFFSET,
     RecipeRepository,
+    add_foodcom_recipes,
     ingredient_index,
     init_catalog_database,
     is_food_id,
@@ -256,3 +258,64 @@ def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypa
     assert unloaded.status_code == 503
     # no empty database was created for the missing one
     assert not (tmp_path / "gone.db").exists()
+
+
+def foodcom_recipe(recipe_id: int, name: str, price_breakdown: str, coverage: str = "full",
+                   serving_size: str = "1 (200 g)") -> dict[str, str]:
+    """A foodcom_recipes.csv row: nutrients per serving (kcal; mg of sodium; g of the rest)."""
+    return {
+        "recipe_id": str(recipe_id), "name": name, "description": "A long, free-text blurb.",
+        "product": '[["salmon"], ["cream"]]', "adj": '[["smoked"], []]', "verb": '[[], ["whip"]]',
+        "price_breakdown": price_breakdown, "price_coverage": coverage, "servings": "4.0", "serving_size": serving_size,
+        "calories (g)": "300.0", "total fat (g)": "13.0", "sugar (g)": "2.5", "sodium (g)": "408.0",
+        "protein (g)": "21.0", "saturated fat (g)": "5.2", "carbohydrates (g)": "9.0",
+    }
+
+
+def test_the_recommender_adds_only_the_fully_priced_foodcom_recipes(tmp_path, open_catalog):
+    database = tmp_path / "remymy.db"
+    assert init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1)]))
+    recipes = write_catalog(tmp_path / "foodcom.csv", [
+        foodcom_recipe(137739, "Smoked Salmon Chowder", '{"salmon": 12.5, "cream": {"dairy + cream": 3.2}}'),
+        foodcom_recipe(31490, "Breakfast Pizza", '{"egg": 4.18, "sausage patty": null}', coverage="partial"),
+    ])
+    repository = open_catalog(database)
+    assert add_foodcom_recipes(repository.session, recipes) == 1
+    # a second start finds it stored
+    assert add_foodcom_recipes(repository.session, recipes) == 0
+    assert repository.fdc_ids() == {1, FOODCOM_ID_OFFSET + 137739}
+
+    chowder = repository.food(FOODCOM_ID_OFFSET + 137739)
+    assert chowder.description == "Smoked Salmon Chowder"
+    assert chowder.product == ["salmon", "cream"]
+    assert chowder.item_prices == {"salmon": ItemPrice(price=12.5, quantity=None),
+                                   "cream": ItemPrice(price=3.2, quantity=None)}
+    assert (chowder.priced_items, chowder.total_items, chowder.priced_share, chowder.unpriced_items) == (2, 2, 1.0, [])
+    assert (chowder.adj, chowder.verb) == (["smoked"], ["whip"])
+    assert chowder.total_price == 15.7
+    # 15.7 for 4 servings of 200 g: 1.9625 per 100 g, floored to 3 decimals
+    assert chowder.basket_per_100 == 1.962
+    # per serving of 200 g -> per 100 g
+    assert (chowder.energy_kcal, chowder.sodium_mg, chowder.satfat_g) == (150.0, 204.0, 2.6)
+    assert (chowder.fiber_g, chowder.cholesterol_mg) == (None, None)
+
+
+def test_foodcom_recipes_are_not_ingredients_and_unknown_grams_leave_no_nutrients(tmp_path, open_catalog):
+    database = tmp_path / "remymy.db"
+    assert init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1, "Salmon, raw")]))
+    recipes = write_catalog(tmp_path / "foodcom.csv",
+                            [foodcom_recipe(5, "Salmon", '{"salmon": 9.0}', serving_size="1 serving")])
+    repository = open_catalog(database)
+    add_foodcom_recipes(repository.session, recipes)
+    salmon = repository.food(FOODCOM_ID_OFFSET + 5)
+    assert (salmon.energy_kcal, salmon.basket_per_100) == (None, 0.0)
+    # "Salmon" keys "salmon" as the FDC food does, but only the FDC food is an ingredient
+    assert ingredient_index(repository.all_foods())["salmon"].fdc_id == 1
+
+
+def test_without_a_foodcom_csv_the_catalog_stays_as_it_is(tmp_path, open_catalog):
+    database = tmp_path / "remymy.db"
+    assert init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1)]))
+    repository = open_catalog(database)
+    assert add_foodcom_recipes(repository.session, tmp_path / "no-foodcom.csv") == 0
+    assert repository.fdc_ids() == {1}

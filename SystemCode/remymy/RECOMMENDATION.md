@@ -488,6 +488,7 @@ Data API:
 | `LEGACY_FOOD_DATABASE_PATH` | `/data/remymy-food.db` | `../data/remymy-food.db` | Old recipe database, merged in once when `remymy.db` has no recipes |
 | `LEGACY_USER_DATABASE_PATH` | `/state/remymy-users.db` | `./data/remymy-users.db` | Old users database, imported once into a `remymy.db` without users |
 | `RECIPE_PATH` | `/data/price_mapped_nutrients.csv` | `../data/price_mapped_nutrients.csv` | Priced FDC catalog CSV the catalog is filled from |
+| `FOODCOM_RECIPE_PATH` | `/data/foodcom_recipes.csv` | `../data/foodcom_recipes.csv` | Food.com recipes; the fully priced ones join the catalog when the recommender starts |
 | `ARTIFACT_DIR` | `weights/window_transformer_reranker` | same | Model weights and config |
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
 | `REDIS_URL` | `redis://:${REDIS_AUTH}@redis:6379/1` | `redis://localhost:6379/1` | Cache |

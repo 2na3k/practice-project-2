@@ -104,6 +104,7 @@ def no_model(monkeypatch, tmp_path) -> None:
     for service in (Recommender, FoodClassifier, Clusterer, TermExtractor):
         monkeypatch.setattr(service, "_instance", None)
     monkeypatch.setenv("RECIPE_PATH", str(tmp_path / "no-catalog.csv"))
+    monkeypatch.setenv("FOODCOM_RECIPE_PATH", str(tmp_path / "no-foodcom.csv"))
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "state" / "remymy.db"))
     monkeypatch.setenv("LEGACY_FOOD_DATABASE_PATH", str(tmp_path / "no-legacy-food.db"))
     monkeypatch.setenv("LEGACY_USER_DATABASE_PATH", str(tmp_path / "no-legacy-users.db"))

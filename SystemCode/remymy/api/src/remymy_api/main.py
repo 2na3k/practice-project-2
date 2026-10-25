@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .cache import connect_cache
 from .db import database_engine, has_catalog
-from .repository.recipe_repository import RecipeRepository
+from .repository.recipe_repository import RecipeRepository, add_foodcom_recipes
 from .routes import router
 from .schema import init_database
 
@@ -46,6 +46,9 @@ def load_recommender():
             logger.warning("No food catalog is loaded; recommendations answer 503.")
             return None
         started = time.perf_counter()
+        # the fully priced Food.com recipes join the catalog now, after startup filled it from its CSV, so the
+        # recommender's index holds both
+        add_foodcom_recipes(session)
         # Imported here so torch, hnswlib and the weights load when the API starts, not whenever this module is imported.
         from .inference.service import Recommender
 
