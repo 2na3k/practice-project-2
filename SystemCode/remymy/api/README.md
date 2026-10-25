@@ -94,14 +94,9 @@ still starts, and `GET /api/recommend/{username}` answers `503`.
 
 ## Try it in Swagger
 
-Open http://localhost:8002/docs (or just http://localhost:8002/). With
-`SEED_DEMO_USER=true`, which compose sets by default, the API injects a `demo`
-user and its likes into the users database with its schema on startup
-(`DEMO_SEED` in `src/remymy_api/users.py`), unless the demo user already has a
-history. The likes are of five real recipes of the 13k recipes CSV, chosen
-because their ingredient lines match the priced catalog best.
-`GET /api/recommend/{username}` comes pre-filled with `demo`, so "Try it out",
-then "Execute" returns its buying profile and recommendations.
+Open http://localhost:8002/docs (or just http://localhost:8002/). `POST /api/guests`
+creates a guest user, and `GET /api/users/{username}` and the other user routes
+take its username.
 
 ## Run locally
 
@@ -116,7 +111,7 @@ python3 serve.py
 `DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./data/remymy-users.db`,
 `CATALOG_PATH=../data/price_mapped_nutrients.csv`,
 `CATALOG_DATABASE_PATH=./data/remymy-catalog.db`,
-`REDIS_URL=redis://localhost:6379/0` and `SEED_DEMO_USER=true`. Redis only
+`REDIS_URL=redis://localhost:6379/0`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.
 

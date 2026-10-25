@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchCatalogItem, nutrientRows, packSize, parseCatalogItem, priceSource } from "./catalog";
+import { fetchCatalogItem, formatPrice, nutrientRows, packSize, parseCatalogItem, priceSource } from "./catalog";
 
 const onions = {
   fdc_id: 170005, description: "Onions, spring or scallions (includes tops and bulb), raw", product: ["onions"],
@@ -38,5 +38,11 @@ describe("catalog item details", () => {
     expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe("/api/catalog/170005");
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "Catalog item not found." }, { status: 404 })));
     await expect(fetchCatalogItem("99")).rejects.toThrow("Catalog item not found.");
+  });
+});
+
+describe("price display", () => {
+  it("formats the price in SGD", () => {
+    expect(formatPrice(4.2)).toBe("S$4.20");
   });
 });

@@ -32,7 +32,6 @@ def load_recommender():
 async def lifespan(app: FastAPI):
     logger.info("Starting the API.")
     app.state.cache = connect_cache()
-    # with SEED_DEMO_USER, this also injects the demo user
     init_user_database()
     app.state.recommender = load_recommender()
     logger.info("API ready; recommendations %s.", "on" if app.state.recommender else "off (no catalog)")
@@ -46,8 +45,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Remymy Recipe API",
     version="1.0.0",
-    description="Recipes and personalised recommendations. Try `GET /api/recommend/demo` "
-    "for the seeded demo user.",
+    description="Recipes and personalised recommendations.",
     lifespan=lifespan,
 )
 app.include_router(router)

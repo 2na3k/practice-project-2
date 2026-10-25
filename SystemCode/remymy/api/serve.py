@@ -11,7 +11,6 @@ LOCAL_DEFAULTS = {
     "CATALOG_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
     "CATALOG_DATABASE_PATH": str(HERE / "data" / "remymy-catalog.db"),
     "REDIS_URL": "redis://localhost:6379/0",
-    "SEED_DEMO_USER": "true",
 }
 
 

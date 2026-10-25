@@ -1,15 +1,14 @@
 "use client";
 
-import { MessageCircle, Heart, History, SlidersHorizontal, UtensilsCrossed, LayoutGrid, Plug, Plus } from "lucide-react";
+import { MessageCircle, Heart, History, UtensilsCrossed, LayoutGrid, Plug, Plus } from "lucide-react";
 import type { ConnectionStatus } from "@/lib/chat-types";
-export type AppView = "discover" | "meals" | "saved" | "history" | "preferences" | "connection";
+export type AppView = "discover" | "meals" | "saved" | "history" | "connection";
 type SidebarProps = { view: AppView; onViewChange: (view: AppView) => void; onNewChat: () => void; connection: ConnectionStatus };
 const items = [
   {id:"discover" as const,label:"Discover",icon:MessageCircle},
   {id:"meals" as const,label:"Meals",icon:LayoutGrid},
   {id:"saved" as const,label:"Saved",icon:Heart},
   {id:"history" as const,label:"History",icon:History},
-  {id:"preferences" as const,label:"Preferences",icon:SlidersHorizontal},
   {id:"connection" as const,label:"AI connection",icon:Plug},
 ];
 export function Sidebar({view,onViewChange,onNewChat,connection}:SidebarProps){

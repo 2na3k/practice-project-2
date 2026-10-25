@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
@@ -25,6 +26,7 @@ from .schemas import (
 )
 from .users import (
     add_history,
+    create_user,
     fetch_user_history,
     fetch_user_likes,
     find_user_id,
@@ -176,10 +178,7 @@ def get_catalog_item(fdc_id: int) -> CatalogFood:
 
 @router.get("/api/recommend/{username}", response_model=RecommendationResponse, tags=["recommendations"])
 def get_recommendation(
-    username: Annotated[
-        str,
-        Path(openapi_examples={"demo": {"summary": "Seeded demo user", "value": "demo"}}),
-    ],
+    username: Annotated[str, Path()],
     request: Request,
     top_k: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> RecommendationResponse:
@@ -209,6 +208,16 @@ def get_recommendation(
         logger.debug("Recommendations for user %d served from the cache.", user_id)
 
     return recommendations.model_copy(update={"items": recommendations.items[:top_k]})
+
+@router.post("/api/guests", response_model=User, status_code=201, tags=["users"])
+def create_guest(request: Request) -> User:
+    """A new guest user, for one browser. The app keeps its username in a cookie and sends it with each request."""
+    connection = open_user_database()
+    try:
+        return create_user(connection, request.app.state.cache, f"guest-{uuid.uuid4().hex}")
+    finally:
+        connection.close()
+
 
 @router.get("/api/users/{username}", response_model=User, tags=["users"])
 def get_user(username: str) -> User:

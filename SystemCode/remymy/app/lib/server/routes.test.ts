@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { getPiModels } from "./model-registry";
 import {
@@ -86,6 +89,8 @@ describe("connection and chat routes", () => {
   const completeSimple = vi.spyOn(models, "completeSimple");
 
   beforeEach(() => {
+    vi.stubEnv("SESSION_STORE_PATH", join(mkdtempSync(join(tmpdir(), "remymy-routes-")), "sessions.json"));
+    vi.stubEnv("SESSION_SECRET", "test-session-secret");
     clearAllSessions();
     completeSimple.mockResolvedValue({ stopReason: "stop" } as never);
     routeMocks.runChat.mockReset();
@@ -104,6 +109,7 @@ describe("connection and chat routes", () => {
 
   afterEach(() => {
     clearAllSessions();
+    vi.unstubAllEnvs();
     completeSimple.mockReset();
   });
 
