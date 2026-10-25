@@ -7,9 +7,8 @@ import {
   type Model,
   type Models,
 } from "@earendil-works/pi-ai";
-import type { AgentStage, ChatRequest, ChatResult } from "@/lib/chat-types";
-import type { Preferences } from "@/lib/meals";
-import { interpretRequest, type MealRecommendation } from "@/lib/recommender";
+import type { AgentStage, ChatRequest, ChatResult, MealRecommendation } from "@/lib/chat-types";
+import { interpretRequest, type Preferences } from "@/lib/preferences";
 import { MAX_CHAT_TEXT_CHARS, MAX_CHAT_TURNS } from "./request-guards";
 import { callMcpTool } from "./mcp-client";
 import { withLangfuseSpan } from "./langfuse";

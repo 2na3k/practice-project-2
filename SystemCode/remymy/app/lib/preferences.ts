@@ -1,12 +1,21 @@
-import {
-  DEFAULT_PREFERENCES,
-  MEALS,
-  type Meal,
-  type Preferences,
-} from "./meals";
+// The rule-based reader of a chat turn: it turns what the person typed into the preferences the connected chat
+// carries from one message to the next. Restrictive diet, time, and exclusion constraints accumulate by design.
 
-export { DEFAULT_PREFERENCES } from "./meals";
-export type { Preferences } from "./meals";
+export type Preferences = {
+  diet: "any" | "vegetarian" | "vegan" | "halal";
+  maxMinutes: number;
+  exclude: string[];
+  goal: "balanced" | "protein" | "light";
+  cuisine: string;
+};
+
+export const DEFAULT_PREFERENCES: Preferences = {
+  diet: "any",
+  maxMinutes: 30,
+  exclude: [],
+  goal: "balanced",
+  cuisine: "any",
+};
 
 const DIETARY_EXCLUSIONS: Record<string, string[]> = {
   dairy: [
@@ -139,15 +148,6 @@ const addExclusion = (exclusions: string[], value: string): void => {
   const normalized = canonicalExclude(value);
   if (normalized && !exclusions.includes(normalized))
     exclusions.push(normalized);
-};
-
-const exclusionVariants = (value: string): string[] => {
-  const normalized = canonicalExclude(value);
-  const variants = [normalized];
-  if (normalized.endsWith("ies")) variants.push(`${normalized.slice(0, -3)}y`);
-  else if (normalized.endsWith("oes")) variants.push(normalized.slice(0, -2));
-  else if (normalized.endsWith("s")) variants.push(normalized.slice(0, -1));
-  return Array.from(new Set(variants.filter(Boolean)));
 };
 
 /**
@@ -292,161 +292,4 @@ export function interpretRequest(
   }
 
   return source;
-}
-
-const mealSearchText = (meal: Meal): string =>
-  normalizeText(
-    [
-      meal.title,
-      meal.description,
-      meal.cuisine,
-      ...meal.tags,
-      ...meal.ingredients,
-    ].join(" "),
-  );
-
-const mealIngredientText = (meal: Meal): string =>
-  normalizeText([meal.title, meal.description, ...meal.ingredients].join(" "));
-
-const escapeRegExp = (value: string): string =>
-  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const containsExcluded = (meal: Meal, exclusion: string): boolean => {
-  // Tags such as "gluten-free" describe an allowed meal and must not cause a
-  // gluten exclusion to match. Ingredients are the source of truth here.
-  const text = mealIngredientText(meal);
-  const canonical = canonicalExclude(exclusion);
-  const terms = DIETARY_EXCLUSIONS[canonical] ?? exclusionVariants(canonical);
-  const searchableText =
-    canonical === "dairy" ? text.replace(/\bcoconut\s+milk\b/g, "") : text;
-  return terms
-    .flatMap(exclusionVariants)
-    .some((term) =>
-      new RegExp(
-        `\\b${escapeRegExp(normalizeText(term)).replace(/\\s+/g, "\\s+")}\\b`,
-        "i",
-      ).test(searchableText),
-    );
-};
-
-const isVegetarian = (meal: Meal): boolean =>
-  meal.tags.some(
-    (tag) =>
-      normalizeText(tag) === "vegetarian" || normalizeText(tag) === "vegan",
-  );
-const isVegan = (meal: Meal): boolean =>
-  meal.tags.some((tag) => normalizeText(tag) === "vegan");
-
-const cuisineMatches = (mealCuisine: string, preference: string): boolean => {
-  const wanted = normalizeText(preference);
-  if (!wanted || wanted === "any" || wanted === "all") return false;
-  const actual = normalizeText(mealCuisine);
-  return (
-    actual === wanted || actual.includes(wanted) || wanted.includes(actual)
-  );
-};
-
-const queryTokens = (query: string): string[] =>
-  normalizeText(query)
-    .split(/[^a-z0-9]+/)
-    .filter(
-      (token) =>
-        token.length > 2 &&
-        !["the", "and", "with", "for", "something", "meal", "please"].includes(
-          token,
-        ),
-    );
-
-export type MealRecommendation = {
-  meal: Meal;
-  score: number;
-  reasons: string[];
-};
-
-/** Return a hard-filtered and explainable shortlist for the current state. */
-export function recommendMeals(
-  preferences: Preferences = DEFAULT_PREFERENCES,
-  query?: string,
-  limit = 6,
-): MealRecommendation[] {
-  const effective = query
-    ? interpretRequest(query, preferences)
-    : interpretRequest("", preferences);
-  const tokens = query ? queryTokens(query) : [];
-  const eligible = MEALS.filter((meal) => {
-    if (meal.minutes > effective.maxMinutes) return false;
-    if (effective.diet === "vegan" && !isVegan(meal)) return false;
-    if (effective.diet === "vegetarian" && !isVegetarian(meal)) return false;
-    if (effective.diet === "halal" && !isVegan(meal)) return false;
-    return !effective.exclude.some((exclusion) =>
-      containsExcluded(meal, exclusion),
-    );
-  });
-
-  const ranked = eligible.map((meal, index) => {
-    const searchText = mealSearchText(meal);
-    let score = 50;
-    const reasons: string[] = [];
-    if (effective.diet === "vegan") reasons.push("Fits your vegan preference.");
-    else if (effective.diet === "vegetarian")
-      reasons.push("Fits your vegetarian preference.");
-    else if (effective.diet === "halal")
-      reasons.push("Vegan-tagged demo candidate; halal ingredients and certification are not verified.");
-    reasons.push(
-      `${meal.minutes} min, within your ${effective.maxMinutes}-minute limit.`,
-    );
-
-    for (const exclusion of effective.exclude) reasons.push(`No ${exclusion}.`);
-    if (effective.goal === "protein") {
-      score += Math.round(Math.min(meal.protein, 45) * 0.9);
-      reasons.push(`${meal.protein}g protein supports your high-protein goal.`);
-    } else if (effective.goal === "light") {
-      score += Math.round(Math.max(0, 700 - meal.calories) / 12);
-      reasons.push(`${meal.calories} calories keeps it on the lighter side.`);
-    } else {
-      score += Math.max(0, 12 - Math.abs(meal.calories - 520) / 45);
-      score += Math.min(meal.protein, 30) / 5;
-      reasons.push(`A balanced option with ${meal.protein}g protein.`);
-    }
-    if (cuisineMatches(meal.cuisine, effective.cuisine)) {
-      score += 18;
-      reasons.push(`Matches your ${effective.cuisine} preference.`);
-    }
-    for (const token of tokens) {
-      if (searchText.includes(token))
-        score += meal.title.toLowerCase().includes(token) ? 8 : 3;
-    }
-    if (tokens.length > 0 && tokens.some((token) => searchText.includes(token)))
-      reasons.push("Matches details from your latest request.");
-    score += Math.max(0, 2 - index / 100); // stable, tiny catalog-order tie breaker
-    return {
-      meal,
-      score: Math.round(score * 10) / 10,
-      reasons: Array.from(new Set(reasons)),
-    };
-  });
-
-  ranked.sort(
-    (a, b) => b.score - a.score || a.meal.title.localeCompare(b.meal.title),
-  );
-  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.min(MEALS.length, Math.floor(limit))) : 6;
-  return ranked.slice(0, boundedLimit);
-}
-
-/** Drop meals that miss the current constraints, then backfill from the ranked catalog. */
-export function alignRecommendations(
-  recommendations: MealRecommendation[],
-  preferences: Preferences,
-  query?: string,
-  limit = 6,
-): MealRecommendation[] {
-  const ranked = recommendMeals(preferences, query, MEALS.length);
-  const allowed = new Set(ranked.map((item) => item.meal.id));
-  const kept = recommendations.filter((item) => allowed.has(item.meal.id));
-  const seen = new Set(kept.map((item) => item.meal.id));
-  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.min(MEALS.length, Math.floor(limit))) : 6;
-  return [
-    ...kept,
-    ...ranked.filter((item) => !seen.has(item.meal.id)),
-  ].slice(0, boundedLimit);
 }

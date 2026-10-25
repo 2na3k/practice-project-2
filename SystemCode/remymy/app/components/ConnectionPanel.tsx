@@ -213,7 +213,6 @@ export function ConnectionPanel({ connection, onConnectionChange, onBackToChat }
       <button className="connection-submit" onClick={() => void connect()} disabled={isLoadingModels || isSubmitting || !providerIsSupported || !selectedModel || sameModelNoOp}>{isSubmitting ? <><LoaderCircle className="spin" size={17} aria-hidden="true" /> Testing connection…</> : canReuseSessionKey ? "Switch model & test" : connectionChanged ? "Connect new model" : connection.connected ? "Reconnect & test" : "Connect & test"}</button>
       <p className="connection-usage-note">Provider requests may incur usage or charges.{selectedProvider?.id === OPENAI_ID && <> Manage keys in the <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">OpenAI console <ExternalLink size={13} aria-hidden="true" /></a>.</>}</p>
     </div>
-    {!connection.connected && <div className="connection-demo-fallback"><div><strong>Just exploring?</strong><p>Continue in the local demo with no model connection. Your key stays out of browser storage.</p></div><button className="connection-demo-button" onClick={onBackToChat}>Continue in demo <ArrowLeft size={16} aria-hidden="true" /></button></div>}
     <p className="connection-privacy"><ShieldCheck size={15} aria-hidden="true" /> Keys stay in server memory for this session, expire after 8 hours, and clear on disconnect or server restart. Your key is not stored in this browser or on disk.</p>
   </section>;
 }

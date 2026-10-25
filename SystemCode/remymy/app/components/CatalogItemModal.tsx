@@ -3,8 +3,7 @@
 import { ArrowRight, Bookmark, ChefHat, ShoppingCart, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
-import { nutrientRows, packSize, priceSource, type CatalogItem } from "@/lib/catalog";
-import { formatPrice } from "@/lib/recommendations";
+import { formatPrice, nutrientRows, packSize, priceSource, type CatalogItem } from "@/lib/catalog";
 
 type CatalogItemModalProps = {
   item: CatalogItem | null;

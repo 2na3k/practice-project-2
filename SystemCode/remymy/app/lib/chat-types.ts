@@ -1,5 +1,20 @@
-import type { Preferences } from './meals';
-import type { MealRecommendation } from './recommender';
+import type { Preferences } from './preferences';
+
+export type Meal = {
+  id: string;
+  title: string;
+  description: string;
+  cuisine: string;
+  minutes: number;
+  calories: number;
+  protein: number;
+  tags: string[];
+  ingredients: string[];
+  steps: string[];
+  image: string;
+  color: string;
+};
+export type MealRecommendation = { meal: Meal; score: number; reasons: string[] };
 
 export type RegistryModel = { id: string; name: string; contextWindow: number; reasoning: boolean };
 export type RegistryProvider = { id: string; name: string; models: RegistryModel[]; supported: boolean; note?: string };

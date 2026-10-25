@@ -93,3 +93,7 @@ export function nutrientRows(item: CatalogItem): { label: string; value: string 
     return [{ label, value: `${value >= 10 ? Math.round(value) : Number(value.toFixed(2))} ${unit}` }];
   });
 }
+
+export function formatPrice(value: number): string {
+  return `S$${value.toFixed(2)}`;
+}

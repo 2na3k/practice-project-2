@@ -2,23 +2,16 @@
 
 import Image from "next/image";
 
-import { ArrowRight, Bookmark, Check, Clock3, Flame, X } from "lucide-react";
+import { ArrowRight, Check, Clock3, Flame, X } from "lucide-react";
 import { useEffect, useRef } from "react";
-import type { Meal } from "@/lib/meals";
+import type { Meal } from "@/lib/chat-types";
 
 type MealDetailModalProps = {
   meal: Meal | null;
-  saved: boolean;
   onClose: () => void;
-  onSave: (meal: Meal) => void;
 };
 
-export function MealDetailModal({
-  meal,
-  saved,
-  onClose,
-  onSave,
-}: MealDetailModalProps) {
+export function MealDetailModal({ meal, onClose }: MealDetailModalProps) {
   const modalRef = useRef<HTMLElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
@@ -110,18 +103,6 @@ export function MealDetailModal({
               <p className="eyebrow">ON THE MENU</p>
               <h2 id="meal-detail-title">{meal.title}</h2>
             </div>
-            <button
-              className={`save-button ${saved ? "is-saved" : ""}`}
-              onClick={() => onSave(meal)}
-              aria-label={saved ? "Remove from saved meals" : "Save meal"}
-              aria-pressed={saved}
-            >
-              <Bookmark
-                size={18}
-                fill={saved ? "currentColor" : "none"}
-                aria-hidden="true"
-              />
-            </button>
           </div>
           <p className="detail-description">{meal.description}</p>
           <div className="detail-stats">

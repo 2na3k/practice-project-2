@@ -30,25 +30,9 @@ const mcpHarness = vi.hoisted(() => {
   };
 });
 
-// Vitest supports the virtual-module option at runtime; its bundled typings lag
-// this API, so keep the test explicit about the intentional type mismatch.
-// @ts-expect-error virtual module mock
-vi.mock("@/lib/meals", () => ({ DEFAULT_PREFERENCES: testPreferences }), {
-  virtual: true,
-});
-vi.mock("@/lib/recommender", () => ({
+vi.mock("@/lib/preferences", () => ({
   interpretRequest: (_text: string, preferences: typeof testPreferences) => preferences,
-  recommendMeals: () => [
-    {
-      meal: { title: "Mock Lentil Bowl", minutes: 12 },
-      score: 80,
-      reasons: ["Fits the mock constraint."],
-    },
-  ],
-  alignRecommendations: (recommendations: unknown[]) => recommendations,
-}),
-// @ts-expect-error Vitest supports this virtual-module option at runtime.
-{ virtual: true });
+}));
 
 vi.mock("./mcp-client", () => ({ callMcpTool: mcpHarness.callTool }));
 
