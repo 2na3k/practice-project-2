@@ -1,11 +1,29 @@
 name: remymy
 
 services:
+  # Writes every container's output (these services and the upstream images alike) to a log file per hour:
+  # ${LOG_DIR_HOST:-./logs}/<service>/YYYY-MM-DD_HH.log, in UTC. See logging/collect.py.
+  log-collector:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    command: ["python", "-u", "/opt/remymy-logging/collect.py"]
+    environment:
+      COMPOSE_PROJECT: remymy
+      LOG_DIR: /var/log/remymy
+      LOG_RETENTION_HOURS: ${LOG_RETENTION_HOURS:-168}
+    volumes:
+      - ./logging/collect.py:/opt/remymy-logging/collect.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - "${LOG_DIR_HOST:-./logs}:/var/log/remymy"
+    networks:
+      - remymy
+
   app:
     build:
       context: ./app
       dockerfile: Dockerfile
     image: remymy-app:dev
+    mem_limit: 1024m
     restart: unless-stopped
     ports:
       - "${APP_PORT:-3000}:3000"
@@ -37,17 +55,22 @@ services:
       context: ./api
       dockerfile: Dockerfile
     image: remymy-api:dev
+    mem_limit: 512m
+    memswap_limit: 1024m
     restart: "no"
     environment:
       ENV: ${ENV:-nonprod}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_PATH: /data/remymy-food.db
+      # loads the recipes into remymy.db: from the old recipe database the first time, or else from the sources
+      DATABASE_PATH: /state/remymy.db
+      LEGACY_FOOD_DATABASE_PATH: /data/remymy-food.db
       PYTHONPATH: /opt/remymy-api/migrations:/opt/remymy-api/src
       RECIPES_SOURCE: ${RECIPES_SOURCE:-}
       FDC_SOURCE_DIR: ${FDC_SOURCE_DIR:-}
       FDC_RELEASE: ${FDC_RELEASE:-unspecified}
     volumes:
-      - "${DATA_DIR:-./data}:/data"
+      - "${DATA_DIR:-./data}:/data:ro"
+      - remymy-user-data:/state
     command: ["python", "-m", "migrations.bootstrap"]
     networks:
       - remymy
@@ -65,9 +88,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HOST: 0.0.0.0
       PORT: 8002
-      DATABASE_PATH: /data/remymy-food.db
-      USER_DATABASE_PATH: /state/remymy-users.db
-      REDIS_URL: redis://redis:6379/0
+      # the one database: recipes, catalog, users and what they keep
+      DATABASE_PATH: /state/remymy.db
+      # read once, the first time, when remymy.db has no users yet
+      LEGACY_USER_DATABASE_PATH: /state/remymy-users.db
+      # db 1 of the shared redis; Langfuse uses db 0
+      REDIS_URL: redis://:${REDIS_AUTH:-myredissecret}@redis:6379/1
     depends_on:
       api-migrate:
         condition: service_completed_successfully
@@ -76,11 +102,13 @@ services:
     volumes:
       - "${DATA_DIR:-./data}:/data:ro"
       - remymy-user-data:/state
+      # the classifier's and clusterer's models (GLiNER, stanza, the encoder), downloaded on first use and kept
+      - remymy-model-cache:/var/cache/remymy/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
-      # startup builds the catalog database from data/price_mapped_nutrients.csv, loads the model and the HNSW index
+      # startup sets the database up; the models load in the background after it
       start_period: 120s
       retries: 5
     networks:
@@ -141,9 +169,15 @@ services:
       - remymy
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    # one redis for both: db 0 is Langfuse's queues and cache, db 1 the API's cache. noeviction because Langfuse's
+    # queues must not lose jobs; when it is full the API's cache writes fail and it reads from the database instead.
+    command: ["redis-server", "--requirepass", "${REDIS_AUTH:-myredissecret}", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_AUTH:-myredissecret}
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -160,7 +194,7 @@ services:
         condition: service_healthy
       langfuse-minio-init:
         condition: service_completed_successfully
-      langfuse-redis:
+      redis:
         condition: service_healthy
       langfuse-clickhouse:
         condition: service_healthy
@@ -189,9 +223,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
-      REDIS_HOST: langfuse-redis
-      REDIS_PORT: 6379
-      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-myredissecret}
+      REDIS_CONNECTION_STRING: redis://:${REDIS_AUTH:-myredissecret}@redis:6379/0
     networks:
       - remymy
 
@@ -249,7 +281,7 @@ services:
       - remymy
 
   langfuse-clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: clickhouse/clickhouse-server:24.8-alpine
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: default
@@ -305,20 +337,6 @@ services:
     networks:
       - remymy
 
-  langfuse-redis:
-    image: redis:7
-    restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_AUTH:-myredissecret}", "--maxmemory-policy", "noeviction"]
-    volumes:
-      - langfuse-redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "myredissecret", "ping"]
-      interval: 3s
-      timeout: 5s
-      retries: 10
-    networks:
-      - remymy
-
   langfuse-postgres:
     image: postgres:16
     restart: unless-stopped
@@ -344,9 +362,10 @@ networks:
 
 volumes:
   remymy-user-data:
+  remymy-model-cache:
   remymy-app-state:
   langfuse-postgres-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
   langfuse-rustfs-data:
-  langfuse-redis-data:
+  redis-data:

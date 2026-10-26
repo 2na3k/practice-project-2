@@ -1,0 +1,8 @@
+# Optional: the recipe classifier behind /api/classify (on top of requirements.txt). Without these packages the API
+# still starts and the classify routes answer 503. scikit-learn and umap-learn must match the versions the weights
+# were pickled with.
+scikit-learn==1.7.2
+umap-learn==0.5.12
+sentence-transformers==5.1.2
+gliner==0.2.28
+stanza==1.14.0

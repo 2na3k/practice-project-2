@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RecipeSummary(BaseModel):
@@ -24,6 +24,8 @@ class RecipeDetail(BaseModel):
     ingredients: list[str]
     instructions: list[str]
     quality_status: str
+    # its tags' labels (recipe_tag), e.g. a user recipe's "dessert_sweet_treat"
+    tags: list[str] = Field(default_factory=list)
 
 
 class RecipeListResponse(BaseModel):
@@ -42,6 +44,9 @@ class HealthResponse(BaseModel):
 
 
 Diet = Literal["vegetarian", "halal", "Hinduism"]
+# the allergen codes of the frontends' ALLERGENS lists
+Allergen = Literal["peanut", "milk", "egg", "wheat", "soy", "fish", "shellfish", "sesame", "mustard", "celery", "lupin",
+                   "sulphites"]
 
 
 class Preferences(BaseModel):
@@ -50,7 +55,16 @@ class Preferences(BaseModel):
     special_diet: Diet | None = None
     cuisines: list[str] = Field(default_factory=list, max_length=40)
     preferred_nutrient: str | None = Field(default=None, max_length=64)
+    budget: float | None = Field(default=0.)
+    allergies: list[Allergen] = Field(default_factory=list, max_length=12)
 
+    @model_validator(mode="before")
+    @classmethod
+    def skip_nulls(cls, data: object) -> object:
+        """A null field, as the users schema allows for each, is skipped: the field takes its default."""
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
 
 class User(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -59,8 +73,9 @@ class User(BaseModel):
     username: str = Field(min_length=1)
     preferences: Preferences = Field(default_factory=Preferences)
 
-class UserHistory(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class UserRating(BaseModel):
+    # also read from the ORM's models.UserHistoryEntry
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     user_id: int
     timestamp: datetime
@@ -81,6 +96,18 @@ class HistoryItem(BaseModel):
     timestamp: datetime
 
 
+class SavedItem(BaseModel):
+    """A recipe the user saved for later, as a client shows it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe_id: str
+    # "recipe" for a Food.com recipe, "food" for a catalog food by its fdc_id, "user" for one a user wrote
+    kind: Literal["recipe", "food", "user"]
+    title: str | None
+    saved_at: datetime
+
+
 class Ingredient(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -90,12 +117,35 @@ class Ingredient(BaseModel):
     nutrient_values: dict[str, float]
 
 
-class UserBuyingProfile(BaseModel):
+class UserProfileInput(BaseModel):
+    """What a recommendation is made from: the user's preferences and their ratings, oldest first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    preferences: Preferences = Field(default_factory=Preferences)
+    history: list[UserRating]
+
+
+class UserProfileOutput(BaseModel):
+    """What a recommendation reports about the user: the average price and nutrients of the foods their rated
+    recipes call for."""
+
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
     avg_price: float
     avg_nutrient_values: dict[str, float]
+
+class ClusteringRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item: RecipeDetail
+
+class ClusteringResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    near_items: list[Recipe]
 
 class RecommendedRecipe(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -104,13 +154,11 @@ class RecommendedRecipe(BaseModel):
     title: str
     score: float
 
-
 class RecommendationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: UserBuyingProfile | None
+    profile: UserProfileOutput | None
     items: list[RecommendedRecipe]
-
 
 class ItemPrice(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -120,8 +168,9 @@ class ItemPrice(BaseModel):
     quantity: float | list[float] | None
 
 
-class CatalogFood(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class Recipe(BaseModel):
+    # also read from the ORM's models.RecipeRecord
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     fdc_id: int
     description: str
@@ -148,3 +197,107 @@ class CatalogFood(BaseModel):
     cholesterol_mg: float | None
     satfat_g: float | None
     sugars_g: float | None
+    # its tags' labels (recipe_tag): a Food.com recipe's, e.g. "60_minutes_or_less"; none for an FDC food
+    tags: list[str] = Field(default_factory=list)
+
+
+NutrientName = Literal["protein_g", "fat_g", "carb_g", "energy_kcal", "fiber_g", "sodium_mg", "cholesterol_mg",
+                       "satfat_g", "sugars_g"]
+
+
+class ClassifyRequest(BaseModel):
+    """A food to tag with recipe classes. Nutrients are per 100 g, as in the training data; any left out take the
+    training medians."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [
+        {"query": "Grilled chicken breast, skinless, 165 kcal, 31g protein, 3.6g fat, 74mg sodium"},
+        {"query": "Waffles, buttermilk, frozen, ready-to-heat", "nutrients": {"energy_kcal": 273, "sugars_g": 4.3}},
+        {"query": "fdc:167516"},
+    ]})
+
+    # a FoodData Central style description; amounts like "31g protein" or "protein: 31g" in it are read as nutrients,
+    # and a bare fdc_id ("167516" / "fdc:167516") looks up a training food instead
+    query: str = Field(min_length=1, max_length=500)
+    # override the amounts written in the query
+    nutrients: dict[NutrientName, float] = Field(default_factory=dict)
+    # given terms skip GLiNER / stanza for that field
+    product: list[str] | None = Field(default=None, max_length=20)
+    adj: list[str] | None = Field(default=None, max_length=20)
+    verb: list[str] | None = Field(default=None, max_length=20)
+
+
+class FoodClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # set when the food was looked up by fdc_id
+    fdc_id: int | None = None
+    description: str
+    product: list[str]
+    adj: list[str]
+    verb: list[str]
+    # per 100 g; None = not given, so the model used the training median
+    nutrients: dict[str, float | None]
+    # the lowercased terms the encoder read, and how many of them it saw in training
+    terms: list[str]
+    known_terms: int
+    model: str
+    # `generic` is exclusive: a generic food has no other label
+    labels: list[str]
+    score_kind: Literal["probability", "vote share"]
+    # every label, highest first
+    scores: dict[str, float]
+    # the food's labels in the training data, for a food looked up by fdc_id
+    training_labels: list[str] | None = None
+
+
+RecipeLine = Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class RecipeTag(BaseModel):
+    """A tag on a user's own recipe: one the classifier suggested and the user kept, or one the user added. Also read
+    from the ORM's models.UserRecipeTag."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    # lowercase snake_case, e.g. "dessert_sweet_treat" or a user's own "grandmas_recipe"
+    label: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+    source: Literal["classifier", "user"]
+
+
+class UserRecipeCreate(BaseModel):
+    """Request of POST /api/recipes: a recipe a user writes themselves, as the app's Add recipe screen sends it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    title: str = Field(min_length=1, max_length=200)
+    # one line each, in order
+    ingredients: list[RecipeLine] = Field(min_length=1, max_length=100)
+    instructions: list[RecipeLine] = Field(default_factory=list, max_length=100)
+    tags: list[RecipeTag] = Field(default_factory=list, max_length=30)
+    # per 100 g, only those the user entered; also what the tag suggestions were classified with
+    nutrients: dict[NutrientName, float] = Field(default_factory=dict)
+
+    @field_validator("tags")
+    @classmethod
+    def tags_are_distinct(cls, tags: list[RecipeTag]) -> list[RecipeTag]:
+        labels = [tag.label for tag in tags]
+        if len(set(labels)) != len(labels):
+            raise ValueError("each tag label can be given once")
+        return tags
+
+
+class UserRecipeResponse(BaseModel):
+    """Response of POST /api/recipes: a user's own recipe as stored, read from the ORM's models.UserRecipe."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    # its id among the app's recipes, "user-recipe:<n>" (models.UserRecipe.recipe_id)
+    id: str = Field(validation_alias=AliasChoices("recipe_id", "id"))
+    user_id: int
+    title: str
+    ingredients: list[str]
+    instructions: list[str]
+    tags: list[RecipeTag]
+    nutrients: dict[NutrientName, float]
+    created_at: datetime

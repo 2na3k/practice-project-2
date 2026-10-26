@@ -12,6 +12,8 @@ export type RecipeDetail = {
   ingredients: string[];
   instructions: string[];
   quality_status: string;
+  // its tags' labels, e.g. a user recipe's "dessert_sweet_treat"; none when the Data API sends none
+  tags: string[];
 };
 
 // One row of a user's history from the Data API: whether they liked a recipe they cooked.
@@ -56,10 +58,10 @@ export function parseRecipeDetail(value: unknown): RecipeDetail {
   const detail = value as Partial<RecipeDetail>;
   if (typeof detail.id !== "string" || typeof detail.title !== "string" ||
     !isStringArray(detail.ingredients) || !isStringArray(detail.instructions) ||
-    typeof detail.quality_status !== "string") {
+    typeof detail.quality_status !== "string" || (detail.tags !== undefined && !isStringArray(detail.tags))) {
     throw new Error("Recipe service returned an unexpected response.");
   }
-  return detail as RecipeDetail;
+  return { ...detail, tags: detail.tags ?? [] } as RecipeDetail;
 }
 
 export function parseRecipeRating(value: unknown): RecipeRating {

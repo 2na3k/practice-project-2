@@ -11,13 +11,13 @@ from fastapi import HTTPException
 
 from .db import close_database, open_database
 from .history import History
-from .recipe import Recipe
-from .repository.recipe_repository import is_food_id, recipe_repository
+from .recipe import DigestedRecipe
+from .repository.recipe_repository import RecipeRepository, is_food_id
 from .schemas import (
     RecommendationResponse,
     RecommendedRecipe,
-    UserBuyingProfile,
-    UserHistory,
+    UserProfileInput,
+    UserProfileOutput,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +48,7 @@ def recipe_ingredients(recipe_ids: set[str]) -> dict[str, list[str]]:
     return ingredients
 
 
-def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserBuyingProfile | None:
+def buying_profile(history: History, recipes: Mapping[str, DigestedRecipe]) -> UserProfileOutput | None:
     """The average price and nutrient values of every priced food the user's recipes matched, a food once per time
     its recipe is in the history."""
     prices: list[float] = []
@@ -60,31 +60,23 @@ def buying_profile(history: History, recipes: Mapping[str, Recipe]) -> UserBuyin
                 nutrients[name].append(value)
     if not prices:
         return None
-    return UserBuyingProfile(
+    return UserProfileOutput(
         user_id=history.user_id,
         avg_price=fmean(prices),
         avg_nutrient_values={name: fmean(values) for name, values in sorted(nutrients.items())},
     )
 
 
-def user_history(rows: list[UserHistory]) -> History:
-    """A user's likes as fetch_user_history reads them (newest first), as their History (oldest first)."""
-    history = History(rows[0].user_id)
-    for row in reversed(rows):
-        history.add(row)
-    return history
-
-
-def digest_recipes(history: History) -> dict[str, Recipe]:
-    """The Recipe of each recipe or catalog food in the history: the shared recipe_repository digests it once,
-    however often it is in the history."""
+def digest_recipes(history: History, catalog: RecipeRepository) -> dict[str, DigestedRecipe]:
+    """The DigestedRecipe of each recipe or catalog food in the history: the catalog digests it once, however often it is in
+    the history."""
     ids = list(dict.fromkeys(entry.recipe_id for entry in history))
     # a catalog food the user rated itself, such as a recommended grocery, is digested as itself
     recipe_ids = {recipe_id for recipe_id in ids if not is_food_id(recipe_id)}
     ingredients_by_recipe = recipe_ingredients(recipe_ids) if recipe_ids else {}
     recipes = {
-        recipe_id: recipe_repository.digest_food(recipe_id) if is_food_id(recipe_id)
-        else recipe_repository.digest(recipe_id, ingredients_by_recipe.get(recipe_id, []))
+        recipe_id: catalog.digest_food(recipe_id) if is_food_id(recipe_id)
+        else catalog.digest(recipe_id, ingredients_by_recipe.get(recipe_id, []))
         for recipe_id in ids
     }
     logger.debug("User %d: %d ingredient lines of %d recipes matched %d priced foods.", history.user_id,
@@ -93,14 +85,31 @@ def digest_recipes(history: History) -> dict[str, Recipe]:
     return recipes
 
 
-def recommend(recommender: Recommender, rows: list[UserHistory]) -> RecommendationResponse:
-    history = user_history(rows)
-    recipes = digest_recipes(history)
-    items = recommender.recommend(history, recipes, top_k=MAX_TOP_K)
+def recommend(recommender: Recommender, user: UserProfileInput, catalog: RecipeRepository) -> RecommendationResponse:
+    history = History.from_ratings(user.user_id, user.history)
+    recipes = digest_recipes(history, catalog)
+    # the preferences' diet and budget route the retrieval to the foods they allow
+    recommended_items = recommender.recommend(history, recipes, top_k=MAX_TOP_K,
+                                              preferences=user.preferences.model_dump())
     profile = buying_profile(history, recipes)
     if profile is None:
         logger.debug("User %d: no ingredient matched a priced food, so there is no buying profile.", history.user_id)
-    recommended_items = sorted(items, key=lambda x: x["p_like"], reverse=True)
+
+    budget = user.preferences.budget
+    if budget and budget > 0:
+        by_price = sorted(recommended_items, key=lambda item: item["price"])
+        within_budget = 0
+        for item in by_price:
+            if item["price"] > budget:
+                break
+            within_budget += 1
+        logger.debug("User %d: %d of %d recommended foods within the S$%.2f budget.", history.user_id,
+                     within_budget, len(recommended_items), budget)
+        recommended_items = by_price[:within_budget]
+
+    # most likely to be liked first; of two as likely, the cheaper
+    recommended_items = sorted(recommended_items, key=lambda item: (-item["p_like"], item["price"]))
+
     return RecommendationResponse(
         profile=profile,
         items=[

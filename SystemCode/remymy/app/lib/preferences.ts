@@ -1,12 +1,19 @@
 // The rule-based reader of a chat turn: it turns what the person typed into the preferences the connected chat
 // carries from one message to the next. Restrictive diet, time, and exclusion constraints accumulate by design.
 
+import { normalizeAllergies, type AllergenCode } from "./allergens";
+import { normalizeBudget } from "./budget";
+
 export type Preferences = {
   diet: "any" | "vegetarian" | "vegan" | "halal";
   maxMinutes: number;
   exclude: string[];
   goal: "balanced" | "protein" | "light";
   cuisine: string;
+  // most to spend on one meal, in SGD; 0 (or unset) is no limit, as in the Data API
+  budget?: number;
+  // the allergens never to recommend; preferences saved before there were allergies have none
+  allergies?: AllergenCode[];
 };
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -116,6 +123,9 @@ const CUISINE_ALIASES: Record<string, string> = {
   american: "American",
 };
 
+// The cuisines a request can name, for Preferences to offer.
+export const CUISINES = [...new Set(Object.values(CUISINE_ALIASES))];
+
 const normalizeText = (value: string): string =>
   value
     .toLocaleLowerCase()
@@ -167,6 +177,9 @@ export function interpretRequest(
     exclude: [...(current.exclude ?? [])].map(canonicalExclude).filter(Boolean),
     goal: current.goal,
     cuisine: current.cuisine || DEFAULT_PREFERENCES.cuisine,
+    // kept when the preferences have one, 0 included, so preferences without a budget keep their shape
+    ...(current.budget !== undefined && { budget: normalizeBudget(current.budget) }),
+    ...(current.allergies !== undefined && { allergies: normalizeAllergies(current.allergies) }),
   };
   const normalized = normalizeText(text);
   if (/\bhalal\b/.test(normalized)) addExclusion(source.exclude, "halal");

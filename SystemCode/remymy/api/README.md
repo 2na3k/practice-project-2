@@ -7,14 +7,26 @@ and parameterized SQLite queries.
 ## Project layout
 
 - `src/remymy_api/` contains the FastAPI app, routes, database access, and
-  response schemas.
-- `src/remymy_api/repository/` reads the priced food catalog (see
-  [Catalog database](#catalog-database)).
+  response schemas. Request and response models (DTOs, Pydantic) are in
+  `schemas.py`; SQLAlchemy ORM models are in `models.py`, with their `Base`,
+  engine and `get_db` session dependency in `db.py`.
+- `src/remymy_api/repository/` holds the repositories, each on a SQLAlchemy
+  session: `RecipeRepository` for the priced food catalog (see
+  [Catalog database](#catalog-database)) and `UserRepository` for users and
+  their history (see [Users database](#users-database)).
+  `src/remymy_api/dependencies.py` gives a route its repositories for the
+  request; tests swap them with `app.dependency_overrides`.
 - `src/remymy_api/inference/` runs the recommendation model in the API process:
   `service.py` is what the recommend route calls, over the catalog the
-  repository serves; the two `model_inference_*` modules are the GRU +
-  cross-attention reranker and its HNSW retrieval. `weights/gru_xattn_reranker/`
-  holds the trained model.
+  repository serves; `model_inference_score_recommend.py` is the HNSW retrieval
+  and the window Transformer + cross-attention reranker of
+  `ml_models/training/model_training_reranker_avgemb.ipynb`.
+  `src/remymy_api/inference/weights/window_transformer_reranker/` holds that trained model. The
+  notebook's flat Transformer, saved beside it in `transformer_xattn_reranker/`, is not served (it tested a
+  little lower) and is left out of the image. `weights/recipe_clustering_foodcom/` holds the recipe
+  clustering model, trained on the Food.com recipes. Its `recipe_clustering.joblib` (385 MB) is not in git, being
+  over GitHub's file limit: copy it there from `recipe_clustering_foodcom.ipynb`'s `model_artifacts/` (`meta.json`
+  holds its sha256 to check the copy). Without it the API starts and the clustering route answers `503`.
 - `migrations/ingest_food_data.py` ingests Open Recipes 13k and FoodData
   Central Foundation CSVs without doing ingredient matching or nutrition
   inference.
@@ -42,52 +54,135 @@ strings in position order.
 The API does not expose FoodData Central rows, raw source payloads, source
 records, quarantine rows, nutrition, or arbitrary SQL.
 
-## Database availability
+### Recipe classification
 
-Set `DATABASE_PATH` to the ingested SQLite file. The container listens on port
-`8002`, with a default database path of `/data/remymy-food.db`. `/health`
-reports process liveness, while `/ready` validates database availability for
-container readiness. Recipe routes return a generic `503 Recipe data is
-unavailable.` when the file is missing, invalid, or missing required recipe
-tables. No local path or SQLite error is returned to callers.
+- `POST /api/classify` with `{ "query": "Grilled chicken breast, skinless, 165 kcal, 31g protein" }`
+  tags a food with recipe classes (`easy`, `breakfast`, `protein_centerpiece`, …; `generic` is
+  exclusive). Nutrients are per 100 g and may be written into the query or sent as
+  `nutrients: { "energy_kcal": 165 }`, which overrides the query; any left out take the training
+  medians. `product` / `adj` / `verb` lists skip term extraction for that field. A query that is
+  only an fdc_id (`"fdc:167516"`) looks up a training food. The response holds `labels`, `scores`
+  for every label, and the terms and nutrients the model used.
+- `GET /api/classify/{fdc_id}` classifies a training food from the fdc_id lookup and also returns
+  its `training_labels`.
 
-## Users database
+A query without a food description is `422`, an fdc_id that is not a training food `404`. The
+classifier loads at startup from `CLASSIFIER_ARTIFACT_DIR` (default `src/remymy_api/inference/weights/recipe_classifier`)
+with the lookup at `FDC_LOOKUP_PATH` (default `src/remymy_api/inference/weights/fdc_lookup.json`, written by
+`src/remymy_api/inference/build_fdc_lookup.py`). Its packages are in `requirements-classifier.txt`,
+not in the image: without them or the weights, both routes answer `503`. The first free-text
+query loads GLiNER and stanza (about 20 s, and stanza downloads its English model once); later
+queries take well under a second, one at a time.
 
-Users and their recipe history live in a second SQLite file,
-`USER_DATABASE_PATH` (default `/state/remymy-users.db`, on the
-`remymy-user-data` volume in compose). It is kept apart from the recipe
-database because that one is read-only and replaced on every rebuild. The API
-creates the schema on startup if it is missing, which needs SQLite 3.45 or
-newer for JSONB. `user_history.recipe_id` points at `recipe.recipe_id` in the
-recipe database; SQLite cannot enforce that across files, so `add_history`
-checks it in code.
+## Database
 
-## Catalog database
+Everything the API keeps is in one SQLite file, `remymy.db` at `DATABASE_PATH`
+(default `/state/remymy.db`, on the `remymy-user-data` volume in compose): the
+Food.com recipes and FoodData Central tables, the priced catalog, the users,
+their history and their saved recipes. One file lets the tables refer to each
+other with real foreign keys. `src/remymy_api/schema.py` owns the schema, which
+needs SQLite 3.45 or newer for JSONB. On startup `init_database` creates the
+tables that are missing, adds the catalog CSV's new foods, and migrates the
+users' data. The first time, it also imports the old databases when they are
+there: the recipes of `LEGACY_FOOD_DATABASE_PATH` (default
+`/data/remymy-food.db`) and the users, history and recipes of
+`LEGACY_USER_DATABASE_PATH` (default `/state/remymy-users.db`). After that
+neither file is read.
+
+Every recipe the app knows has a row in `recipe`, whatever its `kind`:
+`openrecipes` for the Food.com recipes the migration job loads, `catalog` for
+each catalog food (by its `fdc_id`), and `user` for a recipe a user wrote
+(`user-recipe:<n>`). Triggers (`schema.RECIPE_SYNC`) add the catalog's and the
+users' rows, and remove a user recipe's row when it is deleted. The recipe
+routes list and show only the `openrecipes` ones.
+
+The container listens on port `8002`. `/health` reports process liveness, while
+`/ready` reports readiness only once the database holds the recipes. Recipe
+routes return a generic `503 Recipe data is unavailable.` when the file is
+missing or lacks the recipe tables. No local path or SQLite error is returned to
+callers.
+
+## Users and saved recipes
+
+`UserRepository` (`src/remymy_api/repository/user_repository.py`) reads and
+writes users, their history and their saved recipes through the ORM:
+`models.AppUser` (its `preferences` written with `jsonb()` and read with
+`json()`), `models.UserHistoryEntry` and `models.SavedRecipe`. It looks a
+username up in Redis before the database, and each write commits its own
+transaction. `app_user`, `user_history` and `saved_recipe` are still created by
+the SQL in `users.py` (`SCHEMA`), for the JSON checks and triggers on
+`preferences`. `users.py` also keeps the rating migration and
+`rate_item`, which checks a rated id is a recipe or a catalog food before
+`UserRepository.add_history` records it.
+
+`saved_recipe` (`user_id` → `app_user`, `recipe_id` → `recipe`, both
+`ON DELETE CASCADE`) holds the recipes a user saved for later, of any kind.
+`GET /api/users/{username}/saved` lists them newest first. `PUT` and `DELETE`
+on `/api/users/{username}/saved/{recipe_id}` save one or take it out; saving
+one twice keeps it as it was. Deleting a user or a recipe deletes its saves.
+
+A recipe a user writes is stored as the other recipes are: its row in
+`recipe` (kind `user`, id `user-recipe:<n>`), its lines in `recipe_ingredient`
+and `recipe_instruction`, and its tags in `recipe_tag`. `user_recipe` (ORM-only,
+`models.py`) holds only what the others do not have, keyed by that `recipe_id`:
+the owner (`user_id`), the nutrients per 100 g and `created_at`. `POST
+/api/recipes` (body `UserRecipeCreate`, response `UserRecipeResponse`, `201`)
+stores one through `RecipeRepository.create_user_recipe`: `404` for an unknown
+`user_id`, `503` if the write fails. It then opens and is listed like the recipe
+database's recipes (`GET /api/recipes/{id}`, `GET /api/recipes`), and can be
+saved and rated. `GET /api/users/{username}/recipes` returns the user's own
+recipes whole, newest first (`UserRecipeResponse` each, `404` for an unknown
+user): `RecipeRepository.user_recipes` reads them in one query, `user_recipe`
+joined to `recipe` and left-joined to `recipe_ingredient`, `recipe_instruction`
+and `recipe_tag`. The app's My recipes page shows them. Deleting the user deletes their recipes with all of that.
+Startup moves recipes stored in `user_recipe`'s old layout (the recipe whole in
+it, tags in `user_recipe_tag`) to this one, keeping their ids.
+
+`recipe_tag` holds every recipe's tags, with where each came from
+(`classifier`, `user` or `foodcom`). The Food.com recipes' tags come in with
+them (`add_foodcom_recipes`), as labels like `60_minutes_or_less`, leaving out
+the category headers on more than 60% of the file's recipes (`preparation`,
+`course`, ...). `GET /api/recipes/{id}` and `GET /api/recipe/{fdc_id}` return a
+recipe's tags as `tags`, a list of labels.
+
+## Catalog
 
 `RecipeRepository` (`src/remymy_api/repository/recipe_repository.py`)
-reads the priced food catalog from a third SQLite file,
-`CATALOG_DATABASE_PATH` (default `/state/remymy-catalog.db`), built from the
-catalog CSV at `CATALOG_PATH` (default `/data/price_mapped_nutrients.csv`).
-Creating the repository creates the file and table if they are missing, reads
-the stored ids with `SELECT DISTINCT fdc_id`, and inserts only the CSV rows
-whose `fdc_id` is not among them; stored rows are not updated. Without the CSV
-an existing database is used as it is. It exposes `fdc_ids`, `all_foods`,
+reads the priced food catalog, the `price_mapped_nutrients` table of
+`remymy.db`, through the ORM (`models.RecipeRecord`). On startup
+`init_catalog_database` brings it up to date with the catalog CSV at
+`RECIPE_PATH` (default `/data/price_mapped_nutrients.csv`):
+`RecipeRepository.from_csv_to_db` creates the table if it is missing and
+inserts only the CSV rows whose `fdc_id` it does not hold; stored rows are not
+updated. Lists and dicts keep the CSV's Python-literal text. Without the CSV the
+stored catalog is used as it is.
+
+When the recommender starts, after that, `add_foodcom_recipes` adds the Food.com
+recipes of `FOODCOM_RECIPE_PATH` (default `/data/foodcom_recipes.csv`) whose
+every ingredient is priced (`price_coverage` `full`, about 3,100 of 218k) to the
+same table, so its index holds both. A recipe's `fdc_id` is `1000000000` plus its
+Food.com `recipe_id` (the two id ranges overlap). Its ingredients and their
+prices come from `price_breakdown`, its nutrients are Food.com's per serving
+divided by the serving's grams for per 100 g (no fiber or cholesterol), and it is
+never an ingredient a recipe line is matched to. Without the file nothing is
+added. The catalog exposes `fdc_ids`, `all_foods`,
 `foods_by_ids`, `food` and `search` (case-insensitive on the description), and
-`digest`, which turns a recipe's ingredient lines into a `Recipe`
+`digest`, which turns a recipe's ingredient lines into a `DigestedRecipe`
 (`src/remymy_api/recipe.py`): the priced foods the lines match, each line
 normalized by `name_key` and looked up in the ingredient index, and the mean
-of their nutrients. The API builds that index at startup with
-`load_ingredient_index()`; otherwise the first `digest` builds it. The
+of their nutrients. The index is built once per catalog database and shared
+by every request's repository: the API builds it at startup with
+`load_ingredient_index()`, and inserting new foods drops it to be rebuilt. The
 recommend route puts the user's likes in their `History`
 (`src/remymy_api/history.py`) and digests each of its recipes once for the
 inference service.
 
-The app shares one instance, `recipe_repository` in the same module, created
-when the module is first imported; use it rather than creating another. It is
-`None` when there is neither a catalog database nor a CSV, so the import never
-fails. On startup the API hands it to the inference service, which loads the
+A route gets a repository on its request's session from
+`dependencies.get_recipe_repository`, or `None` when there is no catalog
+database (a missing file is not opened, so SQLite does not create it empty).
+On startup the API opens one for the inference service, which loads the
 model from `ARTIFACT_DIR` (default
-`weights/gru_xattn_reranker`) and builds the HNSW index over `all_foods()`. The
+`src/remymy_api/inference/weights/window_transformer_reranker`) and builds the HNSW index over `all_foods()`. The
 index is saved under `INDEX_DIR` and reused while the model files and the
 catalog's foods are unchanged. With neither the CSV nor the database the API
 still starts, and `GET /api/recommend/{username}` answers `503`.
@@ -108,10 +203,12 @@ python3 serve.py
 ```
 
 `serve.py` fills in local defaults for anything you have not set:
-`DATABASE_PATH=../data/remymy-food.db`, `USER_DATABASE_PATH=./data/remymy-users.db`,
-`CATALOG_PATH=../data/price_mapped_nutrients.csv`,
-`CATALOG_DATABASE_PATH=./data/remymy-catalog.db`,
-`REDIS_URL=redis://localhost:6379/0`. Redis only
+`DATABASE_PATH=./data/remymy.db`,
+`LEGACY_FOOD_DATABASE_PATH=../data/remymy-food.db`,
+`LEGACY_USER_DATABASE_PATH=./data/remymy-users.db`,
+`RECIPE_PATH=../data/price_mapped_nutrients.csv`,
+`FOODCOM_RECIPE_PATH=../data/foodcom_recipes.csv`,
+`REDIS_URL=redis://localhost:6379/1`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.
 
@@ -123,22 +220,26 @@ its timing; failures that answer a generic `503` are logged with their cause;
 
 ## Bootstrap and ingestion
 
-The bootstrap command is idempotent for an existing valid database. It runs
-SQLite `quick_check` and verifies the required recipe tables, then exits 0. If
-the database is missing, it fails with an actionable message unless both
-source paths are explicitly supplied:
+The bootstrap command (`api-migrate` in compose) makes sure `remymy.db` holds
+the recipes. It is idempotent: a database that holds them passes SQLite
+`quick_check` and the recipe-table checks, then the command exits 0. A database
+without them gets the old recipe database's when there is one
+(`--legacy-database`, default `LEGACY_FOOD_DATABASE_PATH`). Otherwise the
+command ingests the sources, which must be supplied explicitly:
 
 ```bash
-DATABASE_PATH=/data/remymy-food.db \
+DATABASE_PATH=/state/remymy.db \
 RECIPES_SOURCE=/data/13k-recipes.db \
 FDC_SOURCE_DIR=/data/FoodData_Central_foundation_food_csv_2026-04-30 \
 python migrations/bootstrap.py
 ```
 
 The same values can be passed with `--database-path`, `--recipes`, and
-`--fdc-dir`. A missing database is written to a temporary file in the target
-directory, validated, and atomically replaced into place only after ingestion
-completes. Use `--validate-only` to prohibit ingestion.
+`--fdc-dir`. The ingest is written to a temporary file next to `remymy.db` and
+validated. `schema.merge_food_data` then merges it in, in one transaction, with
+upserts: a row already there is updated, never replaced or deleted, so the
+saves and history that refer to a recipe stay. The file is never swapped, as it
+also holds the users. Use `--validate-only` to prohibit loading.
 
 The ingestion CLI can also be run directly:
 
@@ -147,5 +248,5 @@ python migrations/ingest_food_data.py \
   --recipes /data/13k-recipes.db \
   --fdc-dir /data/FoodData_Central_foundation_food_csv_2026-04-30 \
   --fdc-release 2026-04 \
-  --output /data/remymy-food.db
+  --output /tmp/food-ingest.db
 ```

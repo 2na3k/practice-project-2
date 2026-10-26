@@ -50,15 +50,18 @@ Open [http://localhost:3000](http://localhost:3000). The app container calls the
 ## Product behavior
 
 - Discover opens with a short welcome above the composer. Once the person sends a request, it becomes a conversation; a meal the agent suggests opens its details.
-- Each person gets one guest user per browser. `/api/guest` asks the Data API to create it on the first visit and keeps its username in an HTTP-only cookie (`remymy-guest`), so history, likes, and ratings follow the browser. Clearing cookies starts a new guest.
+- Each person gets one guest user per browser. `/api/guest` asks the Data API to create it on the first visit and keeps its username in an HTTP-only cookie (`remymy-guest`), so history, likes, ratings, saved recipes, preferences and the recipes the person writes follow the browser. Clearing cookies starts a new guest.
+- Above the welcome, "Picked for you" shows the Data API's model recommendations for the guest ("Recipes you'll probably like", with their predicted chance of being liked) through the app's `/api/recommend/[username]` route; set `DATA_API_URL` when the API is not at `http://localhost:8002`. The "Less overthinking. More good food." banner shows under it only when the API returns no picks.
 - Recipes browses the Data API's recipe records with search and paging. Opening one shows its details from `/api/recipes/[id]`.
-- Each recipe in the priced catalog has a tick (liked it), a cross (not for me), and a bookmark. A like goes through `/api/recipes/[id]/rating` to the Data API's `PUT /api/recipes/{recipe_id}/rating`, under this browser's guest user. Saved recipes are kept in this browser's local storage (`remymy-saved-foods`).
-- Clicking a recipe in Saved or History opens its details: ingredients with their FairPrice pack prices, the basket price, and nutrients per 100 g, from `/api/catalog/[id]`.
+- Each recipe in the priced catalog has a tick (liked it), a cross (not for me), and a bookmark. A like goes through `/api/recipes/[id]/rating` to the Data API's `PUT /api/recipes/{recipe_id}/rating`, under this browser's guest user. A bookmark saves the recipe in the Data API (`/api/users/[username]/saved`), so Saved follows the guest; recipes this browser saved before that (`remymy-saved-foods`) go up to it once.
+- Clicking a recipe in "Picked for you", Saved or History opens its details: ingredients with their FairPrice pack prices, the basket price, nutrients per 100 g, its tags and similar recipes, from `/api/catalog/[id]` (the Data API's `GET /api/recipe/{fdc_id}`).
+- Preferences sets the diet, budget, allergies, cuisine and preferred nutrient the recommendations use; they are saved for the guest in the Data API and kept in this browser.
+- Add recipe writes a recipe of the person's own, with tags the classifier suggests; My recipes lists the guest's recipes, newest first, and opens each one.
 - History lists what the guest rated, newest first, from `/api/users/[username]/history`. A recipe's title opens it.
 - Likes shown in Saved come back from `/api/users/[username]/likes`, so the buttons show what the database holds.
 - Chat keeps the preferences from one message to the next. The server reads each turn with the rule-based parser in `lib/preferences.ts`; hard constraints such as a vegan diet or a time limit carry forward until the person relaxes them.
 - Provider and model choices come from the Pi model catalog exposed by the server, so the UI keeps no second model list. Connected mode validates the provider and model before opening an eight-hour session.
-- Chat history is discarded when the page or server session ends. Saved recipes live in this browser only.
+- Chat history is discarded when the page or server session ends.
 
 ## Project layout
 

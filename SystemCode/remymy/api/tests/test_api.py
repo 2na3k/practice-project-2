@@ -3,57 +3,44 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+from conftest import add_recipes
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from remymy_api.db import close_database, open_database
+from remymy_api.db import close_database, database_path, open_database
 from remymy_api.main import app
+from remymy_api.schema import connect
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    database = tmp_path / "recipes.db"
-    connection = sqlite3.connect(database)
-    connection.executescript(
-        """
-        CREATE TABLE recipe (
-          recipe_id TEXT PRIMARY KEY,
-          title TEXT,
-          quality_status TEXT NOT NULL
-        );
-        CREATE TABLE recipe_ingredient (
-          ingredient_id TEXT PRIMARY KEY,
-          recipe_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          raw_text TEXT NOT NULL,
-          ingredient_text TEXT
-        );
-        CREATE TABLE recipe_instruction (
-          recipe_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          text TEXT NOT NULL,
-          PRIMARY KEY (recipe_id, position)
-        );
-        INSERT INTO recipe VALUES
-          ('openrecipes:1', 'Tomato Soup', 'accepted'),
-          ('openrecipes:2', 'Apple Salad', 'partial'),
-          ('openrecipes:3', 'Long Ingredient List', 'accepted'),
-          ('openrecipes:4', NULL, 'quarantined');
-        INSERT INTO recipe_ingredient VALUES
-          ('openrecipes:1:ingredient:1', 'openrecipes:1', 1, '2 cups tomatoes', 'tomatoes'),
-          ('openrecipes:1:ingredient:2', 'openrecipes:1', 2, '1 tsp salt', 'salt'),
-          ('openrecipes:2:ingredient:1', 'openrecipes:2', 1, '1 apple', 'apple'),
-          ('openrecipes:3:ingredient:1', 'openrecipes:3', 1, 'one', 'one'),
-          ('openrecipes:3:ingredient:2', 'openrecipes:3', 2, 'two', 'two'),
-          ('openrecipes:3:ingredient:3', 'openrecipes:3', 3, 'three', 'three'),
-          ('openrecipes:3:ingredient:4', 'openrecipes:3', 4, 'four', 'four');
-        INSERT INTO recipe_instruction VALUES
-          ('openrecipes:1', 1, 'Blend tomatoes.'),
-          ('openrecipes:1', 2, 'Season and serve.');
-        """
+def client():
+    add_recipes(
+        [
+            ("openrecipes:1", "Tomato Soup", "accepted"),
+            ("openrecipes:2", "Apple Salad", "partial"),
+            ("openrecipes:3", "Long Ingredient List", "accepted"),
+            ("openrecipes:4", None, "quarantined"),
+        ],
+        [
+            ("openrecipes:1", 1, "2 cups tomatoes", "tomatoes"),
+            ("openrecipes:1", 2, "1 tsp salt", "salt"),
+            ("openrecipes:2", 1, "1 apple", "apple"),
+            ("openrecipes:3", 1, "one", "one"),
+            ("openrecipes:3", 2, "two", "two"),
+            ("openrecipes:3", 3, "three", "three"),
+            ("openrecipes:3", 4, "four", "four"),
+        ],
+        [
+            ("openrecipes:1", 1, "Blend tomatoes."),
+            ("openrecipes:1", 2, "Season and serve."),
+        ],
     )
-    connection.commit()
+    # a catalog food's row, as startup adds one for each: not a Food.com recipe, so the recipe routes leave it out
+    connection = connect(database_path())
+    with connection:
+        connection.execute("INSERT INTO recipe (recipe_id, title, quality_status, kind) "
+                           "VALUES ('170138', 'Tomatoes, red, ripe, canned', 'accepted', 'catalog')")
     connection.close()
-    monkeypatch.setenv("DATABASE_PATH", str(database))
     return TestClient(app)
 
 
@@ -97,6 +84,7 @@ def test_detail_returns_ordered_raw_recipe_text(client):
         "ingredients": ["2 cups tomatoes", "1 tsp salt"],
         "instructions": ["Blend tomatoes.", "Season and serve."],
         "quality_status": "accepted",
+        "tags": [],
     }
 
 
@@ -153,41 +141,32 @@ def test_unknown_recipe_is_404(client):
     assert response.json() == {"detail": "Recipe not found."}
 
 
-def test_read_only_opener_handles_a_wal_mode_database(tmp_path, monkeypatch):
+def test_a_catalog_foods_recipe_row_is_not_a_listed_recipe(client):
+    assert client.get("/api/recipes/170138").status_code == 404
+    assert client.get("/api/recipes", params={"q": "canned"}).json()["total"] == 0
+
+
+def test_a_database_without_recipes_is_not_ready(database):
+    response = TestClient(app).get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Recipe data is unavailable."}
+
+
+def test_opener_reads_a_wal_mode_database_and_never_creates_one(tmp_path, monkeypatch):
     database = tmp_path / "wal recipes.db"
-    connection = sqlite3.connect(database)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.executescript(
-        """
-        CREATE TABLE recipe (
-          recipe_id TEXT PRIMARY KEY,
-          title TEXT,
-          quality_status TEXT NOT NULL
-        );
-        CREATE TABLE recipe_ingredient (
-          ingredient_id TEXT PRIMARY KEY,
-          recipe_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          raw_text TEXT NOT NULL,
-          ingredient_text TEXT
-        );
-        CREATE TABLE recipe_instruction (
-          recipe_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          text TEXT NOT NULL,
-          PRIMARY KEY (recipe_id, position)
-        );
-        INSERT INTO recipe VALUES ('openrecipes:wal', 'WAL Recipe', 'accepted');
-        """
-    )
-    connection.commit()
+    add_recipes([("openrecipes:wal", "WAL Recipe", "accepted")], path=database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
     connection.close()
 
     monkeypatch.setenv("DATABASE_PATH", str(database))
-    read_only = open_database()
+    opened = open_database()
     try:
-        assert read_only.execute("SELECT title FROM recipe").fetchone()[0] == "WAL Recipe"
-        with pytest.raises(sqlite3.OperationalError):
-            read_only.execute("CREATE TABLE should_not_exist (id INTEGER)")
+        assert opened.execute("SELECT title FROM recipe").fetchone()[0] == "WAL Recipe"
     finally:
-        close_database(read_only)
+        close_database(opened)
+
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "missing.db"))
+    with pytest.raises(HTTPException):
+        open_database()
+    assert not (tmp_path / "missing.db").exists()

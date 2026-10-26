@@ -15,7 +15,7 @@ describe("catalog item route", () => {
     const response = await item("170005");
 
     expect(response.status).toBe(200);
-    expect(((fetchMock.mock.calls[0] as unknown as [URL])[0]).href).toBe("http://localhost:8002/api/catalog/170005");
+    expect(((fetchMock.mock.calls[0] as unknown as [URL])[0]).href).toBe("http://localhost:8002/api/recipe/170005");
   });
 
   it("accepts only FDC ids, and answers 502 without the Data API", async () => {

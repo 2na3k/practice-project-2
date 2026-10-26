@@ -5,12 +5,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "src"))
 
+# remymy.db is created on the first start, taking the recipes of the old recipe database and the users of the old users
+# database once.
 LOCAL_DEFAULTS = {
-    "DATABASE_PATH": str(HERE.parent / "data" / "remymy-food.db"),
-    "USER_DATABASE_PATH": str(HERE / "data" / "remymy-users.db"),
-    "CATALOG_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
-    "CATALOG_DATABASE_PATH": str(HERE / "data" / "remymy-catalog.db"),
-    "REDIS_URL": "redis://localhost:6379/0",
+    "DATABASE_PATH": str(HERE / "data" / "remymy.db"),
+    "LEGACY_FOOD_DATABASE_PATH": str(HERE.parent / "data" / "remymy-food.db"),
+    "LEGACY_USER_DATABASE_PATH": str(HERE / "data" / "remymy-users.db"),
+    "RECIPE_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
+    "FOODCOM_RECIPE_PATH": str(HERE.parent / "data" / "foodcom_recipes.csv"),
+    "REDIS_URL": "redis://localhost:6379/1",
 }
 
 

@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from datetime import datetime, timezone
 
 import pytest
+from conftest import add_recipes
 from fastapi.testclient import TestClient
 
-from remymy_api import main, recommend, users
+from sqlalchemy.orm import Session
+
+from remymy_api import main, recommend
+from remymy_api.db import database_engine
+from remymy_api.dependencies import get_recipe_repository
 from remymy_api.main import app, load_recommender
-from remymy_api.recipe import Recipe
+from remymy_api.recipe import DigestedRecipe
+from remymy_api.repository.user_repository import UserRepository
 from remymy_api.schemas import Ingredient
-from remymy_api.users import add_history, create_user, init_user_database, open_user_database
+from remymy_api.schema import init_database
 
 
 CATALOG = {
@@ -31,14 +36,14 @@ RECOMMENDED = [
 
 
 class FakeRepository:
-    """Stands in for the shared recipe_repository: an ingredient line matches the CATALOG food it names exactly."""
+    """Stands in for the catalog's RecipeRepository: an ingredient line matches the CATALOG food it names exactly."""
 
     def __init__(self) -> None:
         self.digested: list[str] = []
 
-    def digest(self, recipe_id: str, lines: list[str]) -> Recipe:
+    def digest(self, recipe_id: str, lines: list[str]) -> DigestedRecipe:
         self.digested.append(recipe_id)
-        return Recipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
+        return DigestedRecipe(recipe_id, [Ingredient(**CATALOG[line]) for line in dict.fromkeys(lines) if line in CATALOG])
 
     def food(self, fdc_id: int) -> dict | None:
         found = next((food for food in CATALOG.values() if food["fdc_id"] == fdc_id), None)
@@ -48,10 +53,10 @@ class FakeRepository:
                           for item in RECOMMENDED if item["fdc_id"] == fdc_id), None)
         return found
 
-    def digest_food(self, food_id: str) -> Recipe:
+    def digest_food(self, food_id: str) -> DigestedRecipe:
         self.digested.append(food_id)
         food = self.food(int(food_id))
-        return Recipe(food_id, [] if food is None else [Ingredient(**food)])
+        return DigestedRecipe(food_id, [] if food is None else [Ingredient(**food)])
 
 
 def answer(history, recipes, top_k: int) -> list[dict]:
@@ -59,45 +64,33 @@ def answer(history, recipes, top_k: int) -> list[dict]:
 
 
 @pytest.fixture
-def stores(tmp_path, monkeypatch):
-    recipes = tmp_path / "recipes.db"
-    with sqlite3.connect(recipes) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE recipe (recipe_id TEXT PRIMARY KEY, title TEXT, quality_status TEXT NOT NULL);
-            CREATE TABLE recipe_ingredient (
-              ingredient_id TEXT PRIMARY KEY, recipe_id TEXT NOT NULL, position INTEGER NOT NULL,
-              raw_text TEXT NOT NULL, ingredient_text TEXT
-            );
-            CREATE TABLE recipe_instruction (recipe_id TEXT, position INTEGER, text TEXT);
-            INSERT INTO recipe VALUES
-              ('openrecipes:1', 'Tomato Soup', 'accepted'),
-              ('openrecipes:2', 'Apple Salad', 'accepted'),
-              ('openrecipes:3', 'Plain Water', 'accepted');
-            INSERT INTO recipe_ingredient VALUES
-              ('1:1', 'openrecipes:1', 1, '2 cups tomatoes', 'tomatoes'),
-              ('1:2', 'openrecipes:1', 2, '1 tsp salt', 'salt'),
-              ('1:3', 'openrecipes:1', 3, 'salt to taste', 'salt'),
-              ('1:4', 'openrecipes:1', 4, '4 cups water', 'water'),
-              ('2:1', 'openrecipes:2', 1, 'apple', NULL),
-              ('3:1', 'openrecipes:3', 1, '1 cup water', 'water');
-            """
-        )
-    connection.close()
-    monkeypatch.setenv("DATABASE_PATH", str(recipes))
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "state" / "users.db"))
-    init_user_database()
-    connection = open_user_database()
-    yield connection
-    connection.close()
+def stores(tmp_path, monkeypatch, cache):
+    """The database with three recipes, and a UserRepository on it."""
+    add_recipes(
+        [
+            ("openrecipes:1", "Tomato Soup", "accepted"),
+            ("openrecipes:2", "Apple Salad", "accepted"),
+            ("openrecipes:3", "Plain Water", "accepted"),
+        ],
+        [
+            ("openrecipes:1", 1, "2 cups tomatoes", "tomatoes"),
+            ("openrecipes:1", 2, "1 tsp salt", "salt"),
+            ("openrecipes:1", 3, "salt to taste", "salt"),
+            ("openrecipes:1", 4, "4 cups water", "water"),
+            ("openrecipes:2", 1, "apple", None),
+            ("openrecipes:3", 1, "1 cup water", "water"),
+        ],
+    )
+    init_database()
+    with Session(database_engine()) as session:
+        yield UserRepository(session, cache)
 
 
 @pytest.fixture
-def repository(monkeypatch) -> FakeRepository:
+def repository(override) -> FakeRepository:
     fake = FakeRepository()
-    monkeypatch.setattr(recommend, "recipe_repository", fake)
-    # add_history looks a rated catalog food up in it
-    monkeypatch.setattr(users, "recipe_repository", fake)
+    # the recommend and rating routes get it as the catalog
+    override(get_recipe_repository, lambda: fake)
     return fake
 
 
@@ -107,15 +100,29 @@ def models(recommender, repository):
     return recommender
 
 
-def seed_alice(stores, cache) -> int:
-    alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", like=True)
-    add_history(stores, alice.id, "openrecipes:2", like=False)
+def seed_alice(stores) -> int:
+    alice = stores.create_user("alice")
+    stores.add_history(alice.id, "openrecipes:1", like=True)
+    stores.add_history(alice.id, "openrecipes:2", like=False)
     return alice.id
 
 
+def test_the_users_preferences_reach_the_recommender(stores, models):
+    from remymy_api.schemas import Preferences
+
+    bob = stores.create_user("bob", Preferences(special_diet="halal", preferred_nutrient="protein", budget=8.5))
+    stores.add_history(bob.id, "openrecipes:1", like=True)
+
+    with TestClient(app) as client:
+        assert client.get("/api/recommend/bob").status_code == 200
+
+    (call,) = models.calls
+    assert call["preferences"] == {"special_diet": "halal", "cuisines": [], "preferred_nutrient": "protein",
+                                   "budget": 8.5, "allergies": []}
+
+
 def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice", params={"top_k": 2})
@@ -154,9 +161,9 @@ def test_first_request_calls_the_model_once_and_caches_by_user_id(stores, models
 
 
 def test_rating_a_recipe_again_changes_its_like(stores, models, repository, cache):
-    alice = create_user(stores, cache, "alice")
-    add_history(stores, alice.id, "openrecipes:1", like=False)
-    add_history(stores, alice.id, "openrecipes:1", like=True)
+    alice = stores.create_user("alice")
+    stores.add_history(alice.id, "openrecipes:1", like=False)
+    stores.add_history(alice.id, "openrecipes:1", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice")
@@ -170,9 +177,9 @@ def test_rating_a_recipe_again_changes_its_like(stores, models, repository, cach
 
 
 def test_a_rated_grocery_goes_to_the_model_as_itself(stores, models, repository, cache):
-    alice = create_user(stores, cache, "alice")
+    alice = stores.create_user("alice")
     # "Apples, raw" of CATALOG, by its fdc_id, as the groceries panel rates it
-    add_history(stores, alice.id, "3", like=True)
+    stores.add_history(alice.id, "3", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/alice")
@@ -184,7 +191,7 @@ def test_a_rated_grocery_goes_to_the_model_as_itself(stores, models, repository,
 
 
 def test_later_requests_are_served_from_the_cache(stores, models, cache):
-    seed_alice(stores, cache)
+    seed_alice(stores)
 
     with TestClient(app) as client:
         first = client.get("/api/recommend/alice", params={"top_k": 1}).json()
@@ -197,7 +204,7 @@ def test_later_requests_are_served_from_the_cache(stores, models, cache):
 
 
 def test_user_lookup_goes_to_redis_before_the_database(stores, models, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
     cache.store.clear()
 
     with TestClient(app) as client:
@@ -220,8 +227,8 @@ def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
 
 
 def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache):
-    bob = create_user(stores, cache, "bob")
-    add_history(stores, bob.id, "openrecipes:3", like=True)
+    bob = stores.create_user("bob")
+    stores.add_history(bob.id, "openrecipes:3", like=True)
 
     with TestClient(app) as client:
         response = client.get("/api/recommend/bob")
@@ -232,7 +239,7 @@ def test_history_with_no_priced_ingredient_has_no_profile(stores, models, cache)
 
 
 def test_redis_down_still_answers_from_the_model(stores, models, cache):
-    seed_alice(stores, cache)
+    seed_alice(stores)
     cache.down = True
 
     with TestClient(app) as client:
@@ -245,7 +252,7 @@ def test_redis_down_still_answers_from_the_model(stores, models, cache):
 
 
 def test_a_computed_recommendation_is_logged_and_a_cache_hit_at_debug(stores, models, cache, caplog):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
 
     with caplog.at_level(logging.DEBUG, logger="remymy_api"):
         with TestClient(app) as client:
@@ -262,7 +269,7 @@ def test_a_computed_recommendation_is_logged_and_a_cache_hit_at_debug(stores, mo
 
 
 def test_redis_failures_are_logged_as_warnings(stores, models, cache, caplog):
-    seed_alice(stores, cache)
+    seed_alice(stores)
     cache.down = True
 
     with TestClient(app) as client:
@@ -275,10 +282,9 @@ def test_redis_failures_are_logged_as_warnings(stores, models, cache, caplog):
 
 
 def test_without_a_catalog_the_api_starts_and_recommendations_are_503(stores, cache, monkeypatch):
-    # what recipe_repository is when neither a catalog database nor a CSV was there on import
-    monkeypatch.setattr(main, "recipe_repository", None)
+    # the real load, on the catalog database conftest points at, which is not there
     monkeypatch.setattr(main, "load_recommender", load_recommender)
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
 
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
@@ -288,38 +294,51 @@ def test_without_a_catalog_the_api_starts_and_recommendations_are_503(stores, ca
     assert f"recommendations:{alice}" not in cache.store
 
 
-def test_the_recommender_is_built_on_the_shared_repository(monkeypatch):
+def test_the_recommender_is_built_on_the_databases_catalog(tmp_path, monkeypatch):
+    from test_recipe_repository import food, write_catalog
+
     from remymy_api.inference import service
+    from remymy_api.repository.recipe_repository import init_catalog_database
 
-    shared = object()
-    monkeypatch.setattr(main, "recipe_repository", shared)
-    monkeypatch.setattr(service.Recommender, "load", classmethod(lambda cls, repository: repository))
-    assert load_recommender() is shared
+    database = tmp_path / "remymy.db"
+    init_catalog_database(database, write_catalog(tmp_path / "catalog.csv", [food(1), food(2)]))
+    monkeypatch.setenv("DATABASE_PATH", str(database))
+    monkeypatch.setattr(service.Recommender, "_load",
+                        lambda self, repository: setattr(self, "fdc_ids", repository.fdc_ids()))
+
+    assert load_recommender().fdc_ids == {1, 2}
 
 
-def test_a_disliked_pick_leaves_the_cached_recommendations(stores, models, repository, cache):
-    alice = seed_alice(stores, cache)
-    key = f"recommendations:{alice}"
+def test_the_recommendations_are_refreshed_once_more_than_ten_ratings_are_counted(stores, models, repository, cache):
+    alice = seed_alice(stores)
+    recommendations = f"recommendations:{alice}"
+    ratings = f"number_of_ratings:{alice}"
 
     with TestClient(app) as client:
-        first = client.get("/api/recommend/alice", params={"top_k": 3}).json()
-        # the cached entry has been there a while
-        cache.ttls[key] = 1234
-        disliked = client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": False})
-        liked = client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
-        second = client.get("/api/recommend/alice", params={"top_k": 3}).json()
+        client.get("/api/recommend/alice", params={"top_k": 3})
+        for like in [False, True] * 5:
+            assert client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": like}).status_code == 200
+        # ten ratings, likes and dislikes alike, each counted and each keeping the count a day from then
+        counted = int(cache.store[ratings]), cache.ttls[ratings]
+        still_cached = recommendations in cache.store
+        client.get("/api/recommend/alice", params={"top_k": 3})
+        calls_before_refresh = len(models.calls)
+        client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
+        # the eleventh drops the recommendations and the count
+        refreshed = recommendations not in cache.store and ratings not in cache.store
+        client.get("/api/recommend/alice", params={"top_k": 3})
+        client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": False})
 
-    assert disliked.status_code == liked.status_code == 200
-    assert [item["id"] for item in first["items"]] == ["167516", "175237", "168516"]
-    # served from the cache without the disliked one; the liked one stays
-    assert [item["id"] for item in second["items"]] == ["167516", "168516"]
-    assert len(models.calls) == 1
-    assert cache.ttls[key] == 1234
-    assert second["profile"] == first["profile"]
+    assert counted == (10, 86400)
+    assert still_cached and calls_before_refresh == 1
+    assert refreshed
+    assert len(models.calls) == 2
+    # the next rating counts from 1 again
+    assert int(cache.store[ratings]) == 1
 
 
 def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache):
-    alice = seed_alice(stores, cache)
+    alice = seed_alice(stores)
     cache.down = True
 
     with TestClient(app) as client:
@@ -328,3 +347,41 @@ def test_a_dislike_is_saved_when_redis_is_down(stores, models, repository, cache
     assert response.status_code == 200
     assert response.json()["like"] is False
 
+
+
+class ItemsRecommender:
+    """Answers every recommendation with the same scored foods."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self.items = items
+
+    def recommend(self, history, recipes, top_k: int, preferences=None) -> list[dict]:
+        return list(self.items)
+
+
+SCORED = [
+    {"fdc_id": 1, "name": "Steak", "price": 18.5, "p_like": 0.9, "similarity": 0.9},
+    {"fdc_id": 2, "name": "Tofu", "price": 2.5, "p_like": 0.6, "similarity": 0.9},
+    {"fdc_id": 3, "name": "Salmon", "price": 9.0, "p_like": 0.8, "similarity": 0.9},
+    {"fdc_id": 4, "name": "Rice", "price": 2.0, "p_like": 0.6, "similarity": 0.9},
+    {"fdc_id": 5, "name": "Prawns", "price": 12.0, "p_like": 0.7, "similarity": 0.9},
+]
+
+
+def recommended_ids(budget: float) -> list[str]:
+    from remymy_api.schemas import Preferences, UserProfileInput
+
+    user = UserProfileInput(user_id=1, preferences=Preferences(budget=budget), history=[])
+    return [item.id for item in recommend.recommend(ItemsRecommender(SCORED), user, catalog=None).items]
+
+
+def test_a_budget_keeps_only_what_it_affords_most_liked_first():
+    # Steak and Prawns cost more than S$10; of Tofu and Rice, equally liked, the cheaper comes first
+    assert recommended_ids(10) == ["3", "4", "2"]
+    # the budget is inclusive
+    assert recommended_ids(9) == ["3", "4", "2"]
+    assert recommended_ids(1.5) == []
+
+
+def test_no_budget_keeps_everything():
+    assert recommended_ids(0) == ["1", "3", "5", "4", "2"]

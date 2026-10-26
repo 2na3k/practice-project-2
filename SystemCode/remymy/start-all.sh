@@ -3,10 +3,11 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
 ENV_FILE="$ROOT/.env.nonprod"
 OPEN_BROWSER=1
+INSTALL_REQUIREMENTS=1
 
 usage() {
   cat <<EOF
-Usage: ./start-all.sh [--no-open]
+Usage: ./start-all.sh
 
 Builds and starts Remymy with Docker Compose: the Data API (with its Redis
 cache), the Next.js app and local Langfuse. When the recommender files are
@@ -36,6 +37,7 @@ EOF
 for arg in "$@"; do
   case "$arg" in
     --no-open) OPEN_BROWSER=0 ;;
+    --no-install) INSTALL_REQUIREMENTS=0 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -51,6 +53,30 @@ info() { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
 ok() { printf '%s ✓%s %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '%s !%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
 fail() { printf '%s ✗%s %s\n' "$RED" "$RESET" "$*" >&2; }
+
+# Numbered stages, so the output shows which one is running and which have finished. stage closes the previous one
+# (✓ with its time) and starts the next; stage_failed reports the running one as failed.
+STAGE_TOTAL=7
+stage_no=0
+stage_name=""
+stage_started=$SECONDS
+stage() {
+  stage_done
+  stage_no=$((stage_no + 1))
+  stage_name=$*
+  stage_started=$SECONDS
+  printf '\n%s[%d/%d]%s %s…\n' "$BOLD" "$stage_no" "$STAGE_TOTAL" "$RESET" "$stage_name"
+}
+stage_done() {
+  [ -n "$stage_name" ] || return 0
+  ok "[$stage_no/$STAGE_TOTAL] $stage_name done ($((SECONDS - stage_started))s)"
+  stage_name=""
+}
+stage_failed() {
+  [ -n "$stage_name" ] || return 0
+  fail "[$stage_no/$STAGE_TOTAL] $stage_name failed after $((SECONDS - stage_started))s"
+  stage_name=""
+}
 
 # The value of KEY in .env.nonprod, or nothing. The last assignment wins, as
 # it does for Compose.
@@ -85,8 +111,10 @@ compose() {
 
 problems=0
 
+stage "Checking Docker"
 if ! command -v docker >/dev/null; then
   fail "Docker is required. Install Docker Desktop: https://docs.docker.com/get-docker/"
+  stage_failed
   exit 1
 fi
 if ! docker compose version >/dev/null 2>&1; then
@@ -99,9 +127,11 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 if [ "$problems" -ne 0 ]; then
+  stage_failed
   exit 1
 fi
 
+stage "Reading settings and checking the data files"
 [ -f "$ENV_FILE" ] || warn ".env.nonprod not found; using the defaults in docker-compose.yml."
 
 case "$DATA_DIR" in
@@ -109,9 +139,19 @@ case "$DATA_DIR" in
   *) data_path="$ROOT/${DATA_DIR#./}" ;;
 esac
 
-if [ ! -f "$data_path/remymy-food.db" ]; then
-  fail "$data_path/remymy-food.db not found. The Data API needs it (see README.md)."
-  exit 1
+# Each service writes a log file per hour under it (logging/hourly-log.sh). Made here, as this user, so the services
+# that run as a non-root user can write to it; Docker would make a missing one owned by root.
+log_dir="${LOG_DIR_HOST:-./logs}"
+case "$log_dir" in
+  /*) ;;
+  *) log_dir="$ROOT/${log_dir#./}" ;;
+esac
+mkdir -p "$log_dir"
+
+# The recipes live in remymy.db, in the remymy-user-data volume. api-migrate loads them the first time from
+# remymy-food.db, or else from RECIPES_SOURCE and FDC_SOURCE_DIR; once loaded neither is needed.
+if [ ! -f "$data_path/remymy-food.db" ] && { [ -z "${RECIPES_SOURCE:-}" ] || [ -z "${FDC_SOURCE_DIR:-}" ]; }; then
+  warn "$data_path/remymy-food.db not found and RECIPES_SOURCE/FDC_SOURCE_DIR unset: api-migrate fails unless remymy.db already holds the recipes (see README.md)."
 fi
 
 # The recommender needs files that are not in the repository. Without them its
@@ -126,10 +166,53 @@ else
   [ -f "$data_path/models/$MODEL_FILE" ] || printf '     missing %s\n' "$data_path/models/$MODEL_FILE" >&2
 fi
 
-if [ -n "$(compose ps --status running --quiet 2>/dev/null)" ]; then
-  fail "Remymy is already running in Docker."
-  printf '   Press Ctrl+C in the terminal running ./start-all.sh, or run: (cd %q && docker compose down)\n' "$ROOT" >&2
-  exit 1
+# Containers left from an earlier start are removed first, so their ports are
+# free again. Volumes are kept, so user accounts and Langfuse data survive.
+stage "Stopping containers left from an earlier start"
+if [ -n "$(compose ps --all --quiet 2>/dev/null)" ]; then
+  info "Stopping the Remymy containers that are already running…"
+  if compose --profile recommender down --remove-orphans >/dev/null 2>&1; then
+    ok "Old containers stopped."
+  else
+    fail "Could not stop the running Remymy containers. Run: (cd $ROOT && docker compose down)"
+    stage_failed
+    exit 1
+  fi
+else
+  info "None running."
+fi
+
+# The containers install their own copies, so a failed install is reported but
+# does not stop the start.
+install_requirements() {
+  local python=${PYTHON:-python3} dir req venv stamp sum
+  if ! command -v "$python" >/dev/null; then
+    warn "$python not found, so the Python requirements are not installed."
+    return
+  fi
+  for dir in api mcp models; do
+    req="$ROOT/$dir/requirements.txt"
+    venv="$ROOT/$dir/.venv"
+    stamp="$venv/.requirements.cksum"
+    [ -f "$req" ] || continue
+    sum=$(cksum <"$req")
+    [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$sum" ] && continue
+    info "Installing $dir/requirements.txt into $dir/.venv"
+    if { [ -x "$venv/bin/python" ] || "$python" -m venv "$venv"; } &&
+      "$venv/bin/python" -m pip install --quiet --disable-pip-version-check -r "$req"; then
+      printf '%s\n' "$sum" >"$stamp"
+      ok "Installed $dir requirements."
+    else
+      warn "Could not install $dir/requirements.txt. Docker still installs its own copy."
+    fi
+  done
+}
+
+stage "Installing the local Python requirements"
+if [ "$INSTALL_REQUIREMENTS" -eq 1 ]; then
+  install_requirements
+else
+  info "Skipped (--no-install)."
 fi
 
 # A port that is already taken (by another program or another container) is
@@ -158,6 +241,7 @@ pick_port() {
   taken="$taken$port "
 }
 
+stage "Choosing free ports"
 pick_port APP_PORT "app"
 pick_port API_PORT "Data API"
 pick_port LANGFUSE_PORT "Langfuse"
@@ -180,7 +264,7 @@ banner() {
     printf '    mcp           http://localhost:%s/health\n' "$MCP_PORT"
     printf '    models        http://localhost:%s/health\n' "$MODEL_PORT"
   fi
-  printf '    Live logs follow. Press Ctrl+C to stop everything.\n\n'
+  printf '    Started in %ss. Live logs follow. Press Ctrl+C to stop everything.\n\n' "$SECONDS"
 }
 
 stop_all() {
@@ -193,10 +277,22 @@ interrupted=0
 trap 'interrupted=1' INT TERM
 
 info "Starting Remymy in Docker (app :$APP_PORT, Data API :$API_PORT, Langfuse :$LANGFUSE_PORT)"
-info "The first run builds the images and takes a few minutes."
 
-if ! compose up --build --detach --wait --wait-timeout 900 --remove-orphans; then
+stage "Building the images"
+info "The first run builds every image and takes a few minutes; later runs reuse the cached layers."
+if ! compose build; then
+  [ "$interrupted" -eq 0 ] || exit 130
+  stage_failed
+  fail "Building the images failed; the build output above shows which one."
+  exit 1
+fi
+[ "$interrupted" -eq 0 ] || exit 130
+
+stage "Starting the containers and waiting for their health checks"
+info "The Data API answers once its database is ready; its models then load in the background."
+if ! compose up --detach --wait --wait-timeout 900 --remove-orphans; then
   if [ "$interrupted" -eq 0 ]; then
+    stage_failed
     echo
     fail "Remymy did not start. The last log lines from each service:"
     compose ps --all
@@ -206,6 +302,7 @@ if ! compose up --build --detach --wait --wait-timeout 900 --remove-orphans; the
   exit 1
 fi
 [ "$interrupted" -eq 0 ] || { stop_all; exit 130; }
+stage_done
 
 banner
 if [ "$OPEN_BROWSER" -eq 1 ]; then

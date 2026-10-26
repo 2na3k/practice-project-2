@@ -33,15 +33,18 @@ def test_an_unknown_log_level_falls_back_to_info():
     assert "WARNING remymy_api.logs: Unknown LOG_LEVEL 'LOUD'; logging at INFO." in result.stderr
 
 
-def test_a_missing_recipe_database_is_logged_but_not_shown_to_callers(monkeypatch, tmp_path, cache, caplog):
+def test_missing_recipes_are_logged_but_not_shown_to_callers(monkeypatch, tmp_path, cache, caplog):
     missing = tmp_path / "missing.db"
     monkeypatch.setenv("DATABASE_PATH", str(missing))
-    monkeypatch.setenv("USER_DATABASE_PATH", str(tmp_path / "users.db"))
 
+    # before startup has created the database
+    response = TestClient(app).get("/api/recipes")
+    # after, but before the migration job has loaded the recipes
     with TestClient(app) as client:
-        response = client.get("/api/recipes")
+        ready = client.get("/ready")
 
-    assert response.status_code == 503
-    assert str(missing) not in response.text
-    assert any(record.levelno == logging.WARNING and record.getMessage() == f"No recipe database at {missing}."
-               for record in caplog.records)
+    assert response.status_code == ready.status_code == 503
+    assert str(missing) not in response.text + ready.text
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert f"No database at {missing}." in warnings
+    assert "The database has no recipes yet; the migration job loads them." in warnings

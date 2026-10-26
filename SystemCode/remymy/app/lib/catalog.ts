@@ -1,6 +1,6 @@
-import { dataApiError } from "./recipes";
+import { dataApiError, type RecipeDetail } from "./recipes";
 
-// One item of the priced catalog, as the Data API's GET /api/catalog/{fdc_id} gives it (the fields shown here).
+// One item of the priced catalog, as the Data API's GET /api/recipe/{fdc_id} gives it (the fields shown here).
 // Prices are SGD from FairPrice; nutrients are per 100 g, null where FDC has no value.
 export type CatalogItem = {
   fdc_id: number;
@@ -25,6 +25,8 @@ export type CatalogItem = {
   fiber_g: number | null;
   sodium_mg: number | null;
   cholesterol_mg: number | null;
+  // its tags' labels: a Food.com recipe's, e.g. "60_minutes_or_less"; none for an FDC food
+  tags: string[];
 };
 
 const NUTRIENTS = [
@@ -55,10 +57,11 @@ export function parseCatalogItem(value: unknown): CatalogItem {
   const nutrientsOk = NUTRIENTS.every(({ key }) => item[key] === null || isNumber(item[key]));
   if (!isNumber(item.fdc_id) || typeof item.description !== "string" || !isStrings(item.product) || !pricesOk ||
     !isStringMap(item.item_routes) || !isStringMap(item.matched_variations) || !isStrings(item.unpriced_items) ||
-    !isStrings(item.adj) || !isStrings(item.verb) || !isNumber(item.total_price) || !isNumber(item.basket_per_100) || !nutrientsOk) {
+    !isStrings(item.adj) || !isStrings(item.verb) || !isNumber(item.total_price) || !isNumber(item.basket_per_100) || !nutrientsOk ||
+    (item.tags !== undefined && !isStrings(item.tags))) {
     return fail();
   }
-  return item as CatalogItem;
+  return { ...item, tags: item.tags ?? [] } as CatalogItem;
 }
 
 export async function fetchCatalogItem(id: string, signal?: AbortSignal): Promise<CatalogItem> {
@@ -66,6 +69,40 @@ export async function fetchCatalogItem(id: string, signal?: AbortSignal): Promis
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(dataApiError(body, "This recipe could not be loaded."));
   return parseCatalogItem(body);
+}
+
+// A catalog item's price in a list: total_price is 0 unless every ingredient is priced, so a partly priced item shows
+// what its priced ingredients add up to, marked as a floor, and one with none priced says so.
+export function priceLabel(item: CatalogItem): string {
+  if (item.total_price > 0) return `S$${item.total_price.toFixed(2)}`;
+  const priced = Object.values(item.item_prices).reduce((sum, entry) => sum + entry.price, 0);
+  return priced > 0 ? `from S$${priced.toFixed(2)}` : "price unknown";
+}
+
+export const MAX_SIMILAR = 12;
+
+// The catalog foods nearest a recipe in its recipe cluster, nearest first.
+export async function fetchSimilarFoods(recipe: RecipeDetail, k: number, signal?: AbortSignal): Promise<CatalogItem[]> {
+  const response = await fetch("/api/cluster", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ item: recipe, k }),
+    cache: "no-store",
+    signal,
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(dataApiError(body, "Similar recipes could not be loaded."));
+  const items = body && typeof body === "object" ? (body as { near_items?: unknown }).near_items : undefined;
+  if (!Array.isArray(items)) throw new Error("Clustering service returned an unexpected response.");
+  return items.map(parseCatalogItem);
+}
+
+// The catalog foods nearest a catalog food: the clusterer reads only a recipe's title, so the food goes in as a recipe
+// titled by its description; the food itself is left out of its neighbours.
+export async function fetchSimilarToCatalogItem(item: CatalogItem, k: number, signal?: AbortSignal): Promise<CatalogItem[]> {
+  const recipe: RecipeDetail = { id: String(item.fdc_id), title: item.description, ingredients: item.product, instructions: [], quality_status: "catalog", tags: item.tags };
+  const items = await fetchSimilarFoods(recipe, Math.min(k + 1, MAX_SIMILAR), signal);
+  return items.filter((near) => near.fdc_id !== item.fdc_id).slice(0, k);
 }
 
 // "100 g/ml", or "160–1000 g/ml" when the price is an average over packs of several sizes.

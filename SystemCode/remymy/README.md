@@ -53,11 +53,21 @@ Check the resolved environment and Compose configuration without starting contai
 docker compose --env-file .env.nonprod config
 ```
 
-On startup, `api-migrate` runs once before the API. It validates an existing
-`remymy-food.db` and leaves it unchanged. If the database is missing, it
-requires both `RECIPES_SOURCE` and `FDC_SOURCE_DIR` to be explicitly set to
-source paths visible inside the writable `/data` mount; only then does it run
-ingestion. The API itself mounts the data directory read-only.
+On startup, `api-migrate` runs once before the API. It makes sure `remymy.db`,
+the API's one database on the `remymy-user-data` volume, holds the recipes. One
+that holds them is left as it is. The first time, it merges in the recipes of
+`data/remymy-food.db` when that file is there. Otherwise it requires both
+`RECIPES_SOURCE` and `FDC_SOURCE_DIR` to be explicitly set to source paths
+visible inside the `/data` mount; only then does it run ingestion. Both
+services mount the data directory read-only.
+
+Each service built here (`app`, `api-migrate`, `api`, `mcp`, `models`,
+`langfuse-gateway`) also keeps what it prints in a log file per hour (UTC), at
+`logs/<service>/YYYY-MM-DD_HH.log`: a folder per service, a file per hour. Their entrypoint,
+`logging/hourly-log.sh`, copies the process's stdout and stderr there, and
+`docker compose logs` shows the same lines as before. Files older than
+`LOG_RETENTION_HOURS` (default 168, a week; `0` keeps them all) are deleted. Set
+`LOG_DIR_HOST` to keep them somewhere other than `./logs`.
 
 Published local ports:
 
@@ -83,4 +93,4 @@ Connected chat requests stream newline-delimited JSON when the browser sends
 composition) before the final result, which powers the stage-by-stage flow in
 the chat UI. Plain JSON remains available for clients that omit that header.
 
-Inside the Compose network, services should use `api`, `mcp`, `models`, and `langfuse-web` as hostnames instead of `localhost`. The API reads the normalized SQLite database at `${DATA_DIR:-./data}/remymy-food.db` through a read-only mount; only its documented REST responses are exposed.
+Inside the Compose network, services should use `api`, `mcp`, `models`, and `langfuse-web` as hostnames instead of `localhost`. The API keeps everything (recipes, catalog, users, their history and saved recipes) in one SQLite database, `remymy.db` on the `remymy-user-data` volume; only its documented REST responses are exposed.
