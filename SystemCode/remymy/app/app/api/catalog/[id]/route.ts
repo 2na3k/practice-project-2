@@ -10,7 +10,7 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
   }
   try {
     const base = process.env.DATA_API_URL ?? DEFAULT_DATA_API_URL;
-    const response = await fetch(new URL(`/api/catalog/${id}`, base), { cache: "no-store" });
+    const response = await fetch(new URL(`/api/recipe/${id}`, base), { cache: "no-store" });
     return new NextResponse(await response.text(), {
       status: response.status,
       headers: { "content-type": response.headers.get("content-type") ?? "application/json" },

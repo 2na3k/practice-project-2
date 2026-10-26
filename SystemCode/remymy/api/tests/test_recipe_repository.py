@@ -223,7 +223,7 @@ def test_startup_fills_the_catalog_from_the_csv_and_makes_each_food_a_recipe(tmp
     monkeypatch.setenv("RECIPE_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(1), food(2)])))
 
     with TestClient(app) as client:
-        found = client.get("/api/catalog/2")
+        found = client.get("/api/recipe/2")
 
     assert found.status_code == 200
     assert open_catalog(database_path()).fdc_ids() == {1, 2}
@@ -242,11 +242,11 @@ def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypa
 
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "catalog.db"))
     with TestClient(app) as client:
-        found = client.get("/api/catalog/2")
-        missing = client.get("/api/catalog/99")
-        invalid = client.get("/api/catalog/openrecipes:1")
+        found = client.get("/api/recipe/2")
+        missing = client.get("/api/recipe/99")
+        invalid = client.get("/api/recipe/openrecipes:1")
         monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "gone.db"))
-        unloaded = client.get("/api/catalog/2")
+        unloaded = client.get("/api/recipe/2")
 
     assert found.status_code == 200
     body = found.json()

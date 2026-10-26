@@ -43,7 +43,7 @@ def load_recommender():
     with Session(database_engine()) as session:
         if not has_catalog(session):
             # the recipe and user routes do not need the catalog, so the API still starts
-            logger.warning("No food catalog is loaded; recommendations answer 503.")
+            logger.warning("No recipe is loaded; recommendations answer 503.")
             return None
         started = time.perf_counter()
         # the fully priced Food.com recipes join the catalog now, after startup filled it from its CSV, so the

@@ -1,6 +1,6 @@
 import { dataApiError, type RecipeDetail } from "./recipes";
 
-// One item of the priced catalog, as the Data API's GET /api/catalog/{fdc_id} gives it (the fields shown here).
+// One item of the priced catalog, as the Data API's GET /api/recipe/{fdc_id} gives it (the fields shown here).
 // Prices are SGD from FairPrice; nutrients are per 100 g, null where FDC has no value.
 export type CatalogItem = {
   fdc_id: number;

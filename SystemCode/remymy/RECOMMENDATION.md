@@ -310,7 +310,7 @@ For each recommendation (one at a time) it:
 | GET | `/ready` | none | `{"status": "ok"}` once the recipe database is usable, otherwise 503 |
 | GET | `/api/recipes` | `q` (optional, max 200 characters), `limit` 1–100 (default 20), `offset` ≥ 0 | Paged recipe summaries. `q` searches titles and ingredient lines, case-insensitive |
 | GET | `/api/recipes/{recipe_id}` | none | Title, ingredient lines, instruction steps; 404 if unknown |
-| GET | `/api/catalog/{fdc_id}` | none | One item of the priced catalog (`Recipe`): its ingredients with their FairPrice pack prices and sizes, and nutrients per 100 g; 404 if unknown, 503 without a catalog |
+| GET | `/api/recipe/{fdc_id}` | none | One item of the priced catalog (`Recipe`): its ingredients with their FairPrice pack prices and sizes, and nutrients per 100 g; 404 if unknown, 503 without a catalog |
 | GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
 | GET | `/api/users/{username}/history` | `limit` 1–200 (default 50) | The user's history, newest first: each rated recipe or catalog food's `recipe_id`, `kind` (`recipe` or `food`), `title` (`null` when its database lacks it), `like` and `timestamp`; 404 if unknown |

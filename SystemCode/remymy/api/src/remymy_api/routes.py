@@ -199,17 +199,17 @@ def create_recipe(body: UserRecipeCreate, users: Users) -> UserRecipeResponse:
     raise HTTPException(status_code=501, detail="Saving your own recipes is not implemented yet.")
 
 
-@router.get("/api/catalog/{fdc_id}", response_model=Recipe, tags=["recipes"])
+@router.get("/api/recipe/{fdc_id}", response_model=Recipe, tags=["recipes"])
 def get_catalog_recipe(fdc_id: int, catalog: Recipes) -> Recipe:
     """One item of the priced catalog the recommendations come from: its ingredients with their FairPrice packs and
     prices, and its nutrients per 100 g."""
     if catalog is None:
-        raise HTTPException(status_code=503, detail="The food catalog is not loaded.")
+        raise HTTPException(status_code=503, detail="The recipe is not loaded.")
     try:
         item = catalog.food(fdc_id)
     except SQLAlchemyError:
         logger.exception("Reading catalog item %d failed.", fdc_id)
-        raise HTTPException(status_code=503, detail="The food catalog is unavailable.")
+        raise HTTPException(status_code=503, detail="The recipe is unavailable.")
     if item is None:
         raise HTTPException(status_code=404, detail="Catalog item not found.")
     return item
@@ -237,8 +237,8 @@ def get_recommendation(
     recommendations = read_recommendations(cache, user_id)
     if recommendations is None:
         if recommender is None or catalog is None:
-            logger.warning("Recommendations for user %d asked for, but no food catalog is loaded.", user_id)
-            raise HTTPException(status_code=503, detail="Recommendations are unavailable: the food catalog is not loaded.")
+            logger.warning("Recommendations for user %d asked for, but no recipe is loaded.", user_id)
+            raise HTTPException(status_code=503, detail="Recommendations are unavailable: the recipe is not loaded.")
         started = time.perf_counter()
         user = users.get_user(username)
         # fetch_user_history reads newest first; the History is oldest first
@@ -310,7 +310,7 @@ def cluster_recipe(
     """The k catalog foods nearest the item in its recipe cluster (the HDBSCAN model of recipe_clustering.ipynb). The
     model reads the item's title as a food description; its models are loaded at startup."""
     if catalog is None:
-        raise HTTPException(status_code=503, detail="Clustering is unavailable: no food catalog is loaded.")
+        raise HTTPException(status_code=503, detail="Clustering is unavailable: no recipe is loaded.")
     started = time.perf_counter()
     try:
         response = cluster(clusterer, body, k, catalog)
