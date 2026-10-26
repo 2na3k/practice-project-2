@@ -1,6 +1,6 @@
 import { normalizeAllergies, type AllergenCode } from "./allergens";
 import { normalizeBudget } from "./budget";
-import type { Preferences } from "./meals";
+import type { Preferences } from "./preferences";
 import { dataApiError } from "./recipes";
 
 // The preferences as the Data API's users database keeps them (schemas.Preferences).

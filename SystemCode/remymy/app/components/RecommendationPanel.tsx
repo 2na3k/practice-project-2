@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 import { Bookmark, ChefHat, LoaderCircle, RotateCcw } from "lucide-react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import type { SavedFood } from "@/lib/saved";
-import { RECOMMENDATION_USERNAME, fetchRecommendations, isFoodId, type Recommendations } from "@/lib/recommendations";
+import { fetchRecommendations, isFoodId, type Recommendations } from "@/lib/recommendations";
 
 const TOP_K = 6;
 
 type RecommendationPanelProps = {
+  // whose recommendations: this browser's guest user
+  username: string;
   // hears how many foods each successful load returned; pass a stable function, such as a state setter
   onItemCount?: (count: number) => void;
   // the like or not of each pick, by its id, and saving a new one through the rating route
@@ -20,18 +22,18 @@ type RecommendationPanelProps = {
   onOpen: (id: string) => void;
 };
 
-export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, onSave, onOpen }: RecommendationPanelProps) {
+export function RecommendationPanel({ username, onItemCount, ratings, onRate, savedIds, onSave, onOpen }: RecommendationPanelProps) {
   const [result, setResult] = useState<Recommendations | null>(null);
   const [error, setError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchRecommendations(RECOMMENDATION_USERNAME, TOP_K, controller.signal)
+    fetchRecommendations(username, TOP_K, controller.signal)
       .then((next) => { if (!controller.signal.aborted) setResult(next); })
       .catch((reason) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Recommendations could not be loaded."); });
     return () => controller.abort();
-  }, [retryNonce]);
+  }, [retryNonce, username]);
 
   useEffect(() => {
     if (result) onItemCount?.(result.items.length);
@@ -51,7 +53,7 @@ export function RecommendationPanel({ onItemCount, ratings, onRate, savedIds, on
         <div>
           <p className="eyebrow">PICKED FOR YOU</p>
           <h2 className="for-you-title" id="for-you-title"><ChefHat size={18} aria-hidden="true" />Recipes you&apos;ll probably like</h2>
-          <p className="for-you-caption">Based on the recipes the demo profile has rated.</p>
+          <p className="for-you-caption">Based on the recipes you&apos;ve rated.</p>
         </div>
       </div>
       {error ? (

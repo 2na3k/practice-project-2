@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchSaved, parseLikes, parseSavedFoods, saveItem, unsaveItem } from "./saved";
+import { fetchSaved, parseSavedFoods, saveItem, unsaveItem } from "./saved";
 
 describe("browser-stored choices", () => {
   it("keeps the saved recipes that have an id and a title", () => {
@@ -23,12 +23,6 @@ describe("browser-stored choices", () => {
     ]);
   });
 
-  it("keeps only likes that are true or false", () => {
-    expect(parseLikes({ "sesame-tofu-rice-bowl": true, "170138": false, broken: "yes" }))
-      .toEqual({ "sesame-tofu-rice-bowl": true, "170138": false });
-    expect(parseLikes(["sesame-tofu-rice-bowl"])).toEqual({});
-    expect(parseLikes(null)).toEqual({});
-  });
 });
 
 describe("saved recipes in the Data API", () => {

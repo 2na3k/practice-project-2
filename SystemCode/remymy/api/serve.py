@@ -14,7 +14,6 @@ LOCAL_DEFAULTS = {
     "RECIPE_PATH": str(HERE.parent / "data" / "price_mapped_nutrients.csv"),
     "FOODCOM_RECIPE_PATH": str(HERE.parent / "data" / "foodcom_recipes.csv"),
     "REDIS_URL": "redis://localhost:6379/1",
-    "SEED_DEMO_USER": "true",
 }
 
 

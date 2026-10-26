@@ -4,7 +4,7 @@ import { Check, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { ALLERGENS, normalizeAllergies, type AllergenCode } from "@/lib/allergens";
 import { BUDGET_MAX, BUDGET_SLIDER_MAX, NO_BUDGET_LIMIT, normalizeBudget } from "@/lib/budget";
-import { MEALS, type Preferences } from "@/lib/meals";
+import { CUISINES, type Preferences } from "@/lib/preferences";
 
 // no limit (0) shows as an empty box
 const budgetText = (budget: number | undefined) => {
@@ -39,9 +39,7 @@ export function PreferencePanel({ preferences, onSave }: PreferencePanelProps) {
   const allergies = normalizeAllergies(draft.allergies);
   const toggleAllergy = (code: AllergenCode) =>
     update("allergies", allergies.includes(code) ? allergies.filter((current) => current !== code) : normalizeAllergies([...allergies, code]));
-  const cuisines = Array.from(
-    new Set(MEALS.map((meal) => meal.cuisine)),
-  ).filter(Boolean);
+  const cuisines = CUISINES;
   return (
     <section className="preferences-view">
       <div className="preferences-intro">

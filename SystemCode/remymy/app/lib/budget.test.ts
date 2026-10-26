@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BUDGET_MAX, NO_BUDGET_LIMIT, normalizeBudget, validBudget } from "./budget";
-import { DEFAULT_PREFERENCES } from "./meals";
-import { interpretRequest } from "./recommender";
+import { DEFAULT_PREFERENCES, interpretRequest } from "./preferences";
 
 describe("budget preference", () => {
   it("keeps a positive amount, rounded to cents and capped, and treats anything else as 0, no limit", () => {

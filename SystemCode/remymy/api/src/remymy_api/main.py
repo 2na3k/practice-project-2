@@ -147,8 +147,8 @@ def start_model_loading() -> threading.Thread:
 async def lifespan(app: FastAPI):
     logger.info("Starting the API.")
     app.state.cache = connect_cache()
-    # creates remymy.db's tables, imports the old databases the first time, migrates the users' data (and with
-    # SEED_DEMO_USER injects the demo user), and adds the catalog CSV's new foods
+    # creates remymy.db's tables, imports the old databases the first time, migrates the users' data, and adds the
+    # catalog CSV's new foods
     init_database()
     # the models load on a thread of their own, which startup does not wait for: the API answers (and passes its health
     # check) at once, and each model's routes answer 503 until it is loaded. Loading them takes minutes the first time
@@ -166,8 +166,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Remymy Recipe API",
     version="1.0.0",
-    description="Recipes and personalised recommendations. Try `GET /api/recommend/demo` "
-    "for the seeded demo user.",
+    description="Recipes and personalised recommendations.",
     lifespan=lifespan,
 )
 app.include_router(router)

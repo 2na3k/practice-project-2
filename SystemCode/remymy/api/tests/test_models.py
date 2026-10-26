@@ -28,10 +28,13 @@ REQUEST = {
 
 
 @pytest.fixture
-def engine(monkeypatch):
-    # the demo user, user_id 1, to own the recipes
-    monkeypatch.setenv("SEED_DEMO_USER", "true")
+def engine():
+    """The database, with the user "demo", user_id 1, to own the recipes."""
     init_database()
+    connection = connect(database_path())
+    with connection:
+        connection.execute("INSERT INTO app_user (username) VALUES ('demo')")
+    connection.close()
     return database_engine()
 
 

@@ -38,6 +38,11 @@ services:
       LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
+      # Saved AI connections: the encrypted file lives on the app-state volume, so they survive a restart.
+      SESSION_STORE_PATH: /state/sessions.json
+      SESSION_SECRET: ${SESSION_SECRET:-remymy-nonprod-session-secret}
+    volumes:
+      - remymy-app-state:/state
     # Only the Data API: the app never calls mcp or models directly.
     depends_on:
       api:
@@ -89,7 +94,6 @@ services:
       LEGACY_USER_DATABASE_PATH: /state/remymy-users.db
       # db 1 of the shared redis; Langfuse uses db 0
       REDIS_URL: redis://:${REDIS_AUTH:-myredissecret}@redis:6379/1
-      SEED_DEMO_USER: ${SEED_DEMO_USER:-true}
     depends_on:
       api-migrate:
         condition: service_completed_successfully
@@ -188,8 +192,8 @@ services:
     depends_on: &langfuse-depends-on
       langfuse-postgres:
         condition: service_healthy
-      langfuse-minio:
-        condition: service_healthy
+      langfuse-minio-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       langfuse-clickhouse:
@@ -295,27 +299,41 @@ services:
     networks:
       - remymy
 
+  # RustFS: an open-source S3-compatible store. MinIO no longer publishes images that anonymous users can pull.
   langfuse-minio:
-    # MinIO no longer publishes free images (quay.io and Docker Hub both refuse
-    # anonymous pulls), so this is Chainguard's build, pinned to one digest.
-    image: cgr.dev/chainguard/minio@sha256:6a1d0b45c8669726bba580ced0bfa4cb9fdeed1ed636dfabd81d1577beb6937b
+    image: rustfs/rustfs:latest
     restart: unless-stopped
-    entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
-      MINIO_ROOT_USER: ${LANGFUSE_MINIO_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      RUSTFS_ACCESS_KEY: ${LANGFUSE_MINIO_USER:-minio}
+      RUSTFS_SECRET_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ENABLE: "false"
     ports:
       - "127.0.0.1:${MINIO_PORT:-9090}:9000"
     volumes:
-      - langfuse-minio-data:/data
+      - langfuse-rustfs-data:/data
     healthcheck:
-      # The image has no curl or wget, but its sh is bash, which can open TCP.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /minio/health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && read -r status <&3 && [[ $$status == *' 200'* ]]"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
       interval: 5s
       timeout: 5s
       retries: 8
       start_period: 10s
+    networks:
+      - remymy
+
+  # Creates the bucket Langfuse writes events and media to; the Langfuse services wait for it.
+  langfuse-minio-init:
+    image: amazon/aws-cli:latest
+    restart: "no"
+    depends_on:
+      langfuse-minio:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command: ["aws s3 mb s3://langfuse --endpoint-url http://langfuse-minio:9000 || true"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${LANGFUSE_MINIO_USER:-minio}
+      AWS_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
+      AWS_DEFAULT_REGION: auto
     networks:
       - remymy
 
@@ -345,8 +363,9 @@ networks:
 volumes:
   remymy-user-data:
   remymy-model-cache:
+  remymy-app-state:
   langfuse-postgres-data:
   langfuse-clickhouse-data:
   langfuse-clickhouse-logs:
-  langfuse-minio-data:
+  langfuse-rustfs-data:
   redis-data:

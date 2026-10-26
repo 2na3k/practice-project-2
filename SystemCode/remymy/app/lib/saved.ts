@@ -1,7 +1,5 @@
-// The recipes the user saved, which the Data API's database keeps, and what the app keeps in this browser next to
-// preferences and saved meals: the like or not of each meal and recipe (a recommended recipe's like also goes to the
-// Data API; the demo meals are not in it, so theirs stay here), and the saved recipes of before they were in the
-// database, which go up to it once.
+// The recipes the user saved, which the Data API's database keeps, and the saved recipes this browser kept from before
+// they were in the database, which go up to it once.
 
 import { dataApiError } from "./recipes";
 
@@ -67,10 +65,4 @@ export async function unsaveItem(username: string, id: string, signal?: AbortSig
     const body: unknown = await response.json().catch(() => null);
     throw new Error(dataApiError(body, "That recipe could not be removed from your saved ones."));
   }
-}
-
-// id → true (liked) or false (not); anything else in the stored value is dropped.
-export function parseLikes(value: unknown): Record<string, boolean> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).filter(([, like]) => typeof like === "boolean"));
 }

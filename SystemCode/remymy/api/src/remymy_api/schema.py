@@ -475,9 +475,9 @@ def _mark_done(connection: sqlite3.Connection, key: str, value: str) -> None:
 
 def init_database() -> None:
     """Bring remymy.db up to date, as the API does at startup: its tables are created where missing; the first time, the
-    old recipe and users databases are imported when they are there; then the users' data is migrated (and the demo
-    user seeded, with SEED_DEMO_USER), the catalog takes the catalog CSV's new foods, and every catalog food has its row
-    in recipe. Users' recipes stored in user_recipe's old layout are moved to the new one."""
+    old recipe and users databases are imported when they are there; then the users' data is migrated, the catalog
+    takes the catalog CSV's new foods, and every catalog food has its row in recipe. Users' recipes stored in
+    user_recipe's old layout are moved to the new one."""
     # imported here: users and the repositories import db, which imports nothing of this module's
     from .db import database_engine, database_path
     from .models import create_tables

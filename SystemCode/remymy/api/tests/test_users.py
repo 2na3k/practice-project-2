@@ -286,6 +286,18 @@ def test_rating_a_recipe_adds_a_like_to_the_history(repo):
     ]
 
 
+def test_each_guest_request_creates_a_new_user(repo):
+    with TestClient(app) as client:
+        first = client.post("/api/guests")
+        second = client.post("/api/guests")
+
+    assert first.status_code == second.status_code == 201
+    first_name, second_name = first.json()["username"], second.json()["username"]
+    assert first_name.startswith("guest-") and len(first_name) == len("guest-") + 32
+    assert first_name != second_name
+    assert repo.username_exists(first_name) and repo.username_exists(second_name)
+
+
 def test_rating_an_unknown_recipe_or_user_is_404(repo):
     alice = repo.create_user("alice")
 

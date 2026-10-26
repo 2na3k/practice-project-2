@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalizeAllergies, validAllergies } from "./allergens";
-import { DEFAULT_PREFERENCES } from "./meals";
-import { interpretRequest } from "./recommender";
+import { DEFAULT_PREFERENCES, interpretRequest } from "./preferences";
 import { toDataApiPreferences } from "./user-preferences";
 
 describe("allergies", () => {

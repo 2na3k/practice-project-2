@@ -3,9 +3,8 @@
 import { ArrowRight, Bookmark, ChefHat, LoaderCircle, ShoppingCart, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
-import { fetchSimilarToCatalogItem, nutrientRows, packSize, priceLabel, priceSource, type CatalogItem } from "@/lib/catalog";
+import { fetchSimilarToCatalogItem, formatPrice, nutrientRows, packSize, priceLabel, priceSource, type CatalogItem } from "@/lib/catalog";
 import { tagText } from "@/lib/my-recipes";
-import { formatPrice } from "@/lib/recommendations";
 
 const SIMILAR_COUNT = 6;
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
@@ -231,10 +232,7 @@ def get_catalog_recipe(fdc_id: int, catalog: Recipes) -> Recipe:
 
 @router.get("/api/recommend/{username}", response_model=RecommendationResponse, tags=["recommendations"])
 def get_recommendation(
-    username: Annotated[
-        str,
-        Path(openapi_examples={"demo": {"summary": "Seeded demo user", "value": "demo"}}),
-    ],
+    username: Annotated[str, Path()],
     request: Request,
     users: Users,
     catalog: Recipes,
@@ -332,6 +330,16 @@ def cluster_recipe(
         raise HTTPException(status_code=422, detail=str(error))
     logger.info("Clustered %r in %.2fs.", body.item.title, time.perf_counter() - started)
     return response
+
+
+@router.post("/api/guests", response_model=User, status_code=201, tags=["users"])
+def create_guest(users: Users) -> User:
+    """A new guest user, for one browser. The app keeps its username in a cookie and sends it with each request."""
+    try:
+        return users.create_user(f"guest-{uuid.uuid4().hex}")
+    except SQLAlchemyError:
+        logger.exception("Creating a guest user failed.")
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
 
 
 @router.get("/api/users/{username}", response_model=User, tags=["users"])

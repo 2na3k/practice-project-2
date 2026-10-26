@@ -79,7 +79,7 @@ Published local ports:
 | MCP | http://localhost:8000 |
 | Models | http://localhost:8001 |
 
-Langfuse is the tracing UI for connected Pi agent chat (`/api/chat`) and MCP calls. Connected chat meal recommendations go through the Python MCP service, which filters the mounted Food.com recipe dataset and ranks candidates with the model service; it does not use the app's demo meal list. The local-only gateway on port 3030 automatically establishes the pre-seeded development session, so the dashboard opens without an email/password screen. The port remains bound to `127.0.0.1`; do not expose this passwordless gateway outside a development machine. Demo-mode Discover replies stay in the browser and do not create traces.
+Langfuse is the tracing UI for connected Pi agent chat (`/api/chat`) and MCP calls. Connected chat meal recommendations go through the Python MCP service, which filters the mounted Food.com recipe dataset and ranks candidates with the model service; it does not use any local meal list. The local-only gateway on port 3030 automatically establishes the pre-seeded development session, so the dashboard opens without an email/password screen. The port remains bound to `127.0.0.1`; do not expose this passwordless gateway outside a development machine.
 
 Each MCP invocation creates a nested `mcp.client.call` tool observation. It
 records the MCP tool name and arguments, transport endpoint and duration, plus

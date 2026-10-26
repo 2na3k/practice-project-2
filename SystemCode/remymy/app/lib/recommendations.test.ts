@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatPrice, nutrientHighlights, parseRecommendations } from "./recommendations";
+import { nutrientHighlights, parseRecommendations } from "./recommendations";
 
 describe("recommendation API contract", () => {
   it("accepts a profile with scored foods", () => {
@@ -23,9 +23,6 @@ describe("recommendation API contract", () => {
 });
 
 describe("buying profile display", () => {
-  it("formats the average price in SGD", () => {
-    expect(formatPrice(4.2)).toBe("S$4.20");
-  });
 
   it("shows the nutrients it knows, in a fixed order, and skips the rest", () => {
     expect(nutrientHighlights({ sodium_mg: 400, fat_g: 3.25, energy_kcal: 120.4, protein_g: 8.06 }))

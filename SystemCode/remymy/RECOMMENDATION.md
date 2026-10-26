@@ -268,9 +268,8 @@ For each recommendation (one at a time) it:
 - **Low ingredient match coverage.** Matching is exact, and the recipe ingester
   leaves quantity fragments in ingredient names (for example ". kosher salt").
   On the local recipe database, 7,269 of the 13,489 recipes with ingredient
-  lines match no priced food, and the best match about half of their lines. The
-  demo user's recipes are picked from those that match best (21 of their 50
-  lines). A user with no matched food gets no profile and no recommendations.
+  lines match no priced food, and the best match about half of their lines. A
+  user with no matched food gets no profile and no recommendations.
 - **Arbitrary stand-in foods.** The median-price food stands for its whole key,
   so "tomatoes" maps to "Tomatoes, sun-dried" (258 kcal per 100 g), which skews
   the nutrient averages.
@@ -290,17 +289,10 @@ For each recommendation (one at a time) it:
   `localhost:6379` (for example `redis-server`) is only the cache; without it
   the API runs the model on every request.
 - **Swagger:** http://localhost:8002/docs. `/` redirects to `/docs`.
-- **Demo user:** with `SEED_DEMO_USER=true` (the default in compose and in
-  `serve.py`), creating the users database's schema also injects a `demo`
-  user and its likes with SQL (`DEMO_SEED` in
-  [`api/src/remymy_api/users.py`](api/src/remymy_api/users.py)). Its history
-  is five real recipes of the 13k recipes CSV, by `recipe_id`: it liked Roast
-  Chicken with Carrots, Baked Eggs with Tomato, Avocado and Watercress Salad and
-  Meatballs and Noodle Soup (Almondigas), and not Citrus Cookies. Each is the
-  recipe of its kind whose ingredient lines match the priced catalog
-  best. Nothing is written once the demo user has a history, so an existing
-  users database keeps its old one. In Swagger,
-  `GET /api/recommend/{username}` comes pre-filled with `demo`.
+- **Guest users:** there is no seeded user. `POST /api/guests` creates a
+  guest (`guest-<32 hex digits>`); the app makes one per browser through its
+  `/api/guest` route and keeps it in a cookie. A new guest has no history, so it
+  gets no profile and no recommendations until it rates recipes.
 
 ### Data API endpoints (port 8002)
 
@@ -312,6 +304,7 @@ For each recommendation (one at a time) it:
 | GET | `/api/recipes/{recipe_id}` | none | Title, ingredient lines, instruction steps; 404 if unknown |
 | GET | `/api/recipe/{fdc_id}` | none | One item of the priced catalog (`Recipe`): its ingredients with their FairPrice pack prices and sizes, and nutrients per 100 g; 404 if unknown, 503 without a catalog |
 | GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
+| POST | `/api/guests` | none | A new guest user (`201`), `guest-<32 hex digits>` |
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
 | GET | `/api/users/{username}/history` | `limit` 1–200 (default 50) | The user's history, newest first: each rated recipe or catalog food's `recipe_id`, `kind` (`recipe` or `food`), `title` (`null` when its database lacks it), `like` and `timestamp`; 404 if unknown |
 | GET | `/api/users/{username}/likes` | none | Whether the user liked each recipe or catalog food they rated, `{id: true or false}`, from their latest `user_history` row for it; 404 if unknown |
@@ -320,10 +313,14 @@ For each recommendation (one at a time) it:
 #### `GET /api/recommend/{username}`
 
 ```bash
-curl "http://localhost:8002/api/recommend/demo?top_k=3"
+curl "http://localhost:8002/api/recommend/guest-<id>?top_k=3"
 ```
 
-For the demo user on the local recipe database, rounded:
+For a user who liked Roast Chicken with Carrots, Baked Eggs with Tomato, Avocado
+and Watercress Salad and Meatballs and Noodle Soup (Almondigas), and not Citrus
+Cookies (`openrecipes:5210`, `8236`, `9906`, `1052` and `3911`, the recipes
+whose ingredient lines match the priced catalog best), on the local recipe
+database, rounded:
 
 ```json
 {
@@ -350,7 +347,7 @@ For the demo user on the local recipe database, rounded:
 }
 ```
 
-That profile rests on the 21 foods matched from the demo user's 50 ingredient
+That profile rests on the 21 foods matched from those recipes' 50 ingredient
 lines (see [Limitations](#limitations)).
 
 - **`profile`:** averages over every catalog food matched from the user's
@@ -493,7 +490,6 @@ Data API:
 | `INDEX_DIR` | `/var/cache/remymy/retrieval-index` | system temp folder | Where the HNSW index is saved |
 | `REDIS_URL` | `redis://:${REDIS_AUTH}@redis:6379/1` | `redis://localhost:6379/1` | Cache |
 | `CACHE_TTL_SECONDS` | `86400` | `86400` | Lifetime of cached user ids and recommendations (one day) |
-| `SEED_DEMO_USER` | `true` in compose | `true` | Inject the `demo` user and its ratings into the users database at startup |
 | `LOG_LEVEL` | `INFO` | `INFO` | Level of the API's own log (`DEBUG` adds cache hits, ingredient matching and each pipeline step); compose passes it to `api-migrate`, `mcp` and `models` too |
 | `HOST`, `PORT` | `0.0.0.0`, `8002` | `127.0.0.1`, `8002` | Listen address |
 

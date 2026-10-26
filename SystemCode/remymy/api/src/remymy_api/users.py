@@ -1,4 +1,4 @@
-"""The users' tables of remymy.db, their migration and demo user, and what the user routes need beyond UserRepository:
+"""The users' tables of remymy.db, their migration, and what the user routes need beyond UserRepository:
 whether a rated id is a recipe or a catalog food, and the titles of the ids a history holds. Reading and writing users,
 their history and their saved recipes is repository.user_repository.UserRepository's, through the ORM; schema.py sets
 the database up."""
@@ -145,51 +145,12 @@ ALTER TABLE user_history DROP COLUMN rating;
 COMMIT;
 """
 
-DEMO_USERNAME = "demo"
-
-# The demo user and its likes, injected with the schema when SEED_DEMO_USER is set. Its recipes are real ones of the
-# 13k recipes CSV the recipe database is built from: of each kind, the one whose ingredient lines match the priced
-# catalog best (lines matched / lines in the comments). Once the demo user has a history nothing is written, so a
-# restart keeps it as it is.
-DEMO_SEED = """
-BEGIN;
-
-INSERT INTO app_user (username, preferences)
-VALUES ('demo', jsonb('{"special_diet": null, "cuisines": ["Italian", "Mexican"], "preferred_nutrient": "protein"}'))
-ON CONFLICT (username) DO NOTHING;
-
-WITH demo_history (recipe_id, liked) AS (VALUES
-  ('openrecipes:5210', 1),  -- Roast Chicken with Carrots: 5 / 9
-  ('openrecipes:8236', 1),  -- Baked Eggs with Tomato: 5 / 11
-  ('openrecipes:9906', 1),  -- Avocado and Watercress Salad: 3 / 8
-  ('openrecipes:1052', 1),  -- Meatballs and Noodle Soup (Almondigas): 4 / 11
-  ('openrecipes:3911', 0)   -- Citrus Cookies: 4 / 11
-)
-INSERT INTO user_history (user_id, recipe_id, liked)
-SELECT app_user.user_id, demo_history.recipe_id, demo_history.liked
-FROM app_user, demo_history
-WHERE app_user.username = 'demo'
-  AND NOT EXISTS (SELECT 1 FROM user_history WHERE user_history.user_id = app_user.user_id);
-
-COMMIT;
-"""
-
-
-def demo_enabled() -> bool:
-    return os.getenv("SEED_DEMO_USER", "false").strip().lower() in {"1", "true", "yes"}
-
-
 def migrate_user_data(connection: sqlite3.Connection) -> None:
     """Bring the users' data in the database connection is on up to date: a history from before likes has its ratings
-    turned into likes, and with SEED_DEMO_USER the demo user and its history are injected."""
+    turned into likes."""
     if "rating" in {row["name"] for row in connection.execute("PRAGMA table_info(user_history)")}:
         connection.executescript(RATINGS_TO_LIKES)
         logger.info("Turned the 0-5 ratings in the history into likes: 3 to 5 liked, the rest not.")
-    if demo_enabled():
-        changes = connection.total_changes
-        connection.executescript(DEMO_SEED)
-        if connection.total_changes > changes:
-            logger.info("Injected the demo user %r and its liked and disliked recipes.", DEMO_USERNAME)
 
 
 def item_titles(item_ids: Iterable[str], catalog: RecipeRepository | None) -> dict[str, str]:

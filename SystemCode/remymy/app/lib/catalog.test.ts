@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchCatalogItem, nutrientRows, packSize, parseCatalogItem, priceLabel, priceSource, type CatalogItem } from "./catalog";
+import { fetchCatalogItem, formatPrice, nutrientRows, packSize, parseCatalogItem, priceLabel, priceSource, type CatalogItem } from "./catalog";
 
 const onions = {
   fdc_id: 170005, description: "Onions, spring or scallions (includes tops and bulb), raw", product: ["onions"],
@@ -51,5 +51,11 @@ describe("priceLabel", () => {
     expect(priceLabel(item(4.5, [2, 2.5]))).toBe("S$4.50");
     expect(priceLabel(item(0, [2.98]))).toBe("from S$2.98");
     expect(priceLabel(item(0, []))).toBe("price unknown");
+  });
+});
+
+describe("price display", () => {
+  it("formats the price in SGD", () => {
+    expect(formatPrice(4.2)).toBe("S$4.20");
   });
 });

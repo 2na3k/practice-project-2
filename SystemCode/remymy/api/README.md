@@ -111,7 +111,7 @@ writes users, their history and their saved recipes through the ORM:
 username up in Redis before the database, and each write commits its own
 transaction. `app_user`, `user_history` and `saved_recipe` are still created by
 the SQL in `users.py` (`SCHEMA`), for the JSON checks and triggers on
-`preferences`. `users.py` also keeps the rating migration, the demo user, and
+`preferences`. `users.py` also keeps the rating migration and
 `rate_item`, which checks a rated id is a recipe or a catalog food before
 `UserRepository.add_history` records it.
 
@@ -189,14 +189,9 @@ still starts, and `GET /api/recommend/{username}` answers `503`.
 
 ## Try it in Swagger
 
-Open http://localhost:8002/docs (or just http://localhost:8002/). With
-`SEED_DEMO_USER=true`, which compose sets by default, the API injects a `demo`
-user and its likes into the users database with its schema on startup
-(`DEMO_SEED` in `src/remymy_api/users.py`), unless the demo user already has a
-history. The likes are of five real recipes of the 13k recipes CSV, chosen
-because their ingredient lines match the priced catalog best.
-`GET /api/recommend/{username}` comes pre-filled with `demo`, so "Try it out",
-then "Execute" returns its buying profile and recommendations.
+Open http://localhost:8002/docs (or just http://localhost:8002/). `POST /api/guests`
+creates a guest user, and `GET /api/users/{username}` and the other user routes
+take its username.
 
 ## Run locally
 
@@ -213,7 +208,7 @@ python3 serve.py
 `LEGACY_USER_DATABASE_PATH=./data/remymy-users.db`,
 `RECIPE_PATH=../data/price_mapped_nutrients.csv`,
 `FOODCOM_RECIPE_PATH=../data/foodcom_recipes.csv`,
-`REDIS_URL=redis://localhost:6379/1` and `SEED_DEMO_USER=true`. Redis only
+`REDIS_URL=redis://localhost:6379/1`. Redis only
 caches user ids and recommendations; without it the API still answers, running
 the model on every request.
 

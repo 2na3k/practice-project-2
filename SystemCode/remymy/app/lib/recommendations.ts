@@ -1,8 +1,5 @@
 import { dataApiError } from "./recipes";
 
-// The app has no sign-in yet, so it asks for the user the Data API seeds for demos.
-export const RECOMMENDATION_USERNAME = "demo";
-
 export type BuyingProfile = {
   user_id: number;
   avg_price: number;
@@ -62,10 +59,6 @@ export async function fetchRecommendations(username: string, topK: number, signa
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(dataApiError(body, "Recommendations could not be loaded."));
   return parseRecommendations(body);
-}
-
-export function formatPrice(value: number): string {
-  return `S$${value.toFixed(2)}`;
 }
 
 // The catalog's nutrients are per 100 g; these are the ones worth a glance.
