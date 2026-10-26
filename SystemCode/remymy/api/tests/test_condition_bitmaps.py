@@ -140,6 +140,38 @@ def test_routing_finds_exactly_the_rows_the_constraints_allow(recipe_index):
     assert recipe_index.route({"preferred_nutrient": "protein"}) is None
 
 
+def test_the_inverted_index_points_each_word_at_the_rows_holding_it():
+    recipes = [food(1, "Eggplant, grilled", "eggplant", 3, 1), food(2, "Anchovies, canned", "anchovies", 4, 20),
+               {**food(3, "Pad thai", "rice noodle", 6, 8), "ingredients": ["2 eggs", "1 tbsp fish sauce"]}]
+    index = pipeline.inverted_index(recipes)
+
+    # row positions, not the items; words singular, from the name, the product terms and the ingredient lines
+    assert list(index["anchovy"]) == [1] and list(index["egg"]) == [2] and list(index["noodle"]) == [2]
+    assert list(index["eggplant"]) == [0]
+    assert list(index["fish"]) == [2]
+
+    recipe_index = make_index(recipes + [food(4, "Chicken, breaded", "chicken", 5, 20),
+                                         food(5, "Buckwheat groats, roasted", "buckwheat groat", 2, 4)], 5)
+    # whole words: the eggplant is not egg nor buckwheat wheat; the compounds that do hold one are listed
+    assert list(recipe_index.allergen_rows(["egg"])) == [2]
+    assert list(recipe_index.allergen_rows(["wheat"])) == [2, 3]
+    assert list(recipe_index.allergen_rows(["fish", "shellfish"])) == [1, 2]
+
+
+def test_routing_leaves_out_the_rows_holding_the_users_allergens(recipe_index):
+    assert list(recipe_index.route({"allergies": ["fish"]})[0]) == [0, 1, 2, 4, 5]
+    assert list(recipe_index.route({"allergies": ["fish", "soy"]})[0]) == [0, 2, 4, 5]
+    # with a diet and a budget
+    assert list(recipe_index.route({"special_diet": "vegetarian", "allergies": ["soy"]})[0]) == [4, 5]
+    assert list(recipe_index.route({"allergies": ["soy"], "budget": 2.5})[0]) == [4, 5]
+    # an allergen no row holds leaves every row
+    assert list(recipe_index.route({"allergies": ["sesame"]})[0]) == [0, 1, 2, 3, 4, 5]
+    assert recipe_index.route({"allergies": []}) is None
+
+    query = recipe_index.embeddings[3]
+    assert rows(recipe_index.search(query, 6, conditions={"allergies": ["fish", "soy"]})) == [0, 2, 4, 5]
+
+
 def test_search_returns_only_the_rows_the_preferences_allow(recipe_index):
     query = recipe_index.embeddings[0]
 
