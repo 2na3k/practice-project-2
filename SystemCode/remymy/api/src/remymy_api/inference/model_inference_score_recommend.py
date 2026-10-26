@@ -56,7 +56,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 
-from .model_inference_reranker_avgemb import THRESHOLD, ItemEncoder, Reranker as BaseReranker, UserEncoder
+from .model_inference_reranker_avgemb import (THRESHOLD, ItemEncoder, Reranker as BaseReranker, UserEncoder,
+                                              nutrient_scales)
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +350,7 @@ class Reranker(BaseReranker):
         self.config = saved["config"]
         self.text_fields = saved["text_fields"]
         self.nutrient_columns = saved["nutrient_columns"]
+        self.nutrient_scales = nutrient_scales(saved)
         self.token_lookup = {token: index for index, token in enumerate(saved["vocabulary"])}
         self.item_mean, self.item_std = np.array(saved["item_log1p_mean"]), np.array(saved["item_log1p_std"])
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1174,9 +1176,10 @@ class RetrievalPipeline:
         """recipes in the reranker's input format, as inference.service.catalog_recipes makes them from the catalog."""
         reranker = Reranker(artifacts, device=device)
         # The catalog by what it holds, not by its database file's bytes: SQLite can rewrite a page without changing
-        # a food, and the API adds the CSV's new foods to that file on startup.
+        # a food, and the API adds the CSV's new foods to that file on startup. The nutrient scales the embeddings
+        # were made with count too.
         source = fingerprint(Path(artifacts) / "model.pt", Path(artifacts) / "config.json",
-                             data=json.dumps(recipes, sort_keys=True).encode())
+                             data=json.dumps([recipes, reranker.nutrient_scales], sort_keys=True).encode())
         return cls(reranker, recipes, RecipeIndex.load_or_build(reranker, recipes, index_dir, source, rebuild))
 
     def resolve_history(self, history):
