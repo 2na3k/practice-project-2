@@ -3,4 +3,5 @@ __pycache__/
 **/item_cache.pt
 **/training_history.csv
 **/.DS_Store
-src/remymy_api/inference/weights/gru_xattn_reranker
+# saved by the training notebook beside the window Transformer, which is the one served
+src/remymy_api/inference/weights/transformer_xattn_reranker

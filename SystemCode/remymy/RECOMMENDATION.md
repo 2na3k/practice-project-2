@@ -69,7 +69,7 @@ Every item, whether a history item or a candidate, is described by two things:
   `product`, `adj` and `verb` fields (for example "winter squash" is a product,
   "fresh" an adjective, "chopped" a verb). Words are lowercased, lemmatized with
   the field's part of speech, singularized and de-duplicated, up to 40 tokens.
-  The vocabulary has 1,906 tokens.
+  The vocabulary has 2,562 tokens.
 - **Numbers:** `log1p` of `[price, calories, total fat, sugar, sodium, protein,
   saturated fat, carbohydrates]`, z-scored with training statistics.
 
@@ -150,18 +150,18 @@ candidate item_emb ──► cross-attention over [profile token; rating states]
   before *t*, for its history, its profile and its rating centering.
 - **Optimization:** AdamW, learning rate 1e-3, weight decay 1e-5, batch size
   512, binary cross-entropy, early stopping on validation log loss. The best
-  epoch was 2 of at most 10 (training stopped after epoch 4).
+  epoch was the last of at most 10: validation log loss was still falling.
 
 Artifacts in [`api/src/remymy_api/inference/weights/window_transformer_reranker/`](api/src/remymy_api/inference/weights/window_transformer_reranker/), where the API
 loads them from. The notebook saves them to `model_artifacts/window_transformer_reranker/`; these are from its run of
-21 Oct 2026. The older windowed GRU stays in `api/src/remymy_api/inference/weights/gru_xattn_reranker/` and loads with
-`ARTIFACT_DIR=src/remymy_api/inference/weights/gru_xattn_reranker`.
+26 Oct 2026, on `foodcom_recipe_ratings_ingredients.csv`. Its flat Transformer is saved beside it in
+`transformer_xattn_reranker/` but not served.
 
 | File | Contents |
 | --- | --- |
 | `model.pt` | Trained weights |
 | `config.json` | Hyperparameters, vocabulary, normalization statistics, test metrics |
-| `item_cache.pt` | Embeddings of the 99,763 training recipes (not used when serving) |
+| `item_cache.pt` | Embeddings of the 218,901 training recipes (not used when serving) |
 | `training_history.csv` | Loss and AUC per epoch |
 
 ### Test results
@@ -170,29 +170,29 @@ Classification, over all test rows:
 
 | Metric | Value |
 | --- | --- |
-| ROC-AUC | 0.618 |
-| AUC, positives vs sampled negatives | 0.629 |
-| AUC, positives vs rated negatives | 0.492 |
-| Log loss | 0.669 |
-| Accuracy / precision / recall / F1 | 0.584 / 0.564 / 0.583 / 0.573 |
+| ROC-AUC | 0.718 |
+| AUC, positives vs sampled negatives | 0.732 |
+| AUC, positives vs rated negatives | 0.581 |
+| Log loss | 0.613 |
+| Accuracy / precision / recall / F1 | 0.654 / 0.632 / 0.653 / 0.642 |
 
 Ranking, where each held-out positive is ranked among 99 recipes the user never
 rated:
 
 | Metric | Value |
 | --- | --- |
-| HR@10 | 0.188 |
-| NDCG@10 | 0.088 |
-| MRR | 0.083 |
-| Mean rank | 38.5 of 100 |
+| HR@10 | 0.319 |
+| NDCG@10 | 0.167 |
+| MRR | 0.146 |
+| Mean rank | 28.5 of 100 |
 
-HR@10 of 0.188 is nearly twice what random ordering gives (0.10). The spec
+HR@10 of 0.319 is about three times what random ordering gives (0.10). The spec
 reports a popularity baseline of about 0.14 under the same negative sampling.
-The older windowed GRU's saved results are a little higher (ROC-AUC 0.625, HR@10
-0.197), from a separate training run. The AUC against rated negatives, 0.492, is
-at chance: the model tells
-recipes a user engages with apart from random ones, but hardly separates recipes
-the user liked from recipes they rated and disliked.
+The notebook's flat Transformer, trained in the same run, is a little lower
+(ROC-AUC 0.713, HR@10 0.308). The AUC against rated negatives, 0.581, is above
+chance but weak: the model tells recipes a user engages with apart from random
+ones better than it separates recipes the user liked from recipes they rated and
+disliked.
 
 ### How the API uses it
 

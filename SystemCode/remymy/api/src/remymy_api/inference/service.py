@@ -15,13 +15,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from statistics import median
 
+import numpy as np
 from sqlalchemy.orm import Session
 
 from ..db import database_engine
 from ..history import History
 from ..recipe import DigestedRecipe
-from ..repository.recipe_repository import RecipeRepository
-from ..schemas import Recipe
+from ..repository.recipe_repository import FOODCOM_ID_OFFSET, RecipeRepository, is_food_id
+from ..schemas import Recipe, RecipeDetail
 from .model_inference_score_recommend import (CATALOG_NUTRIENTS, DEFAULT_ARTIFACTS, DEFAULT_INDEX_DIR, DIET_COLUMNS,
                                               DIET_EXCLUDES, TEXT_COLUMNS, RetrievalPipeline)
 from .classification_service import lookup_path
@@ -169,20 +170,30 @@ class Recommender(Singleton):
             for result in results
         ]
 
+def catalog_query(food: Recipe, tags: list[str], unpriced_band: float) -> dict:
+    """A catalog recipe as a clustering query, by what the catalog stores of it, as the model's training read its
+    recipes: its product / adj / verb terms, nutrients per 100 g, its tags, and its price as the interval the notebook
+    makes (the priced ingredients' sum, give or take unpriced_band per unpriced one)."""
+    priced = sum(item.price for item in food.item_prices.values())
+    band = unpriced_band * len(food.unpriced_items)
+    return {"description": food.description, "product": food.product, "adj": food.adj, "verb": food.verb,
+            "nutrients": {column: getattr(food, column) for column in NUTRIENT_COLS}, "price": None,
+            "price_interval": [max(priced - band, 0.0), priced + band], "tags": tags}
+
+
 class Clusterer(Singleton):
     """The recipe clusterer, one per process: every Clusterer() is the same instance. The first construction, at
     startup, loads and warms up every model a query reads, so a query only infers; later ones ignore their arguments."""
-    # the model's neighbours are training foods, and not every one is in the priced catalog, so it is asked for more
-    CANDIDATES_PER_ITEM = 4
 
-    def _load(self, 
+    def _load(self,
               lookup: Path | None = None) -> None:
         """Loads what is not given: the clustering bundle and the encoder for a term it has not seen, and GLiNER and
         stanza for a query's terms, downloading any not cached yet; then warms the loaded models up."""
         started = time.perf_counter()
         recipe_clusterer = RecipeClusterer(clustering_dir(), lookup_path())
-        logger.info("Recipe clusterer loaded: %d clusters over %d training foods.",
-                    len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]))
+        logger.info("Recipe clusterer loaded: %d clusters over %d training %s.",
+                    len(recipe_clusterer.bundle["cluster_names"]), len(recipe_clusterer.bundle["train_labels"]),
+                    "Food.com recipes" if recipe_clusterer.ids_are_foodcom else "FDC foods")
         recipe_clusterer.load_encoder()
         self.clusterer = recipe_clusterer
         self.extractor = TermExtractor().load()
@@ -205,21 +216,39 @@ class Clusterer(Singleton):
             self.clusterer.predict(item, k=1)
         logger.info("Clusterer warmed up in %.1fs.", time.perf_counter() - started)
 
-    def cluster(self, title: str, top_k: int, catalog: RecipeRepository) -> list[Recipe]:
-        """The top_k catalog foods nearest a recipe, by its title, in its cluster. EmptyQuery for a title with no food
-        description in it."""
+    def catalog_ids(self) -> np.ndarray:
+        """The catalog fdc_id of each training recipe, in training order: a Food.com recipe's is FOODCOM_ID_OFFSET
+        plus its recipe_id (as add_foodcom_recipes stores it), an FDC food's its fdc_id."""
+        ids = self.clusterer.train_ids
+        return ids + FOODCOM_ID_OFFSET if self.clusterer.ids_are_foodcom else ids
+
+    def cluster(self, recipe: RecipeDetail, top_k: int, catalog: RecipeRepository) -> list[Recipe]:
+        """The top_k catalog recipes nearest a recipe in its cluster, the recipe itself left out. A catalog recipe is
+        described by what the catalog stores of it (catalog_query); any other by its title's terms (build_item), with
+        the tags it comes with. Only the training recipes the catalog holds can be neighbours. EmptyQuery for a title
+        with no food description in it."""
         try:
-            with self.lock:
-                item = build_item(title, self.extractor, lookup=self.lookup)
-            result = self.clusterer.predict(item, k=top_k * self.CANDIDATES_PER_ITEM)
+            stored = catalog.food(int(recipe.id)) if is_food_id(recipe.id) else None
+            if stored is not None:
+                item = catalog_query(stored, catalog.tags(recipe.id), self.clusterer.config.get("UNPRICED_BAND", 3.0))
+            else:
+                with self.lock:
+                    item = build_item(recipe.title, self.extractor, lookup=self.lookup)
+                item["tags"] = list(recipe.tags)
+            catalog_ids = self.catalog_ids()
+            in_catalog = np.isin(catalog_ids, np.fromiter(catalog.fdc_ids(), dtype=np.int64))
+            # one more, in case the recipe itself is among them
+            result = self.clusterer.predict(item, k=top_k + 1, allowed=in_catalog)
         except EmptyQuery:
             raise
         except Exception:
-            logger.exception("Clustering recipe %r failed.", title)
+            logger.exception("Clustering recipe %r failed.", recipe.title)
             return []
-        nearest = [neighbour["fdc_id"] for neighbour in result["neighbours"]]
-        # a neighbour the catalog does not price is left out
-        found = catalog.foods_by_ids(nearest)[:top_k]
-        logger.debug("Recipe %r: cluster %d (%s); %d of %d neighbours in the catalog.", title,
-                     result["cluster"], result["cluster_name"], len(found), len(nearest))
+        own = int(recipe.id) if stored is not None else None
+        nearest = [fdc_id for neighbour in result["neighbours"]
+                   if (fdc_id := int(neighbour["id"]) + (FOODCOM_ID_OFFSET if self.clusterer.ids_are_foodcom else 0))
+                   != own][:top_k]
+        found = catalog.foods_by_ids(nearest)
+        logger.debug("Recipe %r: cluster %d (%s); %d neighbours of %d training recipes in the catalog.", recipe.title,
+                     result["cluster"], result["cluster_name"], len(found), int(in_catalog.sum()))
         return found

@@ -61,8 +61,8 @@ from .model_inference_reranker_avgemb import THRESHOLD, ItemEncoder, Reranker as
 logger = logging.getLogger(__name__)
 
 # api/src/remymy_api/inference/weights/window_transformer_reranker: model.pt and config.json as model_training_reranker_avgemb.ipynb saves its
-# window Transformer reranker (WINDOW_ARTIFACT_DIR there). The older windowed GRU in weights/gru_xattn_reranker
-# still loads: Reranker tells the two apart by their checkpoints.
+# window Transformer reranker (WINDOW_ARTIFACT_DIR there). The notebook's flat Transformer, which it saves to
+# weights/transformer_xattn_reranker, is not served: the window one tested better (ROC-AUC 0.718 vs 0.713).
 DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "window_transformer_reranker"
 
 HERE = Path(__file__).resolve().parent
@@ -328,13 +328,17 @@ class Reranker(BaseReranker):
     - window_transformer: the window Transformer of model_training_reranker_avgemb.ipynb (its WINDOW_ARTIFACT_DIR).
       History cut into windows at gaps of window_gap_days or more, ratings centered on the history's mean and mapped
       to [0, 1], and a profile with the user's preferred nutrients.
-    - window_gru: the older windowed GRU (weights/gru_xattn_reranker): the same windows, centered ratings.
+    - window_gru: the older windowed GRU (its weights are no longer shipped): the same windows, centered ratings.
     - gru: the oldest model, of model_inference_reranker_avgemb_approach.py: the last t_max recipes in one sequence."""
 
     def __init__(self, artifact_dir=DEFAULT_ARTIFACTS, tagger=None, device=None):
         artifact_dir = Path(artifact_dir)
         saved = json.loads((artifact_dir / "config.json").read_text())
         self.windowed = "max_windows" in saved["config"]
+        if not self.windowed and any(key.startswith("history_encoder.layers.") for key in
+                                     torch.load(artifact_dir / "model.pt", map_location="cpu", weights_only=True)):
+            raise ValueError(f"{artifact_dir} holds the notebook's flat Transformer reranker, which the API does not "
+                             "serve; point ARTIFACT_DIR at window_transformer_reranker.")
         if not self.windowed:
             self.kind = "gru"
             super().__init__(artifact_dir, tagger, device)

@@ -4,7 +4,7 @@ from .schemas import ClusteringRequest, ClusteringResponse
 
 def cluster(clusterer: Clusterer, cluster_request: ClusteringRequest, k: int,
             catalog: RecipeRepository) -> ClusteringResponse:
-    neighbors = clusterer.cluster(cluster_request.item.title, k, catalog)
+    neighbors = clusterer.cluster(cluster_request.item, k, catalog)
     return ClusteringResponse(
         near_items=neighbors
     )

@@ -21,9 +21,12 @@ and parameterized SQLite queries.
   repository serves; `model_inference_score_recommend.py` is the HNSW retrieval
   and the window Transformer + cross-attention reranker of
   `ml_models/training/model_training_reranker_avgemb.ipynb`.
-  `src/remymy_api/inference/weights/window_transformer_reranker/` holds that trained model; the older
-  windowed GRU in `src/remymy_api/inference/weights/gru_xattn_reranker/` still loads with
-  `ARTIFACT_DIR=src/remymy_api/inference/weights/gru_xattn_reranker`.
+  `src/remymy_api/inference/weights/window_transformer_reranker/` holds that trained model. The
+  notebook's flat Transformer, saved beside it in `transformer_xattn_reranker/`, is not served (it tested a
+  little lower) and is left out of the image. `weights/recipe_clustering_foodcom/` holds the recipe
+  clustering model, trained on the Food.com recipes. Its `recipe_clustering.joblib` (385 MB) is not in git, being
+  over GitHub's file limit: copy it there from `recipe_clustering_foodcom.ipynb`'s `model_artifacts/` (`meta.json`
+  holds its sha256 to check the copy). Without it the API starts and the clustering route answers `503`.
 - `migrations/ingest_food_data.py` ingests Open Recipes 13k and FoodData
   Central Foundation CSVs without doing ingredient matching or nutrition
   inference.

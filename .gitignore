@@ -285,3 +285,8 @@ docs/drafts
 # data and model outputs stay local: every CSV, and any model_artifacts folder at any depth
 *.csv
 model_artifacts/
+
+# the rerankers' training-recipe embedding caches: large, rebuilt by the training notebook, never read when serving
+item_cache.pt
+# the recipe clustering model: 385 MB, over GitHub's file limit. Shared outside git; its meta.json (tracked) has its sha256
+recipe_clustering.joblib

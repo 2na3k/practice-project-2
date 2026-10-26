@@ -20,7 +20,8 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 logger = logging.getLogger(__name__)
 
-# api/src/remymy_api/inference/weights/gru_xattn_reranker: model.pt and config.json as the training notebook writes them.
+# weights/gru_xattn_reranker: model.pt and config.json of the older GRU reranker, as its notebook wrote them (no longer
+# shipped; the API serves model_inference_score_recommend's window Transformer).
 DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "gru_xattn_reranker"
 THRESHOLD = 0.5  # P(positive) at or above this is classified positive, as in the notebook's metrics.
 

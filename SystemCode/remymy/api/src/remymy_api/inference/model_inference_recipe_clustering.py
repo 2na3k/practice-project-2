@@ -1,16 +1,19 @@
-"""Assign a food to a recipe cluster with the HDBSCAN model of recipe_clustering.ipynb.
+"""Assign a recipe to a recipe cluster with the HDBSCAN model of recipe_clustering_foodcom.ipynb (trained on the
+Food.com recipes) or of recipe_clustering.ipynb (the FDC foods); the bundle tells which.
 
-Input: a food query (description, optionally nutrients per 100 g and a price). Output: the cluster (-1 = outlier), its
-name (top product terms), how strongly the 15 nearest training recipes agree, and the k nearest training recipes inside
-the assigned cluster (all of them if it has fewer than k; the nearest of any cluster for an outlier).
+Input: a food query (description, optionally nutrients per 100 g, a price and tags). Output: the cluster (-1 =
+outlier), its name (top product terms), how strongly the 15 nearest training recipes agree, and the k nearest training
+recipes inside the assigned cluster (all of them if it has fewer than k; the nearest of any cluster for an outlier),
+optionally only among the training rows a caller allows (the ones its catalog holds).
 
-Pipeline, as in the notebook's predict_clusters: lemmatized product / adj+verb terms → Qwen3 embeddings mean-pooled per
-block, log1p nutrients, log1p price interval → per-block PCA / scaler / weight → 10-d UMAP → majority vote of the 15
-nearest training recipes (noise votes too) → outlier if the nearest clustered recipe is beyond the 99th percentile of
-training nearest-neighbour distances.
+Pipeline, as in the notebook's predict_clusters: lemmatized product / adj+verb terms and (Food.com) tags → Qwen3
+embeddings mean-pooled per block, log1p nutrients, log1p price interval → per-block PCA / scaler / weight → 10-d UMAP
+→ majority vote of the 15 nearest training recipes (noise votes too) → outlier if the nearest clustered recipe is beyond
+the 99th percentile of training nearest-neighbour distances.
 
-Unknown inputs are imputed so they pull towards no cluster: nutrients with the training medians (as the notebook does)
-and the price with the training mean of log price. Needs scikit-learn, umap-learn, sentence-transformers, gliner, stanza.
+Unknown inputs are imputed so they pull towards no cluster: nutrients with the training medians (as the notebook does),
+the price with the training mean of log price, and no tags as a recipe without any. Needs scikit-learn, umap-learn,
+sentence-transformers, gliner, stanza.
 """
 import argparse
 import json
@@ -29,9 +32,10 @@ except ImportError:  # run as a file
     from food_query import (DEFAULT_LOOKUP, NUTRIENT_COLS, TermExtractor, add_query_arguments, item_from_args,
                             iter_queries, load_fdc_lookup)
 
-# api/src/remymy_api/inference/weights/recipe_clustering: recipe_clustering.joblib as the training notebook writes it. Neighbours are described
-# from the premade fdc_id lookup (api/src/remymy_api/inference/weights/fdc_lookup.json); without it they show only their fdc_id.
-DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "recipe_clustering"
+# weights/recipe_clustering_foodcom: recipe_clustering.joblib as recipe_clustering_foodcom.ipynb writes it, its training
+# recipes Food.com recipe_ids. (An FDC bundle of recipe_clustering.ipynb, by fdc_id, loads too; its neighbours are
+# described from the premade fdc_id lookup, weights/fdc_lookup.json.)
+DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "recipe_clustering_foodcom"
 DEFAULT_NEIGHBOURS = 5
 
 nltk.download("wordnet", quiet=True)
@@ -47,16 +51,33 @@ def _uniq(xs):
     return list(dict.fromkeys(x for x in xs if x))
 
 
+def _tag_terms(tag):
+    """A tag as the notebook's norm_tag makes it, from a Food.com tag or a stored label alike: "60-minutes-or-less" and
+    "60_minutes_or_less" -> "60 minute or less" (digits kept, so the time tags stay apart)."""
+    return " ".join(_lemmatizer.lemmatize(w, "n") for w in re.findall(r"[a-z0-9]+", str(tag).lower()))
+
+
 class RecipeClusterer:
     """The fitted clustering bundle: token embedding cache, block transforms, UMAP and the training neighbours."""
 
     def __init__(self, artifact_dir=DEFAULT_ARTIFACTS, lookup=DEFAULT_LOOKUP):
         self.bundle = joblib.load(Path(artifact_dir) / "recipe_clustering.joblib")
+        # the fitted HDBSCAN is training's alone: a query takes its neighbours' labels (train_labels) instead
+        self.bundle.pop("hdbscan", None)
         # training recipes in 10-d UMAP space (fit_transform output, the points nn_all was fit on)
         self.train_Z = self.bundle["umap10"].embedding_
         self.lookup = load_fdc_lookup(lookup)
         self.config = self.bundle["config"]
-        assert self.config["NUTRIENTS"] == NUTRIENT_COLS
+        # the nutrients the model reads, in its order: food_query's all, for the FDC model; all but fiber and
+        # cholesterol, which Food.com does not give, for the Food.com one
+        self.nutrients = list(self.config["NUTRIENTS"])
+        assert set(self.nutrients) <= set(NUTRIENT_COLS)
+        # the training recipes' ids: Food.com recipe_ids, or the FDC model's fdc_ids
+        self.ids_are_foodcom = "train_recipe_id" in self.bundle
+        self.train_ids = np.asarray(self.bundle["train_recipe_id" if self.ids_are_foodcom else "train_fdc_id"])
+        # the Food.com model's tags block, without the category headers it was trained without
+        self.uses_tags = "tags" in self.bundle["block_fits"]
+        self.generic_tags = {_tag_terms(tag) for tag in self.bundle.get("generic_tags", ())}
         self.tok2vec = dict(self.bundle["tok2vec"])
         self.dim = len(next(iter(self.tok2vec.values())))
         self._encoder = None
@@ -83,14 +104,17 @@ class RecipeClusterer:
         return v / (np.linalg.norm(v) + 1e-9)
 
     def features(self, item):
-        """The 59-d weighted feature row of the notebook's `assemble`, plus what went into it."""
+        """The weighted feature row of the notebook's `assemble`, plus what went into it. item["tags"] (labels or
+        Food.com tags) feeds the tags block when the model has one; none is a recipe without tags."""
         product = _uniq(_lemmas(x, "n") for x in item["product"])
         desc = _uniq([_lemmas(a, "a") for a in item["adj"]] + [_lemmas(v, "v") for v in item["verb"]])
-        unseen = self._encode_missing(product + desc)
+        tags = (_uniq(t for t in map(_tag_terms, item.get("tags") or ()) if t not in self.generic_tags)
+                if self.uses_tags else [])
+        unseen = self._encode_missing(product + desc + tags)
 
         medians = self.bundle["nutr_medians"]
-        nutrients = np.array([item["nutrients"][c] if item["nutrients"][c] is not None else medians[c]
-                              for c in NUTRIENT_COLS], dtype=float)
+        nutrients = np.array([item["nutrients"].get(c) if item["nutrients"].get(c) is not None else medians[c]
+                              for c in self.nutrients], dtype=float)
         if item.get("price_interval"):  # a looked-up training food: its own ±3-per-unpriced-item interval
             price = np.array(item["price_interval"], dtype=float)
         elif item["price"] is not None:  # a known total: no unpriced items, so the interval is the price itself
@@ -98,33 +122,43 @@ class RecipeClusterer:
         else:
             price = self.default_price
         raw = {"product": self._pool(product)[None], "adj_verb": self._pool(desc)[None],
-               "nutrients": np.log1p(nutrients)[None], "price": np.log1p(price)[None]}
+               "tags": self._pool(tags)[None], "nutrients": np.log1p(nutrients)[None], "price": np.log1p(price)[None]}
 
+        # in the order the blocks were fitted, which is the order the notebook assembled them in
         blocks = []
-        for name, R in raw.items():
-            pca, scaler = self.bundle["block_fits"][name]
+        for name, (pca, scaler) in self.bundle["block_fits"].items():
+            R = raw[name]
             Z = scaler.transform(pca.transform(R) if pca else R)
             blocks.append(Z / np.sqrt(Z.shape[1]) * self.config["WEIGHTS"][name])
-        return np.hstack(blocks), {"product_norm": product, "desc_norm": desc, "unseen_tokens": unseen,
-                                   "nutrients_used": dict(zip(NUTRIENT_COLS, nutrients.round(3).tolist())),
+        return np.hstack(blocks), {"product_norm": product, "desc_norm": desc, "tags_norm": tags,
+                                   "unseen_tokens": unseen,
+                                   "nutrients_used": dict(zip(self.nutrients, nutrients.round(3).tolist())),
                                    "price_interval": price.round(2).tolist()}
 
-    def neighbours(self, z, cluster, k):
-        """The k training recipes of `cluster` closest to `z` in UMAP space (any cluster when `cluster` is -1)."""
+    def neighbours(self, z, cluster, k, allowed=None):
+        """The k training recipes of `cluster` closest to `z` in UMAP space (any cluster when `cluster` is -1), only
+        among the rows `allowed` (a bool mask over the training rows) holds when one is given. Each one's "id" is its
+        training id: a Food.com recipe_id ("recipe_id") or an fdc_id ("fdc_id")."""
         labels = self.bundle["train_labels"]
         rows = np.arange(len(labels)) if cluster == -1 else np.flatnonzero(labels == cluster)
+        if allowed is not None:
+            rows = rows[allowed[rows]]
         dist = np.linalg.norm(self.train_Z[rows] - z, axis=1)
         nearest = []
         for i in np.argsort(dist)[:k]:
-            fdc_id = int(self.bundle["train_fdc_id"][rows[i]])
-            food = self.lookup.get(fdc_id, {})
-            nutrients = food.get("nutrients", {})
-            nearest.append({"fdc_id": fdc_id, "description": food.get("description"),
-                            "cluster": int(labels[rows[i]]), "distance": float(dist[i]), "price": food.get("price"),
-                            **{key: nutrients.get(key) for key in ("energy_kcal", "protein_g", "fat_g", "carb_g")}})
+            train_id = int(self.train_ids[rows[i]])
+            neighbour = {"id": train_id, "cluster": int(labels[rows[i]]), "distance": float(dist[i])}
+            if self.ids_are_foodcom:
+                neighbour["recipe_id"] = train_id
+            else:
+                food = self.lookup.get(train_id, {})
+                nutrients = food.get("nutrients", {})
+                neighbour.update({"fdc_id": train_id, "description": food.get("description"), "price": food.get("price"),
+                                  **{key: nutrients.get(key) for key in ("energy_kcal", "protein_g", "fat_g", "carb_g")}})
+            nearest.append(neighbour)
         return nearest, len(rows)
 
-    def predict(self, item, k=DEFAULT_NEIGHBOURS):
+    def predict(self, item, k=DEFAULT_NEIGHBOURS, allowed=None):
         b = self.bundle
         X, used = self.features(item)
         Z = b["umap10"].transform(X)
@@ -136,7 +170,7 @@ class RecipeClusterer:
         too_far = d_near > b["outlier_dist"]
         top = [(int(c - 1), int(n)) for c, n in sorted(enumerate(counts), key=lambda x: -x[1]) if n][:3]
         assigned = -1 if too_far else cluster
-        nearest, cluster_size = self.neighbours(Z[0], assigned, k)
+        nearest, cluster_size = self.neighbours(Z[0], assigned, k, allowed)
         return {
             "item": item, **used,
             "cluster": assigned,
@@ -155,6 +189,7 @@ def print_prediction(result):
     item = result["item"]
     print(f"\n{item['description']}" + (f"  (fdc {item['fdc_id']}, from the lookup)" if "fdc_id" in item else ""))
     print(f"  product {result['product_norm']}  adj/verb {result['desc_norm']}"
+          + (f"  tags {result['tags_norm']}" if result["tags_norm"] else "")
           + (f"  ({result['unseen_tokens']} new tokens embedded)" if result["unseen_tokens"] else ""))
     given = {c: v for c, v in item["nutrients"].items() if v is not None}
     print(f"  nutrients given {given or 'none'} (others: training medians)")
@@ -182,7 +217,8 @@ def print_prediction(result):
                                                                ("carb_g", "C {:g}")]
                           if n.get(key) is not None)
         where = f"cluster {n['cluster']}, " if result["cluster"] < 0 else ""
-        print(f"    {n['distance']:.3f}  {n['description'] or '?'}  ({where}fdc {n['fdc_id']}{'; ' + stats if stats else ''})")
+        which = f"recipe {n['recipe_id']}" if "recipe_id" in n else f"fdc {n['fdc_id']}"
+        print(f"    {n['distance']:.3f}  {n.get('description') or '?'}  ({where}{which}{'; ' + stats if stats else ''})")
 
 
 def main():
