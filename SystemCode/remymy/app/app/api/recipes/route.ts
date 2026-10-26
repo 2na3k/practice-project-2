@@ -36,7 +36,7 @@ async function relay(response: Response): Promise<NextResponse> {
 }
 
 // Saves a user's own recipe. The app knows the user by username; the Data API's POST /api/recipes takes the user_id,
-// so this looks it up first, as the rating route does. Its answer, a 501 until it is implemented, is passed through.
+// so this looks it up first, as the rating route does. Its answer, the stored recipe or an error, is passed through.
 export async function POST(request: NextRequest) {
   if (!isSameOriginMutation(request)) return NextResponse.json({ error: "Cross-origin requests are not allowed." }, { status: 403 });
   let body: unknown;

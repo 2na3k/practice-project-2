@@ -152,6 +152,15 @@ export async function suggestTags(title: string, nutrients: Partial<Record<Nutri
   return parseTagSuggestion(body);
 }
 
+// The user's own recipes, newest first, through the app's route (the Data API's GET /api/users/{username}/recipes).
+export async function fetchMyRecipes(username: string, signal?: AbortSignal): Promise<SavedRecipe[]> {
+  const response = await fetch(`/api/users/${encodeURIComponent(username)}/recipes`, { cache: "no-store", signal });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(dataApiError(body, "Your recipes could not be loaded."));
+  if (!Array.isArray(body)) throw new Error("Recipe service returned an unexpected response.");
+  return body.map(parseSavedRecipe);
+}
+
 // Saves the user's own recipe through the app's recipes route (the Data API's POST /api/recipes).
 export async function saveMyRecipe(username: string, recipe: NewRecipe, signal?: AbortSignal): Promise<SavedRecipe> {
   const response = await fetch("/api/recipes", {

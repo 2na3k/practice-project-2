@@ -19,7 +19,7 @@ from .cache import (
     reset_ratings,
     write_recommendations,
 )
-from .dependencies import Classifying, Clustering, Recipes, Recommending, Users
+from .dependencies import Classifying, Clustering, Recipes, RecipeStore, Recommending, Users
 from .inference.food_query import EmptyQuery, UnknownFood
 from .recommend import recommend
 from .schema import has_food_data
@@ -97,8 +97,8 @@ def list_recipes(
                 "))"
             )
             params.extend([pattern, pattern, pattern])
-        # the Food.com recipes; the catalog foods' and user recipes' rows are there for saved_recipe
-        where = " WHERE r.kind = 'openrecipes' AND r.title IS NOT NULL AND trim(r.title) <> ''"
+        # the recipe database's recipes and the ones users wrote; the catalog foods' rows are there for saved_recipe
+        where = " WHERE r.kind IN ('openrecipes', 'user') AND r.title IS NOT NULL AND trim(r.title) <> ''"
         if clauses:
             where += " AND " + " AND ".join(clauses)
         total = connection.execute(
@@ -148,7 +148,7 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     try:
         row = connection.execute(
             "SELECT recipe_id, title, quality_status FROM recipe "
-            "WHERE recipe_id = ? AND kind = 'openrecipes' AND title IS NOT NULL AND trim(title) <> ''",
+            "WHERE recipe_id = ? AND kind IN ('openrecipes', 'user') AND title IS NOT NULL AND trim(title) <> ''",
             (recipe_id,),
         ).fetchone()
         if row is None:
@@ -167,12 +167,23 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
                 (recipe_id,),
             ).fetchall()
         ]
+        # recipe_tag is the API's (models.create_tables): a recipe database the migration job made alone has none
+        has_tags = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recipe_tag'"
+        ).fetchone() is not None
+        tags = [
+            item[0]
+            for item in connection.execute(
+                "SELECT label FROM recipe_tag WHERE recipe_id = ? ORDER BY label", (recipe_id,)
+            ).fetchall()
+        ] if has_tags else []
         return RecipeDetail(
             id=row["recipe_id"],
             title=row["title"],
             ingredients=ingredients,
             instructions=instructions,
             quality_status=row["quality_status"],
+            tags=tags,
         )
     except HTTPException:
         raise
@@ -187,32 +198,35 @@ def get_recipe(recipe_id: str) -> RecipeDetail:
     response_model=UserRecipeResponse,
     status_code=201,
     tags=["recipes"],
-    responses={404: {"description": "User not found."}, 501: {"description": "Not implemented yet."}},
+    responses={404: {"description": "User not found."}, 503: {"description": "Recipe data is unavailable."}},
 )
-def create_recipe(body: UserRecipeCreate, users: Users) -> UserRecipeResponse:
-    """Save a recipe the user wrote themselves, with the tags they kept or added, and return it as stored.
-
-    Declared only: the app's Add recipe screen already sends this body, and shows the 501 until it is implemented."""
-    # TODO: 404 unless users.user_exists(body.user_id); then a UserRepository.create_recipe that adds a
-    # models.UserRecipe built from `body` (its tags as models.UserRecipeTag), commits, and returns
-    # UserRecipeResponse.model_validate(recipe). The DTOs are in schemas.py, the ORM models in models.py.
-    raise HTTPException(status_code=501, detail="Saving your own recipes is not implemented yet.")
+def create_recipe(body: UserRecipeCreate, users: Users, recipes: RecipeStore) -> UserRecipeResponse:
+    """Save a recipe the user wrote themselves, with the tags they kept or added, and return it as stored. It also
+    becomes one of the app's recipes, "user-recipe:<n>", which the user can save or rate."""
+    try:
+        if not users.user_exists(body.user_id):
+            raise HTTPException(status_code=404, detail="User not found.")
+        recipe = recipes.create_user_recipe(body)
+        return UserRecipeResponse.model_validate(recipe)
+    except SQLAlchemyError:
+        logger.exception("Saving a recipe of user %d failed.", body.user_id)
+        raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
 
 
 @router.get("/api/recipe/{fdc_id}", response_model=Recipe, tags=["recipes"])
 def get_catalog_recipe(fdc_id: int, catalog: Recipes) -> Recipe:
     """One item of the priced catalog the recommendations come from: its ingredients with their FairPrice packs and
-    prices, and its nutrients per 100 g."""
+    prices, its nutrients per 100 g, and its tags (a Food.com recipe's)."""
     if catalog is None:
         raise HTTPException(status_code=503, detail="The recipe is not loaded.")
     try:
         item = catalog.food(fdc_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Catalog item not found.")
+        return item.model_copy(update={"tags": catalog.tags(str(fdc_id))})
     except SQLAlchemyError:
         logger.exception("Reading catalog item %d failed.", fdc_id)
         raise HTTPException(status_code=503, detail="The recipe is unavailable.")
-    if item is None:
-        raise HTTPException(status_code=404, detail="Catalog item not found.")
-    return item
 
 
 @router.get("/api/recommend/{username}", response_model=RecommendationResponse, tags=["recommendations"])
@@ -331,6 +345,25 @@ def get_user(username: str, users: Users) -> User:
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return user
+
+
+@router.get(
+    "/api/users/{username}/recipes",
+    response_model=list[UserRecipeResponse],
+    tags=["users"],
+    responses={404: {"description": "User not found."}, 503: {"description": "Recipe data is unavailable."}},
+)
+def get_user_recipes(username: str, users: Users, recipes: RecipeStore) -> list[UserRecipeResponse]:
+    """The recipes the user wrote themselves, newest first, each whole: its title, ingredient and instruction lines,
+    tags, nutrients per 100 g and when it was added, read in one query joining the recipe tables."""
+    try:
+        user_id = users.find_user_id(username)
+        if user_id is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        return [UserRecipeResponse.model_validate(recipe) for recipe in recipes.user_recipes(user_id)]
+    except SQLAlchemyError:
+        logger.exception("Reading the recipes of %r failed.", username)
+        raise HTTPException(status_code=503, detail="Recipe data is unavailable.")
 
 
 @router.get("/api/users/{username}/likes", response_model=dict[str, bool], tags=["users"])

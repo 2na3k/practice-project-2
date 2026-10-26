@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import get_args
@@ -11,9 +12,10 @@ from sqlalchemy.orm import Session
 
 from remymy_api import models
 from remymy_api.db import database_engine, database_path, get_db
-from remymy_api.models import AppUser, UserRecipe, UserRecipeTag
+from remymy_api.models import AppUser, RecipeEntry, RecipeIngredientEntry, RecipeTagEntry, UserRecipe
+from remymy_api.repository.recipe_repository import RecipeRepository
+from remymy_api.schema import connect, init_database
 from remymy_api.schemas import NutrientName, UserRecipeCreate, UserRecipeResponse
-from remymy_api.schema import init_database
 
 REQUEST = {
     "user_id": 1,
@@ -33,34 +35,39 @@ def engine(monkeypatch):
     return database_engine()
 
 
-def recipe_from(body: UserRecipeCreate) -> UserRecipe:
-    """The request DTO as an ORM object, as POST /api/recipes would store it."""
-    return UserRecipe(
-        user_id=body.user_id, title=body.title, ingredients=body.ingredients, instructions=body.instructions,
-        nutrients=body.nutrients, tags=[UserRecipeTag(label=tag.label, source=tag.source) for tag in body.tags],
-    )
+def store(engine, request: dict = REQUEST) -> str:
+    """POST /api/recipes's write; the new recipe's id."""
+    with Session(engine) as session:
+        return RecipeRepository(session).create_user_recipe(UserRecipeCreate.model_validate(request)).recipe_id
+
+
+def user_recipe(recipe_id: str, title: str, lines: list[str], **values: object) -> UserRecipe:
+    """A user recipe as ORM objects, its lines and title in its row of recipe."""
+    return UserRecipe(recipe_id=recipe_id, recipe=RecipeEntry(
+        recipe_id=recipe_id, title=title, quality_status="accepted", kind="user",
+        ingredients=[RecipeIngredientEntry(ingredient_id=models.ingredient_id(recipe_id, position), position=position,
+                                           raw_text=line) for position, line in enumerate(lines, start=1)],
+    ), **values)
 
 
 def test_startup_creates_the_orm_tables_and_leaves_the_sql_ones_be(engine):
     tables = set(inspect(engine).get_table_names())
 
-    assert {"app_user", "user_history", "saved_recipe", "recipe", "user_recipe", "user_recipe_tag",
-            "price_mapped_nutrients"} <= tables
+    assert {"app_user", "user_history", "saved_recipe", "recipe", "recipe_ingredient", "recipe_instruction",
+            "user_recipe", "recipe_tag", "price_mapped_nutrients"} <= tables
+    assert "user_recipe_tag" not in tables
     # app_user is mapped, but its table is still users.SCHEMA's: the JSONB preferences keep their SQL checks
     with engine.connect() as connection:
         ddl = connection.exec_driver_sql("SELECT sql FROM sqlite_master WHERE name = 'app_user'").scalar_one()
     assert "json_valid(preferences, 8)" in ddl
 
 
-def test_a_request_dto_is_stored_and_read_back_as_the_response_dto(engine):
+def test_a_request_dto_is_stored_as_a_recipe_and_read_back_as_the_response_dto(engine):
     before = datetime.now(UTC) - timedelta(seconds=1)
-    with Session(engine) as session:
-        session.add(recipe_from(UserRecipeCreate.model_validate(REQUEST)))
-        session.commit()
+    recipe_id = store(engine)
 
     with Session(engine) as session:
-        recipe = session.scalars(select(UserRecipe)).one()
-        response = UserRecipeResponse.model_validate(recipe)
+        response = UserRecipeResponse.model_validate(session.get(UserRecipe, recipe_id))
 
     assert response.model_dump(exclude={"created_at"}) == {
         "id": "user-recipe:1",
@@ -73,19 +80,35 @@ def test_a_request_dto_is_stored_and_read_back_as_the_response_dto(engine):
         "nutrients": {"protein_g": 14.0, "energy_kcal": 180.0},
     }
     assert before <= response.created_at <= datetime.now(UTC)
-    # stored in the users database's own time format, like user_history.timestamp
     with sqlite3.connect(database_path()) as connection:
+        # stored in the users database's own time format, like user_history.timestamp
         stored = connection.execute("SELECT created_at FROM user_recipe").fetchone()[0]
-    assert stored.endswith("Z") and "T" in stored
+        assert stored.endswith("Z") and "T" in stored
+        # the recipe itself is stored as the recipe database's are
+        assert connection.execute("SELECT recipe_id, title, kind FROM recipe").fetchall() == [
+            ("user-recipe:1", "Grandma's chicken curry", "user")]
+        assert connection.execute(
+            "SELECT ingredient_id, position, raw_text, parse_status FROM recipe_ingredient ORDER BY position"
+        ).fetchall() == [("user-recipe:1:ingredient:1", 1, "500 g chicken thighs", "unparsed"),
+                         ("user-recipe:1:ingredient:2", 2, "1 onion, chopped", "unparsed"),
+                         ("user-recipe:1:ingredient:3", 3, "2 tbsp curry paste", "unparsed")]
+        assert connection.execute("SELECT position, text FROM recipe_instruction ORDER BY position").fetchall() == [
+            (1, "Brown the chicken."), (2, "Simmer for 30 minutes.")]
+        assert connection.execute("SELECT label, source FROM recipe_tag ORDER BY label").fetchall() == [
+            ("family_favourite", "user"), ("hearty_filling", "classifier")]
+
+
+def test_each_new_recipe_takes_the_next_id(engine):
+    assert [store(engine), store(engine), store(engine)] == ["user-recipe:1", "user-recipe:2", "user-recipe:3"]
 
 
 def test_a_user_has_their_recipes_newest_first(engine):
     with Session(engine) as session:
         demo = session.get(AppUser, 1)
-        demo.recipes.append(UserRecipe(title="Toast", ingredients=["bread"]))
+        demo.recipes.append(user_recipe("user-recipe:1", "Toast", ["bread"]))
         session.flush()
-        demo.recipes.append(UserRecipe(title="Tea", ingredients=["tea bag", "water"],
-                                       created_at=datetime.now(UTC) + timedelta(minutes=1)))
+        demo.recipes.append(user_recipe("user-recipe:2", "Tea", ["tea bag", "water"],
+                                        created_at=datetime.now(UTC) + timedelta(minutes=1)))
         session.commit()
         session.expire_all()
 
@@ -94,54 +117,80 @@ def test_a_user_has_their_recipes_newest_first(engine):
 
 
 def test_the_database_keeps_a_recipe_to_a_known_user_and_cascades(engine):
-    with Session(engine) as session:
-        session.add(recipe_from(UserRecipeCreate.model_validate(REQUEST | {"user_id": 999})))
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        RecipeRepository(session).create_user_recipe(UserRecipeCreate.model_validate(REQUEST | {"user_id": 999}))
+    store(engine)
 
-        session.add(recipe_from(UserRecipeCreate.model_validate(REQUEST)))
-        session.commit()
-
-    # deleting the user (with SQL, as users.py would) deletes their recipes, the recipes' tags, and their rows in
-    # recipe, with the saves of them
-    with sqlite3.connect(database_path()) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
+    # deleting the user (with SQL, as users.py would) deletes their recipes with the recipes' rows in recipe, their
+    # lines and tags, and the saves of them
+    connection = connect(database_path())
+    with connection:
         connection.execute("INSERT INTO saved_recipe (user_id, recipe_id) VALUES (1, 'user-recipe:1')")
         connection.execute("DELETE FROM app_user WHERE user_id = 1")
-        assert connection.execute("SELECT count(*) FROM user_recipe").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM user_recipe_tag").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM recipe WHERE kind = 'user'").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM saved_recipe").fetchone()[0] == 0
+    for table in ("user_recipe", "recipe_tag", "recipe_ingredient", "recipe_instruction", "saved_recipe"):
+        assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table
+    assert connection.execute("SELECT count(*) FROM recipe WHERE kind = 'user'").fetchone()[0] == 0
+    connection.close()
 
 
-def test_a_user_recipe_is_a_recipe_by_its_id(engine):
-    with Session(engine) as session:
-        session.add(recipe_from(UserRecipeCreate.model_validate(REQUEST)))
-        session.commit()
-        recipe = session.scalars(select(UserRecipe)).one()
-        recipe.title = "Grandpa's chicken curry"
-        session.commit()
-
-    with sqlite3.connect(database_path()) as connection:
-        rows = connection.execute("SELECT recipe_id, title, kind FROM recipe").fetchall()
-    assert rows == [("user-recipe:1", "Grandpa's chicken curry", "user")]
-
-
-@pytest.mark.parametrize("change", [
-    {"title": ""},
-    {"ingredients": []},
-    {"ingredients": "500 g chicken thighs"},
-    {"tags": [UserRecipeTag(label="easy", source="chef")]},
+@pytest.mark.parametrize("tag", [
+    RecipeTagEntry(label="easy", source="chef"),
+    RecipeTagEntry(label="x" * 41, source="user"),
 ])
-def test_the_database_checks_what_the_dtos_check(engine, change):
-    recipe = UserRecipe(user_id=1, title="Toast", ingredients=["bread"])
-    for key, value in change.items():
-        setattr(recipe, key, value)
+def test_the_database_checks_what_the_dtos_check(engine, tag):
+    recipe = user_recipe("user-recipe:1", "Toast", ["bread"], user_id=1)
+    recipe.recipe.tags.append(tag)
     with Session(engine) as session:
         session.add(recipe)
         with pytest.raises(IntegrityError):
             session.commit()
+
+
+def test_startup_moves_user_recipes_of_the_old_layout_to_the_recipe_tables(engine):
+    # user_recipe as it was: the recipe whole in it, its tags in user_recipe_tag, a trigger copying it to recipe
+    connection = connect(database_path())
+    with connection:
+        connection.executescript("""
+            DROP TABLE recipe_tag; DROP TABLE user_recipe;
+            CREATE TABLE user_recipe (user_recipe_id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES app_user(user_id),
+              title TEXT, ingredients JSON, instructions JSON DEFAULT '[]', protein_g FLOAT, fat_g FLOAT, carb_g FLOAT,
+              energy_kcal FLOAT, fiber_g FLOAT, sodium_mg FLOAT, cholesterol_mg FLOAT, satfat_g FLOAT, sugars_g FLOAT,
+              created_at TEXT);
+            CREATE INDEX user_recipe_by_user ON user_recipe (user_id, created_at);
+            CREATE TABLE user_recipe_tag (user_recipe_id INTEGER REFERENCES user_recipe(user_recipe_id), label TEXT,
+              source TEXT, PRIMARY KEY (user_recipe_id, label));
+            CREATE TRIGGER user_recipe_is_a_recipe AFTER INSERT ON user_recipe BEGIN
+              INSERT INTO recipe (recipe_id, title, quality_status, kind)
+              VALUES ('user-recipe:' || NEW.user_recipe_id, NEW.title, 'accepted', 'user');
+            END;
+        """)
+        connection.execute("INSERT INTO user_recipe VALUES (7, 1, 'Toast', ?, ?, NULL, NULL, NULL, 90.0, NULL, NULL, "
+                           "NULL, NULL, NULL, '2026-10-01T08:00:00.000Z')",
+                           (json.dumps(["bread", "butter"]), json.dumps(["Toast the bread."])))
+        connection.execute("INSERT INTO user_recipe_tag VALUES (7, 'breakfast', 'classifier')")
+        connection.execute("INSERT INTO saved_recipe (user_id, recipe_id) VALUES (1, 'user-recipe:7')")
+    connection.close()
+
+    init_database()
+
+    with Session(engine) as session:
+        moved = UserRecipeResponse.model_validate(session.get(UserRecipe, "user-recipe:7"))
+        # a new recipe takes the next id after the moved one
+        assert RecipeRepository(session).create_user_recipe(
+            UserRecipeCreate.model_validate(REQUEST)).recipe_id == "user-recipe:8"
+    assert moved.model_dump(exclude={"created_at"}) == {
+        "id": "user-recipe:7", "user_id": 1, "title": "Toast", "ingredients": ["bread", "butter"],
+        "instructions": ["Toast the bread."], "tags": [{"label": "breakfast", "source": "classifier"}],
+        "nutrients": {"energy_kcal": 90.0},
+    }
+    connection = connect(database_path())
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    triggers = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
+    # the save of it still holds
+    assert [row[0] for row in connection.execute("SELECT recipe_id FROM saved_recipe")] == ["user-recipe:7"]
+    connection.close()
+    assert not tables & {"old_user_recipe", "old_user_recipe_tag", "user_recipe_tag"}
+    assert "user_recipe_is_a_recipe" not in triggers and "user_recipe_deleted_takes_its_recipe" in triggers
 
 
 def test_nutrients_are_the_columns_the_dtos_name():
@@ -156,5 +205,6 @@ def test_get_db_opens_a_session_on_the_users_database(engine):
     session = next(dependency)
     try:
         assert session.get(AppUser, 1).username == "demo"
+        assert session.scalars(select(UserRecipe)).all() == []
     finally:
         dependency.close()

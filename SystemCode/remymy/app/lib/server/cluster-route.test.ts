@@ -19,7 +19,8 @@ describe("cluster route", () => {
     expect(response.status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
     expect(url.href).toBe("http://localhost:8002/api/cluster?k=4");
-    expect(JSON.parse(init.body as string)).toEqual({ item: RECIPE });
+    // a recipe sent without tags goes on with none
+    expect(JSON.parse(init.body as string)).toEqual({ item: { ...RECIPE, tags: [] } });
   });
 
   it("rejects a bad recipe or k and other origins, and answers 502 without the Data API", async () => {

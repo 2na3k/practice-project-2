@@ -4,6 +4,7 @@ import { ArrowRight, Bookmark, ChefHat, LoaderCircle, ShoppingCart, X } from "lu
 import { useEffect, useRef, useState } from "react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import { fetchSimilarToCatalogItem, nutrientRows, packSize, priceLabel, priceSource, type CatalogItem } from "@/lib/catalog";
+import { tagText } from "@/lib/my-recipes";
 import { formatPrice } from "@/lib/recommendations";
 
 const SIMILAR_COUNT = 6;
@@ -79,6 +80,7 @@ export function CatalogItemModal({ item, loading, error, onClose, rating, onRate
               </> : <span>{formatPrice(pricedSum)} for {item.product.length - item.unpriced_items.length} of {item.product.length} ingredients priced</span>}
             </div>
             {descriptors.length > 0 && <div className="meal-card-tags catalog-descriptors">{descriptors.map((word) => <span key={word}>{word}</span>)}</div>}
+            {item.tags.length > 0 && <div className="detail-section"><h3>Tags</h3><div className="meal-card-tags recipe-tags">{item.tags.map((tag) => <span key={tag}>{tagText(tag)}</span>)}</div></div>}
             <div className="detail-section"><h3>What&apos;s in it</h3><ul className="ingredient-list catalog-ingredients">{item.product.map((span) => {
               const price = item.item_prices[span];
               const size = price ? packSize(price.quantity) : null;

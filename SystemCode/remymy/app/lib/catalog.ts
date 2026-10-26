@@ -25,6 +25,8 @@ export type CatalogItem = {
   fiber_g: number | null;
   sodium_mg: number | null;
   cholesterol_mg: number | null;
+  // its tags' labels: a Food.com recipe's, e.g. "60_minutes_or_less"; none for an FDC food
+  tags: string[];
 };
 
 const NUTRIENTS = [
@@ -55,10 +57,11 @@ export function parseCatalogItem(value: unknown): CatalogItem {
   const nutrientsOk = NUTRIENTS.every(({ key }) => item[key] === null || isNumber(item[key]));
   if (!isNumber(item.fdc_id) || typeof item.description !== "string" || !isStrings(item.product) || !pricesOk ||
     !isStringMap(item.item_routes) || !isStringMap(item.matched_variations) || !isStrings(item.unpriced_items) ||
-    !isStrings(item.adj) || !isStrings(item.verb) || !isNumber(item.total_price) || !isNumber(item.basket_per_100) || !nutrientsOk) {
+    !isStrings(item.adj) || !isStrings(item.verb) || !isNumber(item.total_price) || !isNumber(item.basket_per_100) || !nutrientsOk ||
+    (item.tags !== undefined && !isStrings(item.tags))) {
     return fail();
   }
-  return item as CatalogItem;
+  return { ...item, tags: item.tags ?? [] } as CatalogItem;
 }
 
 export async function fetchCatalogItem(id: string, signal?: AbortSignal): Promise<CatalogItem> {
@@ -97,7 +100,7 @@ export async function fetchSimilarFoods(recipe: RecipeDetail, k: number, signal?
 // The catalog foods nearest a catalog food: the clusterer reads only a recipe's title, so the food goes in as a recipe
 // titled by its description; the food itself is left out of its neighbours.
 export async function fetchSimilarToCatalogItem(item: CatalogItem, k: number, signal?: AbortSignal): Promise<CatalogItem[]> {
-  const recipe: RecipeDetail = { id: String(item.fdc_id), title: item.description, ingredients: item.product, instructions: [], quality_status: "catalog" };
+  const recipe: RecipeDetail = { id: String(item.fdc_id), title: item.description, ingredients: item.product, instructions: [], quality_status: "catalog", tags: item.tags };
   const items = await fetchSimilarFoods(recipe, Math.min(k + 1, MAX_SIMILAR), signal);
   return items.filter((near) => near.fdc_id !== item.fdc_id).slice(0, k);
 }

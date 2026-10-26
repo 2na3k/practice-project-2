@@ -47,14 +47,14 @@ describe("add recipe route", () => {
     expect(JSON.parse(String(create[1]?.body))).toEqual({ user_id: 7, ...RECIPE });
   });
 
-  it("passes the Data API's 501 through while saving is not implemented", async () => {
-    const detail = { detail: "Saving your own recipes is not implemented yet." };
+  it("passes the Data API's error through when it cannot save", async () => {
+    const detail = { detail: "Recipe data is unavailable." };
     vi.stubGlobal("fetch", vi.fn(async (url: URL) =>
-      url.pathname.startsWith("/api/users/") ? Response.json({ id: 7 }) : Response.json(detail, { status: 501 })));
+      url.pathname.startsWith("/api/users/") ? Response.json({ id: 7 }) : Response.json(detail, { status: 503 })));
 
     const response = await createRecipe(post("/api/recipes", { username: "demo", recipe: RECIPE }));
 
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(503);
     expect(await response.json()).toEqual(detail);
   });
 

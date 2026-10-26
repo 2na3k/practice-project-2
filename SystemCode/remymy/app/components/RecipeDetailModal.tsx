@@ -4,6 +4,7 @@ import { ArrowRight, Bookmark, Check, ChefHat, Database, LoaderCircle, X } from 
 import { useEffect, useRef, useState } from "react";
 import { RecipeLikeButtons, type RecipeRatingState } from "@/components/RecipeLikeButtons";
 import { fetchSimilarFoods, priceLabel, type CatalogItem } from "@/lib/catalog";
+import { tagText } from "@/lib/my-recipes";
 import type { RecipeDetail } from "@/lib/recipes";
 
 const SIMILAR_COUNT = 6;
@@ -66,6 +67,7 @@ export function RecipeDetailModal({ recipe, loading, error, onClose, rating, onR
               </div>
             </div>
             <div className="detail-stats"><span>{recipe.quality_status}</span><span>{recipe.ingredients.length} ingredients</span><span>{recipe.instructions.length} steps</span></div>
+            {recipe.tags.length > 0 && <div className="detail-section"><h3>Tags</h3><div className="meal-card-tags recipe-tags">{recipe.tags.map((tag) => <span key={tag}>{tagText(tag)}</span>)}</div></div>}
             <div className="detail-section"><h3>What you&apos;ll need</h3><ul className="ingredient-list">{recipe.ingredients.map((item, index) => <li key={`${item}-${index}`}><Check size={15} aria-hidden="true" />{item}</li>)}</ul></div>
             <div className="detail-section"><h3>How to make it</h3><ol className="step-list">{recipe.instructions.map((step, index) => <li key={`${step}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span>{step}</li>)}</ol></div>
             <div className="detail-section similar-section" aria-busy={!current}><h3>Similar recipes</h3>

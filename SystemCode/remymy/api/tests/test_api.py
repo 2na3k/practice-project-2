@@ -84,6 +84,7 @@ def test_detail_returns_ordered_raw_recipe_text(client):
         "ingredients": ["2 cups tomatoes", "1 tsp salt"],
         "instructions": ["Blend tomatoes.", "Season and serve."],
         "quality_status": "accepted",
+        "tags": [],
     }
 
 

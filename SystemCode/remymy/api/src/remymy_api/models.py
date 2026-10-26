@@ -10,8 +10,8 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
-
-from sqlalchemy import JSON, Boolean, CheckConstraint, Dialect, Engine, ForeignKey, Index, Text, func, text
+from enum import Enum
+from sqlalchemy import Boolean, CheckConstraint, Dialect, Engine, ForeignKey, Index, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql.elements import BindParameter, ColumnElement
 from sqlalchemy.types import TypeDecorator
@@ -82,19 +82,82 @@ class PythonLiteral(TypeDecorator[Any]):
 
 # --- recipes (schema.FOOD_SCHEMA creates the table) ---
 
-
 class RecipeEntry(Base):
-    """A recipe the app knows, of any kind, as saved recipes see it: the Food.com recipes the migration job loads, and a
-    row for each catalog food and user recipe (schema.RECIPE_SYNC). Only the columns the ORM reads are mapped; the
-    recipe routes read the rest with SQL."""
+    """A recipe the app knows, of any kind: the Food.com recipes the migration job loads, a row for each catalog food
+    (schema.RECIPE_SYNC), and the recipes users write, with their lines here too (UserRecipe holds what only those
+    have). Only the columns the ORM reads or writes are mapped; the recipe routes read the rest with SQL."""
 
     __tablename__ = "recipe"
     __table_args__ = {"info": {"created_by": "schema.FOOD_SCHEMA"}}
 
     recipe_id: Mapped[str] = mapped_column(Text, primary_key=True)
     title: Mapped[str | None] = mapped_column(Text)
+    quality_status: Mapped[str] = mapped_column(Text)
     # 'openrecipes', 'catalog' or 'user'
     kind: Mapped[str] = mapped_column(Text)
+
+    ingredients: Mapped[list[RecipeIngredientEntry]] = relationship(
+        cascade="all, delete-orphan", order_by=lambda: RecipeIngredientEntry.position)
+    instructions: Mapped[list[RecipeInstructionEntry]] = relationship(
+        cascade="all, delete-orphan", order_by=lambda: RecipeInstructionEntry.position)
+    tags: Mapped[list[RecipeTagEntry]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True, order_by=lambda: RecipeTagEntry.label)
+
+
+# The parse_status of an ingredient line kept as written, as a user's are: the recipe database's are "parsed" or
+# "partial".
+UNPARSED = "unparsed"
+
+
+def ingredient_id(recipe_id: str, position: int) -> str:
+    """An ingredient line's id, as the recipe database makes them: "openrecipes:0:ingredient:1"."""
+    return f"{recipe_id}:ingredient:{position}"
+
+
+class RecipeIngredientEntry(Base):
+    """One ingredient line of a recipe, in order from 1. schema.FOOD_SCHEMA creates the table; only the columns a
+    user's recipe fills are mapped."""
+
+    __tablename__ = "recipe_ingredient"
+    __table_args__ = {"info": {"created_by": "schema.FOOD_SCHEMA"}}
+
+    ingredient_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id"))
+    position: Mapped[int]
+    raw_text: Mapped[str] = mapped_column(Text)
+    parse_status: Mapped[str] = mapped_column(Text, default=UNPARSED)
+
+
+class RecipeInstructionEntry(Base):
+    """One instruction step of a recipe, in order from 1. schema.FOOD_SCHEMA creates the table."""
+
+    __tablename__ = "recipe_instruction"
+    __table_args__ = {"info": {"created_by": "schema.FOOD_SCHEMA"}}
+
+    recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id"), primary_key=True)
+    position: Mapped[int] = mapped_column(primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+
+
+# Where a recipe's tag comes from: the classifier suggested it and the user kept it, the user added it, or it came
+# with a Food.com recipe.
+TAG_SOURCES = ("classifier", "user", "foodcom")
+
+
+class RecipeTagEntry(Base):
+    """A tag on a recipe of any kind: those a user kept or added on their own recipe, and the Food.com recipes' own."""
+
+    __tablename__ = "recipe_tag"
+    __table_args__ = (
+        CheckConstraint("length(label) BETWEEN 1 AND 40", name="label_length"),
+        CheckConstraint(f"source IN {TAG_SOURCES}", name="source_known"),
+        # recipes by tag
+        Index("recipe_tag_by_label", "label"),
+    )
+
+    recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id", ondelete="CASCADE"), primary_key=True)
+    label: Mapped[str] = mapped_column(Text, primary_key=True)
+    source: Mapped[str] = mapped_column(Text)
 
 
 # --- users (users.SCHEMA creates app_user, user_history and saved_recipe; create_tables the rest) ---
@@ -142,27 +205,21 @@ class UserHistoryEntry(Base):
 
 
 class UserRecipe(Base):
-    """A recipe a user wrote themselves (POST /api/recipes), with the nutrients per 100 g they gave it."""
+    """What a recipe a user wrote themselves (POST /api/recipes) has beyond the other recipes: its owner, the nutrients
+    per 100 g they gave it, and when. The recipe itself is a row of recipe (kind 'user', "user-recipe:<n>") with its
+    lines in recipe_ingredient and recipe_instruction and its tags in recipe_tag, as the other recipes have them."""
 
     __tablename__ = "user_recipe"
     __table_args__ = (
-        CheckConstraint("length(title) BETWEEN 1 AND 200", name="title_length"),
-        CheckConstraint("json_type(ingredients) = 'array' AND json_array_length(ingredients) BETWEEN 1 AND 100",
-                        name="ingredients_are_lines"),
-        CheckConstraint("json_type(instructions) = 'array' AND json_array_length(instructions) <= 100",
-                        name="instructions_are_lines"),
         # a user's recipes, newest first
         Index("user_recipe_by_user", "user_id", "created_at"),
     )
     # read created_at, a server default, back in the INSERT ... RETURNING
     __mapper_args__ = {"eager_defaults": True}
 
-    user_recipe_id: Mapped[int] = mapped_column(primary_key=True)
+    recipe_id: Mapped[str] = mapped_column(ForeignKey("recipe.recipe_id", ondelete="CASCADE"), primary_key=True)
+    # the owner
     user_id: Mapped[int] = mapped_column(ForeignKey("app_user.user_id", ondelete="CASCADE"))
-    title: Mapped[str] = mapped_column(Text)
-    # one line each, in order. JSON arrays of text, like app_user.preferences: they are only ever read whole.
-    ingredients: Mapped[list[str]] = mapped_column(JSON)
-    instructions: Mapped[list[str]] = mapped_column(JSON, default=list, server_default=text("'[]'"))
     # nutrients per 100 g, a column each as in the catalog; None = not given
     protein_g: Mapped[float | None]
     fat_g: Mapped[float | None]
@@ -176,15 +233,24 @@ class UserRecipe(Base):
     created_at: Mapped[datetime] = mapped_column(UtcTimestamp, server_default=NOW)
 
     user: Mapped[AppUser] = relationship(back_populates="recipes")
-    tags: Mapped[list[UserRecipeTag]] = relationship(
-        back_populates="recipe", cascade="all, delete-orphan", passive_deletes=True,
-        order_by=lambda: UserRecipeTag.label,
-    )
+    recipe: Mapped[RecipeEntry] = relationship()
+
+    # The recipe's own fields, read through its row of recipe, so schemas.UserRecipeResponse reads them as attributes.
+    @property
+    def title(self) -> str:
+        return self.recipe.title
 
     @property
-    def recipe_id(self) -> str:
-        """Its id among the app's recipes, e.g. "user-recipe:12" (once flushed)."""
-        return f"{RECIPE_ID_PREFIX}{self.user_recipe_id}"
+    def ingredients(self) -> list[str]:
+        return [line.raw_text for line in self.recipe.ingredients]
+
+    @property
+    def instructions(self) -> list[str]:
+        return [step.text for step in self.recipe.instructions]
+
+    @property
+    def tags(self) -> list[RecipeTagEntry]:
+        return self.recipe.tags
 
     @property
     def nutrients(self) -> dict[str, float]:
@@ -198,25 +264,6 @@ class UserRecipe(Base):
             raise ValueError(f"Unknown nutrients: {', '.join(sorted(unknown))}")
         for name in NUTRIENT_COLUMNS:
             setattr(self, name, values.get(name))
-
-
-class UserRecipeTag(Base):
-    """A tag on a user's recipe: one the classifier suggested and the user kept, or one the user added."""
-
-    __tablename__ = "user_recipe_tag"
-    __table_args__ = (
-        CheckConstraint("length(label) BETWEEN 1 AND 40", name="label_length"),
-        CheckConstraint("source IN ('classifier', 'user')", name="source_known"),
-        # recipes by tag
-        Index("user_recipe_tag_by_label", "label"),
-    )
-
-    user_recipe_id: Mapped[int] = mapped_column(
-        ForeignKey("user_recipe.user_recipe_id", ondelete="CASCADE"), primary_key=True)
-    label: Mapped[str] = mapped_column(Text, primary_key=True)
-    source: Mapped[str] = mapped_column(Text)
-
-    recipe: Mapped[UserRecipe] = relationship(back_populates="tags")
 
 
 class SavedRecipe(Base):

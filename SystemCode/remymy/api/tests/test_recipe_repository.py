@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from remymy_api.db import sqlite_engine
@@ -261,10 +262,10 @@ def test_the_catalog_route_serves_one_item(repository, cache, tmp_path, monkeypa
 
 
 def foodcom_recipe(recipe_id: int, name: str, price_breakdown: str, coverage: str = "full",
-                   serving_size: str = "1 (200 g)") -> dict[str, str]:
+                   serving_size: str = "1 (200 g)", tags: str = "[]") -> dict[str, str]:
     """A foodcom_recipes.csv row: nutrients per serving (kcal; mg of sodium; g of the rest)."""
     return {
-        "recipe_id": str(recipe_id), "name": name, "description": "A long, free-text blurb.",
+        "recipe_id": str(recipe_id), "name": name, "description": "A long, free-text blurb.", "tags": tags,
         "product": '[["salmon"], ["cream"]]', "adj": '[["smoked"], []]', "verb": '[[], ["whip"]]',
         "price_breakdown": price_breakdown, "price_coverage": coverage, "servings": "4.0", "serving_size": serving_size,
         "calories (g)": "300.0", "total fat (g)": "13.0", "sugar (g)": "2.5", "sodium (g)": "408.0",
@@ -319,3 +320,40 @@ def test_without_a_foodcom_csv_the_catalog_stays_as_it_is(tmp_path, open_catalog
     repository = open_catalog(database)
     assert add_foodcom_recipes(repository.session, tmp_path / "no-foodcom.csv") == 0
     assert repository.fdc_ids() == {1}
+
+
+def test_the_foodcom_recipes_bring_their_tags_without_the_category_headers(tmp_path, monkeypatch, cache):
+    from fastapi.testclient import TestClient
+
+    from remymy_api.db import database_engine
+    from remymy_api.main import app
+
+    recipes = write_catalog(tmp_path / "foodcom.csv", [
+        foodcom_recipe(137739, "Smoked Salmon Chowder", '{"salmon": 12.5}',
+                       tags='["preparation", "60-minutes-or-less", "Soups-Stews", "seafood"]'),
+        foodcom_recipe(31490, "Breakfast Pizza", '{"egg": 4.18}', tags='["preparation", "breakfast"]'),
+        # partly priced: not added, but its tags count for which are category headers
+        foodcom_recipe(5, "Toast", '{"bread": null}', coverage="partial", tags='["preparation", "snacks"]'),
+    ])
+    monkeypatch.setenv("RECIPE_PATH", str(write_catalog(tmp_path / "catalog.csv", [food(1)])))
+    with TestClient(app) as client:
+        with Session(database_engine()) as session:
+            # stored before tags were read: a later start adds them
+            session.execute(text("INSERT INTO price_mapped_nutrients SELECT 1000031490, 'Breakfast Pizza', "
+                                 "product, item_prices, item_unit_prices, item_routes, matched_variations, "
+                                 "unpriced_items, priced_items, total_items, priced_share, items_without_unit_price, "
+                                 "adj, verb, total_price, basket_per_100, protein_g, fat_g, carb_g, energy_kcal, "
+                                 "fiber_g, sodium_mg, cholesterol_mg, satfat_g, sugars_g "
+                                 "FROM price_mapped_nutrients WHERE fdc_id = 1"))
+            session.commit()
+            assert add_foodcom_recipes(session, recipes) == 1
+            # a second start adds no tag twice
+            add_foodcom_recipes(session, recipes)
+
+        chowder = client.get(f"/api/recipe/{FOODCOM_ID_OFFSET + 137739}").json()
+        pizza = client.get(f"/api/recipe/{FOODCOM_ID_OFFSET + 31490}").json()
+        fdc_food = client.get("/api/recipe/1").json()
+    # "preparation" is on all three, so a category header
+    assert chowder["tags"] == ["60_minutes_or_less", "seafood", "soups_stews"]
+    assert pizza["tags"] == ["breakfast"]
+    assert fdc_food["tags"] == []

@@ -24,6 +24,8 @@ class RecipeDetail(BaseModel):
     ingredients: list[str]
     instructions: list[str]
     quality_status: str
+    # its tags' labels (recipe_tag), e.g. a user recipe's "dessert_sweet_treat"
+    tags: list[str] = Field(default_factory=list)
 
 
 class RecipeListResponse(BaseModel):
@@ -195,6 +197,8 @@ class Recipe(BaseModel):
     cholesterol_mg: float | None
     satfat_g: float | None
     sugars_g: float | None
+    # its tags' labels (recipe_tag): a Food.com recipe's, e.g. "60_minutes_or_less"; none for an FDC food
+    tags: list[str] = Field(default_factory=list)
 
 
 NutrientName = Literal["protein_g", "fat_g", "carb_g", "energy_kcal", "fiber_g", "sodium_mg", "cholesterol_mg",

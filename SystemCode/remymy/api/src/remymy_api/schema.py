@@ -2,12 +2,15 @@
 
 remymy.db holds everything: the Food.com recipes and FoodData Central tables the migration job loads (FOOD_SCHEMA, put
 in by merge_food_data), the users with their history and saved recipes (users.SCHEMA), and the tables only the ORM
-defines (models.create_tables): the priced catalog and the users' own recipes. Every recipe the app knows, whatever its
-kind, has a row in recipe (RECIPE_SYNC keeps the catalog's and the users' there), so saved_recipe can refer to any.
+defines (models.create_tables): the priced catalog, what the users' own recipes have beyond the others (user_recipe:
+owner, nutrients, created_at) and every recipe's tags (recipe_tag). Every recipe the app knows, whatever its kind, has a
+row in recipe, so saved_recipe can refer to any: RECIPE_SYNC keeps the catalog's there, and a user's recipe is written
+there itself, its lines in recipe_ingredient and recipe_instruction as the recipe database's are.
 
 The migration job imports FOOD_SCHEMA, FOOD_TABLES and merge_food_data from here too, so the schema has one owner."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -228,9 +231,10 @@ CREATE TABLE IF NOT EXISTS remymy_meta (
 );
 """
 
-# A catalog food or a user's recipe gets its row in recipe when it is added, and a user's recipe loses it when deleted
-# (and with it the saves of it, by saved_recipe's ON DELETE CASCADE). Run after models.create_tables, which creates
-# the tables they watch. A catalog food is never deleted: the catalog only grows.
+# A catalog food gets its row in recipe when it is added; a catalog food is never deleted: the catalog only grows. A
+# user's recipe is written to recipe with its lines (RecipeRepository.create_user_recipe), and its user_recipe row going
+# (with its user, by ON DELETE CASCADE) takes the recipe with it: its lines, its row in recipe and, by their ON DELETE
+# CASCADE, its tags and the saves of it. Run after models.create_tables, which creates the tables they watch.
 RECIPE_SYNC = """
 CREATE TRIGGER IF NOT EXISTS catalog_food_is_a_recipe
 AFTER INSERT ON price_mapped_nutrients
@@ -240,35 +244,24 @@ BEGIN
   ON CONFLICT (recipe_id) DO UPDATE SET title = excluded.title WHERE recipe.kind = 'catalog';
 END;
 
-CREATE TRIGGER IF NOT EXISTS user_recipe_is_a_recipe
-AFTER INSERT ON user_recipe
-BEGIN
-  INSERT INTO recipe (recipe_id, title, quality_status, kind)
-  VALUES ('user-recipe:' || NEW.user_recipe_id, NEW.title, 'accepted', 'user')
-  ON CONFLICT (recipe_id) DO UPDATE SET title = excluded.title WHERE recipe.kind = 'user';
-END;
-
-CREATE TRIGGER IF NOT EXISTS user_recipe_title_is_the_recipes
-AFTER UPDATE OF title ON user_recipe
-BEGIN
-  UPDATE recipe SET title = NEW.title WHERE recipe_id = 'user-recipe:' || NEW.user_recipe_id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS user_recipe_deleted_leaves_the_recipes
+CREATE TRIGGER IF NOT EXISTS user_recipe_deleted_takes_its_recipe
 AFTER DELETE ON user_recipe
 BEGIN
-  DELETE FROM recipe WHERE recipe_id = 'user-recipe:' || OLD.user_recipe_id;
+  DELETE FROM recipe_ingredient WHERE recipe_id = OLD.recipe_id;
+  DELETE FROM recipe_instruction WHERE recipe_id = OLD.recipe_id;
+  DELETE FROM recipe WHERE recipe_id = OLD.recipe_id AND kind = 'user';
 END;
 """
 
-# The rows RECIPE_SYNC would have added for the catalog foods and user recipes stored before it existed.
+# The triggers of user_recipe's old layout, which held a user's recipe whole (its title, lines as JSON arrays, and tags
+# in user_recipe_tag) and copied it to recipe.
+OLD_USER_RECIPE_TRIGGERS = ("user_recipe_is_a_recipe", "user_recipe_title_is_the_recipes",
+                            "user_recipe_deleted_leaves_the_recipes")
+
+# The rows RECIPE_SYNC would have added for the catalog foods stored before it existed.
 RECIPE_BACKFILL = """
 INSERT INTO recipe (recipe_id, title, quality_status, kind)
 SELECT CAST(fdc_id AS TEXT), description, 'accepted', 'catalog' FROM price_mapped_nutrients WHERE true
-ON CONFLICT (recipe_id) DO NOTHING;
-
-INSERT INTO recipe (recipe_id, title, quality_status, kind)
-SELECT 'user-recipe:' || user_recipe_id, title, 'accepted', 'user' FROM user_recipe WHERE true
 ON CONFLICT (recipe_id) DO NOTHING;
 """
 
@@ -329,6 +322,63 @@ def _copy_rows(connection: sqlite3.Connection, source: str, table: str, conflict
         f'ON CONFLICT ({", ".join(keys)}) {action}'
     )
     return cursor.rowcount
+
+
+def set_aside_old_user_recipes(connection: sqlite3.Connection) -> bool:
+    """Rename the old layout's user_recipe and user_recipe_tag (OLD_USER_RECIPE_TRIGGERS) to old_user_recipe and
+    old_user_recipe_tag, with their triggers and indexes dropped, so models.create_tables makes the new ones;
+    convert_old_user_recipes then moves their rows over. Returns whether there was an old layout."""
+    if "user_recipe_id" not in {row["name"] for row in _columns(connection, "main", "user_recipe")}:
+        return False
+    with connection:
+        for trigger in OLD_USER_RECIPE_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        # the new tables' indexes take these names
+        connection.execute("DROP INDEX IF EXISTS user_recipe_by_user")
+        connection.execute("DROP INDEX IF EXISTS user_recipe_tag_by_label")
+        connection.execute("ALTER TABLE user_recipe RENAME TO old_user_recipe")
+        if _columns(connection, "main", "user_recipe_tag"):
+            connection.execute("ALTER TABLE user_recipe_tag RENAME TO old_user_recipe_tag")
+    return True
+
+
+def convert_old_user_recipes(connection: sqlite3.Connection, schema: str, recipes: str, tags: str | None) -> int:
+    """Write the users' recipes of the old layout (schema.recipes, its tags in schema.tags) in the new one: each one's
+    row of recipe, by its old id "user-recipe:<user_recipe_id>" so the saves and ratings of it still hold; its lines in
+    recipe_ingredient and recipe_instruction; its user_recipe row (owner, nutrients, created_at); its tags in
+    recipe_tag. A recipe already there is left as it is, and so are those of users main does not have. Returns how many
+    there were. Runs in the caller's transaction."""
+    from .models import NUTRIENT_COLUMNS, RECIPE_ID_PREFIX, UNPARSED, ingredient_id
+
+    nutrients = ", ".join(NUTRIENT_COLUMNS)
+    rows = connection.execute(
+        f'SELECT user_recipe_id, user_id, title, ingredients, instructions, {nutrients}, created_at '
+        f'FROM "{schema}"."{recipes}" WHERE user_id IN (SELECT user_id FROM main.app_user)'
+    ).fetchall()
+    for row in rows:
+        recipe_id = f"{RECIPE_ID_PREFIX}{row['user_recipe_id']}"
+        connection.execute(
+            "INSERT INTO main.recipe (recipe_id, title, quality_status, kind) VALUES (?, ?, 'accepted', 'user') "
+            "ON CONFLICT (recipe_id) DO UPDATE SET title = excluded.title WHERE recipe.kind = 'user'",
+            (recipe_id, row["title"]))
+        connection.executemany(
+            "INSERT OR IGNORE INTO main.recipe_ingredient (ingredient_id, recipe_id, position, raw_text, parse_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(ingredient_id(recipe_id, position), recipe_id, position, line, UNPARSED)
+             for position, line in enumerate(json.loads(row["ingredients"]), start=1)])
+        connection.executemany(
+            "INSERT OR IGNORE INTO main.recipe_instruction (recipe_id, position, text) VALUES (?, ?, ?)",
+            [(recipe_id, position, step) for position, step in enumerate(json.loads(row["instructions"] or "[]"), start=1)])
+        connection.execute(
+            f"INSERT OR IGNORE INTO main.user_recipe (recipe_id, user_id, {nutrients}, created_at) "
+            f"VALUES (?, ?, {', '.join('?' for _ in NUTRIENT_COLUMNS)}, ?)",
+            (recipe_id, row["user_id"], *(row[name] for name in NUTRIENT_COLUMNS), row["created_at"]))
+        if tags:
+            connection.execute(
+                f'INSERT OR IGNORE INTO main.recipe_tag (recipe_id, label, source) '
+                f'SELECT ?, label, source FROM "{schema}"."{tags}" WHERE user_recipe_id = ?',
+                (recipe_id, row["user_recipe_id"]))
+    return len(rows)
 
 
 def has_food_data(connection: sqlite3.Connection) -> bool:
@@ -397,12 +447,10 @@ def import_legacy_users(connection: sqlite3.Connection, source: Path) -> dict[st
                     f"SELECT history_id, user_id, timestamp, {liked}, recipe_id FROM legacy.user_history "
                     "WHERE user_id IN (SELECT user_id FROM main.app_user)"
                 ).rowcount
+            # the old databases hold the users' recipes in user_recipe's old layout
             if "user_recipe" in tables:
-                counts["user_recipe"] = _copy_rows(connection, "legacy", "user_recipe", "ignore",
-                                                   "user_id IN (SELECT user_id FROM main.app_user)")
-            if "user_recipe_tag" in tables:
-                counts["user_recipe_tag"] = _copy_rows(connection, "legacy", "user_recipe_tag", "ignore",
-                                                       "user_recipe_id IN (SELECT user_recipe_id FROM main.user_recipe)")
+                counts["user_recipe"] = convert_old_user_recipes(
+                    connection, "legacy", "user_recipe", "user_recipe_tag" if "user_recipe_tag" in tables else None)
         if "app_user" in tables:
             stored = connection.execute("SELECT count(*) FROM legacy.app_user").fetchone()[0]
             if stored > counts["app_user"]:
@@ -428,8 +476,8 @@ def _mark_done(connection: sqlite3.Connection, key: str, value: str) -> None:
 def init_database() -> None:
     """Bring remymy.db up to date, as the API does at startup: its tables are created where missing; the first time, the
     old recipe and users databases are imported when they are there; then the users' data is migrated (and the demo
-    user seeded, with SEED_DEMO_USER), the catalog takes the catalog CSV's new foods, and every catalog food and user
-    recipe has its row in recipe."""
+    user seeded, with SEED_DEMO_USER), the catalog takes the catalog CSV's new foods, and every catalog food has its row
+    in recipe. Users' recipes stored in user_recipe's old layout are moved to the new one."""
     # imported here: users and the repositories import db, which imports nothing of this module's
     from .db import database_engine, database_path
     from .models import create_tables
@@ -443,8 +491,16 @@ def init_database() -> None:
         # readers (the recipe routes' plain connections) and the ORM's writers do not block each other
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(FOOD_SCHEMA + META_SCHEMA + USER_SCHEMA)
+        old_user_recipes = set_aside_old_user_recipes(connection)
         create_tables(database_engine())
         connection.executescript(RECIPE_SYNC)
+        if old_user_recipes:
+            with connection:
+                tags = "old_user_recipe_tag" if _columns(connection, "main", "old_user_recipe_tag") else None
+                moved = convert_old_user_recipes(connection, "main", "old_user_recipe", tags)
+                connection.execute("DROP TABLE IF EXISTS old_user_recipe_tag")
+                connection.execute("DROP TABLE old_user_recipe")
+            logger.info("Moved %d user recipes to the recipe tables (user_recipe's new layout).", moved)
         if not has_food_data(connection) and legacy_food_database_path().is_file():
             merge_food_data(connection, legacy_food_database_path())
         if not _done(connection, LEGACY_USERS_IMPORTED):

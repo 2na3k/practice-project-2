@@ -2376,6 +2376,11 @@ button.history-title:hover { color:var(--orange-dark); }
 button.for-you-name { padding:0; text-align:left; }
 button.for-you-name:hover { color:var(--orange-dark); }
 .catalog-descriptors { margin-top:14px; }
+/* a recipe's tags in its detail popup: the card chips, at a readable size */
+.recipe-tags { margin: 4px 0 0; }
+.recipe-tags > span { font-size: 11px; text-transform: none; }
+/* the nutrients a user gave their recipe, on its card in My recipes */
+.my-recipe-nutrients { margin: 0 0 12px; font-size: 12px; line-height: 1.4; color: #7b856d; }
 .catalog-ingredients li { align-items:flex-start; }
 .catalog-ingredients li > span { display:flex; flex-direction:column; gap:2px; }
 .catalog-ingredients small { font-size:11px; color:#7b8670; }

@@ -23,6 +23,12 @@ def get_recipe_repository(session: Annotated[Session | None, Depends(get_catalog
     return None if session is None else RecipeRepository(session)
 
 
+def get_recipe_store(session: Annotated[Session, Depends(get_db)]) -> RecipeRepository:
+    """A RecipeRepository on the request's database whether or not it holds a catalog: for writing the recipes users
+    make, which do not need one."""
+    return RecipeRepository(session)
+
+
 def get_recommender() -> Recommender | None:
     """The recommender startup loaded, or None when there was no catalog: the route answers 503 when it needs one."""
     return Recommender() if Recommender.loaded() else None
@@ -44,6 +50,7 @@ def get_clusterer() -> Clusterer:
 
 Users = Annotated[UserRepository, Depends(get_user_repository)]
 Recipes = Annotated[RecipeRepository | None, Depends(get_recipe_repository)]
+RecipeStore = Annotated[RecipeRepository, Depends(get_recipe_store)]
 Recommending = Annotated[Recommender | None, Depends(get_recommender)]
 Classifying = Annotated[FoodClassifier, Depends(get_classifier)]
 Clustering = Annotated[Clusterer, Depends(get_clusterer)]

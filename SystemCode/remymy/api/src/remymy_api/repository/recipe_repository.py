@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import threading
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from functools import cache
 from pathlib import Path
@@ -20,14 +20,25 @@ from statistics import fmean, median
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from sqlalchemy import Float, Integer, insert, select, text
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy import Float, Integer, cast, func, insert, inspect, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, contains_eager, joinedload
 
 from ..db import database_path as default_database_path, has_catalog, sqlite_engine
-from ..models import PythonLiteral, RecipeRecord
+from ..models import (
+    RECIPE_ID_PREFIX,
+    UNPARSED,
+    PythonLiteral,
+    RecipeEntry,
+    RecipeIngredientEntry,
+    RecipeInstructionEntry,
+    RecipeRecord,
+    RecipeTagEntry,
+    UserRecipe,
+    ingredient_id,
+)
 from ..recipe import DigestedRecipe
-from ..schemas import Ingredient, Recipe
+from ..schemas import Ingredient, Recipe, UserRecipeCreate
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +48,9 @@ DEFAULT_RECIPE_PATH = "/data/price_mapped_nutrients.csv"
 DEFAULT_FOODCOM_RECIPE_PATH = "/data/foodcom_recipes.csv"
 # Food.com recipe ids overlap FDC ids, so in the catalog a Food.com recipe's fdc_id is this plus its recipe_id.
 FOODCOM_ID_OFFSET = 1_000_000_000
+# A Food.com tag on more than this share of its recipes is a category header ("preparation", "course"), not a trait
+# of the recipe, and is not kept (as in recipe_clustering_foodcom.ipynb).
+FOODCOM_GENERIC_TAG_SHARE = 0.6
 # foodcom_recipes.csv nutrient column, per serving (kcal; mg of sodium; g of the rest) -> catalog column, per 100 g.
 FOODCOM_NUTRIENTS = {
     "calories (g)": "energy_kcal", "total fat (g)": "fat_g", "sugar (g)": "sugars_g", "sodium (g)": "sodium_mg",
@@ -68,6 +82,11 @@ def foodcom_recipe_path() -> Path:
 def is_foodcom_id(fdc_id: int) -> bool:
     """Whether a catalog fdc_id is a Food.com recipe's (FOODCOM_ID_OFFSET + its recipe_id) rather than an FDC food's."""
     return fdc_id >= FOODCOM_ID_OFFSET
+
+
+def foodcom_tag(tag: str) -> str:
+    """A Food.com tag as a recipe tag label: "60-minutes-or-less" -> "60_minutes_or_less", at most 40 characters."""
+    return re.sub(r"[^a-z0-9]+", "_", tag.lower()).strip("_")[:40].rstrip("_")
 
 
 def floor3(value: float) -> float:
@@ -246,7 +265,9 @@ class RecipeRepository:
 
     def foodcom_csv_to_db(self, csv_path: Path) -> int:
         """Insert foodcom_recipes.csv's fully priced recipes (foodcom_values) that the catalog does not hold yet, as
-        from_csv_to_db inserts the catalog CSV's foods; the catalog table must exist. Returns how many went in."""
+        from_csv_to_db inserts the catalog CSV's foods, and the tags of those that have none yet in recipe_tag (source
+        "foodcom", foodcom_tag's labels, the category headers on more than FOODCOM_GENERIC_TAG_SHARE of the file's
+        recipes left out). The catalog table must exist. Returns how many recipes went in."""
         # a recipe's steps or description can be longer than the csv module's default field limit
         csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
         with csv_path.open(newline="", encoding="utf-8") as file:
@@ -255,11 +276,21 @@ class RecipeRepository:
                       "serving_size", *FOODCOM_NUTRIENTS}
             if missing := needed - set(reader.fieldnames or ()):
                 raise ValueError(f"{csv_path} has no column {', '.join(sorted(missing))}")
-            rows = [values for row in reader if row["price_coverage"] == "full" and (values := foodcom_values(row))]
+            rows, tags_of, tag_counts, total = [], {}, Counter(), 0
+            for row in reader:
+                tags = json.loads(row["tags"]) if row.get("tags") else []
+                tag_counts.update(set(tags))
+                total += 1
+                if row["price_coverage"] == "full" and (values := foodcom_values(row)):
+                    rows.append(values)
+                    tags_of[values["fdc_id"]] = tags
         stored = self.fdc_ids()
         new = [values for values in rows if values["fdc_id"] not in stored]
         if new:
             self.session.execute(insert(RecipeRecord), new)
+        if self._has_tag_table():
+            self._add_foodcom_tags(tags_of, {tag for tag, count in tag_counts.items()
+                                             if count > FOODCOM_GENERIC_TAG_SHARE * total})
         self.session.commit()
         # an index built before has none of the new recipes
         with _ingredient_indexes_lock:
@@ -267,6 +298,79 @@ class RecipeRepository:
         logger.info("Catalog database %s: %d fully priced Food.com recipes inserted from %s, %d already stored.",
                     self.session.get_bind().engine.url.database, len(new), csv_path, len(rows) - len(new))
         return len(new)
+
+    def _has_tag_table(self) -> bool:
+        """Whether the database has recipe_tag: remymy.db does (models.create_tables), a catalog database made on its
+        own (init_catalog_database) does not, nor the recipe rows tags refer to."""
+        return inspect(self.session.connection()).has_table(RecipeTagEntry.__tablename__)
+
+    def _add_foodcom_tags(self, tags_of: dict[int, list[str]], generic: set[str]) -> None:
+        """The Food.com tags of the recipes (by catalog fdc_id) that have none yet, generic ones left out; the recipes
+        stored before tags were read get theirs too. Uncommitted."""
+        tagged = set(self.session.scalars(
+            select(RecipeTagEntry.recipe_id).where(RecipeTagEntry.source == "foodcom").distinct()))
+        rows = [{"recipe_id": str(fdc_id), "label": label, "source": "foodcom"}
+                for fdc_id, tags in tags_of.items() if str(fdc_id) not in tagged
+                for label in dict.fromkeys(foodcom_tag(tag) for tag in tags if tag not in generic) if label]
+        if rows:
+            self.session.execute(insert(RecipeTagEntry), rows)
+
+    def create_user_recipe(self, body: UserRecipeCreate) -> UserRecipe:
+        """Store a recipe a user wrote themselves (POST /api/recipes) as the other recipes are stored: a row of recipe
+        (kind 'user', "user-recipe:<n>", n one more than the last), its lines in recipe_ingredient and
+        recipe_instruction and its tags in recipe_tag; and its user_recipe row with the owner and the nutrients.
+        Returns it as stored, its created_at read back. The caller checks that the user exists. A failed write is rolled
+        back; when a save at the same time took the id, the next one is tried."""
+        for attempt in range(3):
+            recipe_id = f"{RECIPE_ID_PREFIX}{self._last_user_recipe_number() + 1}"
+            recipe = UserRecipe(
+                recipe_id=recipe_id, user_id=body.user_id, nutrients=body.nutrients,
+                recipe=RecipeEntry(
+                    recipe_id=recipe_id, title=body.title, quality_status="accepted", kind="user",
+                    ingredients=[RecipeIngredientEntry(ingredient_id=ingredient_id(recipe_id, position), position=position,
+                                                       raw_text=line, parse_status=UNPARSED)
+                                 for position, line in enumerate(body.ingredients, start=1)],
+                    instructions=[RecipeInstructionEntry(position=position, text=step)
+                                  for position, step in enumerate(body.instructions, start=1)],
+                    tags=[RecipeTagEntry(label=tag.label, source=tag.source) for tag in body.tags],
+                ),
+            )
+            try:
+                self.session.add(recipe)
+                self.session.commit()
+                return recipe
+            except IntegrityError:
+                self.session.rollback()
+                if attempt == 2 or self.session.get(RecipeEntry, recipe_id) is None:
+                    raise
+            except Exception:
+                self.session.rollback()
+                raise
+        raise AssertionError("unreachable")
+
+    def user_recipes(self, user_id: int) -> list[UserRecipe]:
+        """A user's own recipes, newest first, each with its row of recipe, its lines and its tags, read in one query:
+        user_recipe JOIN recipe, LEFT OUTER JOIN recipe_ingredient, recipe_instruction and recipe_tag. Each recipe
+        comes back once (unique), its lines in order and its tags by label."""
+        statement = (
+            select(UserRecipe)
+            .join(UserRecipe.recipe)
+            .where(UserRecipe.user_id == user_id)
+            .options(contains_eager(UserRecipe.recipe).options(
+                joinedload(RecipeEntry.ingredients), joinedload(RecipeEntry.instructions), joinedload(RecipeEntry.tags)))
+            .order_by(UserRecipe.created_at.desc(), UserRecipe.recipe_id.desc())
+        )
+        return list(self.session.scalars(statement).unique())
+
+    def _last_user_recipe_number(self) -> int:
+        """The n of the newest "user-recipe:<n>", 0 when there is none."""
+        number = cast(func.substr(RecipeEntry.recipe_id, len(RECIPE_ID_PREFIX) + 1), Integer)
+        return self.session.scalar(select(func.coalesce(func.max(number), 0)).where(RecipeEntry.kind == "user"))
+
+    def tags(self, recipe_id: str) -> list[str]:
+        """The labels of a recipe's tags (any kind of recipe), in label order."""
+        return list(self.session.scalars(
+            select(RecipeTagEntry.label).where(RecipeTagEntry.recipe_id == recipe_id).order_by(RecipeTagEntry.label)))
 
     def fdc_ids(self) -> set[int]:
         return set(self.session.scalars(select(RecipeRecord.fdc_id)))

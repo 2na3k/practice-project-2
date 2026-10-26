@@ -118,12 +118,29 @@ the SQL in `users.py` (`SCHEMA`), for the JSON checks and triggers on
 on `/api/users/{username}/saved/{recipe_id}` save one or take it out; saving
 one twice keeps it as it was. Deleting a user or a recipe deletes its saves.
 
-The recipes users write themselves are ORM-only tables (`models.py`):
-`user_recipe` (ingredient and step lines as JSON arrays, a column per nutrient
-per 100 g) and `user_recipe_tag` (each tag and whether the classifier suggested
-it or the user added it). `create_tables` creates them on startup after the SQL
-schema. `POST /api/recipes` (body `UserRecipeCreate`, response
-`UserRecipeResponse`) is declared and answers `501` until it is implemented.
+A recipe a user writes is stored as the other recipes are: its row in
+`recipe` (kind `user`, id `user-recipe:<n>`), its lines in `recipe_ingredient`
+and `recipe_instruction`, and its tags in `recipe_tag`. `user_recipe` (ORM-only,
+`models.py`) holds only what the others do not have, keyed by that `recipe_id`:
+the owner (`user_id`), the nutrients per 100 g and `created_at`. `POST
+/api/recipes` (body `UserRecipeCreate`, response `UserRecipeResponse`, `201`)
+stores one through `RecipeRepository.create_user_recipe`: `404` for an unknown
+`user_id`, `503` if the write fails. It then opens and is listed like the recipe
+database's recipes (`GET /api/recipes/{id}`, `GET /api/recipes`), and can be
+saved and rated. `GET /api/users/{username}/recipes` returns the user's own
+recipes whole, newest first (`UserRecipeResponse` each, `404` for an unknown
+user): `RecipeRepository.user_recipes` reads them in one query, `user_recipe`
+joined to `recipe` and left-joined to `recipe_ingredient`, `recipe_instruction`
+and `recipe_tag`. The app's My recipes page shows them. Deleting the user deletes their recipes with all of that.
+Startup moves recipes stored in `user_recipe`'s old layout (the recipe whole in
+it, tags in `user_recipe_tag`) to this one, keeping their ids.
+
+`recipe_tag` holds every recipe's tags, with where each came from
+(`classifier`, `user` or `foodcom`). The Food.com recipes' tags come in with
+them (`add_foodcom_recipes`), as labels like `60_minutes_or_less`, leaving out
+the category headers on more than 60% of the file's recipes (`preparation`,
+`course`, ...). `GET /api/recipes/{id}` and `GET /api/recipe/{fdc_id}` return a
+recipe's tags as `tags`, a list of labels.
 
 ## Catalog
 
