@@ -26,23 +26,23 @@ sequenceDiagram
     participant D as Recipe DB (SQLite)
     participant M as Inference service (in the API)
 
-    C->>A: GET /api/recommend/{username}?top_k=10
-    A->>R: user:{username}
+    C->>A: "GET /api/recommend/{username}?top_k=10"
+    A->>R: "user:{username}"
     alt not in Redis
-        A->>U: look up user_id
-        A->>R: store user:{username} (1 day TTL)
+        A->>U: "look up user_id"
+        A->>R: "store user:{username} (1 day TTL)"
     end
-    A->>U: newest 50 history rows
-    A->>R: recommendations:{user_id}
+    A->>U: "newest 50 history rows"
+    A->>R: "recommendations:{user_id}"
     alt cache miss
-        A->>D: ingredient lines of each history recipe
-        A->>A: the likes go into a History; recipe_repository digests each recipe into a DigestedRecipe
-        A->>M: recommend(history, recipes, top_k=50)
-        M-->>A: scored items
-        A->>A: compute UserProfileOutput from the History
-        A->>R: store recommendations:{user_id} (1 day TTL)
+        A->>D: "ingredient lines of each history recipe"
+        A->>A: "the likes go into a History; recipe_repository digests each recipe into a DigestedRecipe"
+        A->>M: "recommend(history, recipes, top_k=50)"
+        M-->>A: "scored items"
+        A->>A: "compute UserProfileOutput from the History"
+        A->>R: "store recommendations:{user_id} (1 day TTL)"
     end
-    A-->>C: profile + first top_k items, or 503 when no catalog is loaded
+    A-->>C: "profile + first top_k items, or 503 when no catalog is loaded"
 ```
 
 ---
