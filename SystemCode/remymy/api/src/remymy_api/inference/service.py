@@ -87,8 +87,8 @@ def openrecipe_items(repository: RecipeRepository, foods: list[Recipe]) -> list[
 
     A recipe is digested into the catalog foods its ingredient lines match: its product / adj / verb terms are theirs,
     its price the sum of their prices and its nutrients their mean, as in training, where a recipe's price summed its
-    ingredients' and its words were its ingredients'. Its diets are screened on every ingredient line, matched or not,
-    so a line no food matches ("bacon") still rules one out. A recipe no line of which matches is left out: there is
+    ingredients' and its words were its ingredients'. Its diets and allergens are screened on every ingredient line,
+    matched or not, so a line no food matches ("bacon") still rules one out. A recipe no line of which matches is left out: there is
     nothing to embed it by."""
     food_by_id = {food.fdc_id: food for food in foods}
     medians = nutrient_medians(foods)
@@ -107,7 +107,9 @@ def openrecipe_items(repository: RecipeRepository, foods: list[Recipe]) -> list[
                                                                                  for phrase in getattr(food, field))]
                                    for field in TEXT_COLUMNS},
                       "special_diet": {DIET_COLUMNS[diet]: not words.intersection(terms)
-                                       for diet, terms in DIET_EXCLUDES.items()}})
+                                       for diet, terms in DIET_EXCLUDES.items()},
+                      # every line, matched or not, for the allergen screen
+                      "ingredients": lines})
     return items
 
 

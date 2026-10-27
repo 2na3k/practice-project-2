@@ -45,6 +45,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import hnswlib
@@ -56,7 +57,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 
-from .model_inference_reranker_avgemb import THRESHOLD, ItemEncoder, Reranker as BaseReranker, UserEncoder
+from .model_inference_reranker_avgemb import (THRESHOLD, ItemEncoder, Reranker as BaseReranker, UserEncoder,
+                                              _lemmatizer, nutrient_scales)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,37 @@ DIET_EXCLUDES = {
     "vegetarian": MEAT_TERMS + SEAFOOD_TERMS,
     "halal": PORK_TERMS + ALCOHOL_TERMS,
     "Hinduism": BEEF_TERMS,
+}
+# The words, singular, that mark an item as holding each allergen a user can set (schemas.Allergen). An item is left
+# out when its name, product terms or ingredient lines hold any of them: a word screen, as the diets are, that errs on
+# the side of leaving out ("coconut milk" counts as milk). Whole words, not substrings: on the catalog a substring
+# would take "buckwheat" and "flourless" for wheat, "eggplant" for egg and "scalloped" potatoes for shellfish. The
+# compounds that do hold an allergen ("breaded", "milkfat", "swordfish") are listed instead.
+ALLERGEN_TERMS = {
+    "peanut": ("peanut", "groundnut"),
+    "milk": ("milk", "buttermilk", "milkfat", "cheese", "cheddar", "mozzarella", "parmesan", "ricotta", "mascarpone",
+             "cheeseburger", "cheesecake", "cheesefurter", "butter", "butterfat", "buttery", "ghee", "cream", "creamy",
+             "creamed", "creamer", "creamsicle", "yogurt", "yoghurt", "kefir", "curd", "whey", "casein", "lactose",
+             "eggnog", "pizza", "lasagna"),
+    "egg": ("egg", "eggnog", "mayonnaise", "mayo", "meringue", "albumen", "aioli"),
+    "wheat": ("wheat", "wheatena", "flour", "bread", "breaded", "breading", "breadcrumb", "cornbread", "flatbread",
+              "crispbread", "gingerbread", "pasta", "spaghetti", "macaroni", "noodle", "semolina", "couscous", "bulgur",
+              "spelt", "farro", "seitan", "cracker", "biscuit", "tortilla",
+              # dishes whose names rarely say flour but whose dough or batter holds it
+              "pizza", "crust", "pastry", "pie", "cake", "cookie", "muffin", "pancake", "waffle", "bagel", "croissant",
+              "pretzel", "bun", "dumpling", "lasagna", "ravioli"),
+    "soy": ("soy", "soya", "soybean", "soymilk", "soyburger", "tofu", "tempeh", "edamame", "miso", "tamari"),
+    "fish": ("fish", "salmon", "tuna", "cod", "codfish", "lingcod", "anchovy", "sardine", "trout", "seatrout",
+             "mackerel", "haddock", "halibut", "tilapia", "pollock", "herring", "snapper", "catfish", "whitefish",
+             "swordfish", "sablefish", "bluefish", "butterfish", "milkfish", "monkfish", "sunfish", "rockfish",
+             "tilefish", "flatfish", "wolffish", "sheefish", "gefiltefish"),
+    "shellfish": ("shellfish", "shrimp", "prawn", "crab", "lobster", "crawfish", "crayfish", "oyster", "mussel",
+                  "clam", "scallop", "squid", "cuttlefish", "octopus"),
+    "sesame": ("sesame", "tahini"),
+    "mustard": ("mustard",),
+    "celery": ("celery", "celeriac"),
+    "lupin": ("lupin", "lupine"),
+    "sulphites": ("sulphite", "sulfite", "wine"),
 }
 # A food is rich in a nutrient when it has at least this quantile of the catalog's values (per 100 g).
 RICH_QUANTILE = 0.75
@@ -349,6 +382,7 @@ class Reranker(BaseReranker):
         self.config = saved["config"]
         self.text_fields = saved["text_fields"]
         self.nutrient_columns = saved["nutrient_columns"]
+        self.nutrient_scales = nutrient_scales(saved)
         self.token_lookup = {token: index for index, token in enumerate(saved["vocabulary"])}
         self.item_mean, self.item_std = np.array(saved["item_log1p_mean"]), np.array(saved["item_log1p_std"])
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -584,6 +618,30 @@ def recipe_words(recipe):
     products = recipe.get("entities", {}).get("product", [])
     phrases = [recipe.get("name", "")] + [" ".join(phrase) if isinstance(phrase, list) else phrase for phrase in products]
     return set(re.findall(r"[a-z]+", " ".join(phrases).lower()))
+
+
+@lru_cache(maxsize=None)
+def singular(word):
+    return _lemmatizer.lemmatize(word, "n")
+
+
+def item_tokens(recipe):
+    """The singular lowercased words of an item's name, product terms and ingredient lines ("ingredients", which an
+    Open Recipe carries in full, matched to a priced food or not)."""
+    products = recipe.get("entities", {}).get("product", [])
+    phrases = ([recipe.get("name", "")] + [" ".join(phrase) if isinstance(phrase, list) else phrase for phrase in products]
+               + list(recipe.get("ingredients", ())))
+    return {singular(word) for word in re.findall(r"[a-z]+", " ".join(phrases).lower())}
+
+
+def inverted_index(recipes):
+    """{token: the rows whose item holds it, as a Roaring bitmap}: each token points at row positions in the catalog,
+    not at the items."""
+    rows = {}
+    for row, recipe in enumerate(recipes):
+        for token in item_tokens(recipe):
+            rows.setdefault(token, []).append(row)
+    return {token: BitMap(positions) for token, positions in rows.items()}
 
 
 def condition_bitmaps(recipes):
@@ -830,11 +888,12 @@ class RecipeIndex:
         self.embeddings = embeddings  # (N, d) float32, not normalized: the reranker takes them as they are.
         self.index = index
         # built from the recipes, whether the HNSW index was built or loaded: cheap, and always in step with them
-        self.tags, self.clusters, self.prices = [], [], None
+        self.tags, self.clusters, self.prices, self.token_rows = [], [], None, {}
         if recipes is not None:
             self.prices = np.array([float(recipe.get("price", 0.0)) for recipe in recipes])
             self.tags, tag_matrix = food_tags(recipes)
             self.clusters = macro_clusters(tag_matrix)
+            self.token_rows = inverted_index(recipes)
         # Structure of arrays for the exact scan: the unit embeddings by column, each dimension's values for every row
         # contiguous in memory, so scoring a bucket is one multiply-add per dimension across all its rows (SIMD). The
         # rows are stored macro-cluster by macro-cluster and tag-set group by group, so a group is one contiguous range
@@ -862,15 +921,22 @@ class RecipeIndex:
                 logger.debug("%r is not a tag of the catalog, so it does not narrow the search.", tag)
         return required, budget
 
+    def allergen_rows(self, allergies):
+        """The rows holding any of the allergies' words: the union of each word's bitmap in the inverted index."""
+        return BitMap.union(BitMap(), *(self.token_rows[term] for allergy in allergies
+                                        for term in ALLERGEN_TERMS.get(allergy, ()) if term in self.token_rows))
+
     def route(self, preferences, exclude=()):
         """Step 3.2: the rows a search under the user's preferences may return, as a Roaring bitmap, and how many
         macro-clusters were taken whole, in part or skipped; None when nothing constrains the search.
 
         A cluster whose centroid has a required tag at 0 (no member carries it) is skipped, one whose centroid has
         every required tag at 1 (every member carries them) is taken whole, and of the rest only the tag-set groups
-        carrying every required tag. The budget is then checked against each row's price."""
+        carrying every required tag. The rows holding the user's allergens come off next, then the budget is checked
+        against each row's price."""
         required, budget = self.required_tags(preferences)
-        if not required.any() and budget <= 0:
+        allergies = list(preferences.get("allergies") or [])
+        if not required.any() and budget <= 0 and not allergies:
             return None
         matching = BitMap()
         plan = {"whole": 0, "partial": 0, "skipped": 0}
@@ -888,6 +954,8 @@ class RecipeIndex:
                         matching |= rows
         if exclude:
             matching -= BitMap(int(row) for row in exclude)
+        if allergies:
+            matching -= self.allergen_rows(allergies)
         if budget > 0:
             rows = np.asarray(matching.to_array(), dtype=np.intp)
             matching = BitMap(rows[self.prices[rows] <= budget].tolist())
@@ -1174,9 +1242,10 @@ class RetrievalPipeline:
         """recipes in the reranker's input format, as inference.service.catalog_recipes makes them from the catalog."""
         reranker = Reranker(artifacts, device=device)
         # The catalog by what it holds, not by its database file's bytes: SQLite can rewrite a page without changing
-        # a food, and the API adds the CSV's new foods to that file on startup.
+        # a food, and the API adds the CSV's new foods to that file on startup. The nutrient scales the embeddings
+        # were made with count too.
         source = fingerprint(Path(artifacts) / "model.pt", Path(artifacts) / "config.json",
-                             data=json.dumps(recipes, sort_keys=True).encode())
+                             data=json.dumps([recipes, reranker.nutrient_scales], sort_keys=True).encode())
         return cls(reranker, recipes, RecipeIndex.load_or_build(reranker, recipes, index_dir, source, rebuild))
 
     def resolve_history(self, history):

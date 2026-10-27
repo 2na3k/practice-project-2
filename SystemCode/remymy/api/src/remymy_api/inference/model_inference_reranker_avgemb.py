@@ -25,18 +25,38 @@ logger = logging.getLogger(__name__)
 DEFAULT_ARTIFACTS = Path(__file__).resolve().parent / "weights" / "gru_xattn_reranker"
 THRESHOLD = 0.5  # P(positive) at or above this is classified positive, as in the notebook's metrics.
 
-# Recipes here give nutrients per serving in everyday units. The training data holds Food.com's % daily value times
-# the daily value (map_recipe_nutrients.ipynb), which is 100 × the amount, except calories: Food.com gives those in
-# kcal, not % daily value, and the notebook still multiplied them by 2000. Model column → (input key, scale).
+# Recipes here give nutrients per serving in everyday units (kcal; sodium in mg; the rest in g), as the training data
+# holds them (map_recipe_nutrients.ipynb). Model column → input key.
 NUTRIENT_INPUTS = {
-    "calories (g)": ("calories_kcal", 2000.0),
-    "total fat (g)": ("fat_g", 100.0),
-    "sugar (g)": ("sugar_g", 100.0),
-    "sodium (g)": ("sodium_mg", 100.0),
-    "protein (g)": ("protein_g", 100.0),
-    "saturated fat (g)": ("saturated_fat_g", 100.0),
-    "carbohydrates (g)": ("carbohydrates_g", 100.0),
+    "calories (g)": "calories_kcal",
+    "total fat (g)": "fat_g",
+    "sugar (g)": "sugar_g",
+    "sodium (g)": "sodium_mg",
+    "protein (g)": "protein_g",
+    "saturated fat (g)": "saturated_fat_g",
+    "carbohydrates (g)": "carbohydrates_g",
 }
+# The first training file, until 26 Oct 2026, held Food.com's % daily value times the daily value, which is 100 × the
+# amount, and calories, which Food.com gives in kcal, times 2000. The models trained on it (the GRU rerankers and the
+# first window Transformer) read their nutrients scaled so; their config.json names the price column "total_prices",
+# the later file's "total_price".
+LEGACY_NUTRIENT_SCALES = {
+    "calories (g)": 2000.0,
+    "total fat (g)": 100.0,
+    "sugar (g)": 100.0,
+    "sodium (g)": 100.0,
+    "protein (g)": 100.0,
+    "saturated fat (g)": 100.0,
+    "carbohydrates (g)": 100.0,
+}
+
+
+def nutrient_scales(saved):
+    """Each nutrient column's factor from everyday units to the units of the data a model was trained on, from its
+    config.json."""
+    if saved.get("price_column") == "total_prices":
+        return LEGACY_NUTRIENT_SCALES
+    return {column: 1.0 for column in NUTRIENT_INPUTS}
 
 # ---------------------------------------------------------------------------------------------------------------
 # Ingredient NER: GLiNER tags, then the rules of map_recipe_nutrients.ipynb split them into product / adj / verb.
@@ -279,6 +299,7 @@ class Reranker:
         self.config = saved["config"]
         self.text_fields = saved["text_fields"]  # {"product": ["n", 1], ...}: WordNet part of speech, field id.
         self.nutrient_columns = saved["nutrient_columns"]
+        self.nutrient_scales = nutrient_scales(saved)
         self.token_lookup = {token: index for index, token in enumerate(saved["vocabulary"])}
         self.item_mean, self.item_std = np.array(saved["item_log1p_mean"]), np.array(saved["item_log1p_std"])
         self.profile_mean, self.profile_std = np.array(saved["profile_mean"]), np.array(saved["profile_std"])
@@ -333,7 +354,7 @@ class Reranker:
 
     def log_numeric(self, recipe):
         """log1p [price, nutrients] of one recipe, nutrients in the training data's units."""
-        nutrients = [recipe["nutrients"][NUTRIENT_INPUTS[column][0]] * NUTRIENT_INPUTS[column][1]
+        nutrients = [recipe["nutrients"][NUTRIENT_INPUTS[column]] * self.nutrient_scales[column]
                      for column in self.nutrient_columns]
         values = [recipe["price"], *nutrients]
         return np.log1p(np.asarray(values, dtype=np.float64))
@@ -359,8 +380,9 @@ class Reranker:
     def predict(self, history, recipes):
         """P(like) of each recipe for the user who rated the recipes in history.
 
-        Every recipe needs "ingredients", "price" and "nutrients" (keys of NUTRIENT_INPUTS); history recipes also
-        need "date". Ratings in the history are not a model input. Returns one dict per recipe, in order."""
+        Every recipe needs "ingredients", "price" and "nutrients" (keyed as NUTRIENT_INPUTS names them); history
+        recipes also need "date". Ratings in the history are not a model input. Returns one dict per recipe, in
+        order."""
         if not history:
             raise ValueError("The reranker needs at least one recipe in the user's history.")
         history = sorted(history, key=lambda recipe: recipe["date"])
