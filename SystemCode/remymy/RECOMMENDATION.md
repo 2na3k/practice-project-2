@@ -36,7 +36,7 @@ sequenceDiagram
     A->>R: "recommendations:{user_id}"
     alt cache miss
         A->>D: "ingredient lines of each history recipe"
-        A->>A: "the likes go into a History; recipe_repository digests each recipe into a DigestedRecipe"
+        A->>A: "the likes go into a History recipe_repository digests each recipe into a DigestedRecipe"
         A->>M: "recommend(history, recipes, top_k=50)"
         M-->>A: "scored items"
         A->>A: "compute UserProfileOutput from the History"
