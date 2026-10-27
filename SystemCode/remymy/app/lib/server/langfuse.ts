@@ -40,6 +40,17 @@ export async function withLangfuseSpan<T>(
     : start();
 }
 
+/** Trace id of the observation active in the current async context, for attaching scores later. */
+export async function currentTraceId(): Promise<string | undefined> {
+  if (!isLangfuseEnabled()) return undefined;
+  try {
+    const tracing = (await import("@langfuse/tracing")) as { getActiveTraceId?: () => string | undefined };
+    return tracing.getActiveTraceId?.();
+  } catch {
+    return undefined;
+  }
+}
+
 export async function flushLangfuse(): Promise<void> {
   const processor = (globalThis as { __remymyLangfuseProcessor?: { forceFlush?: () => Promise<void> } }).__remymyLangfuseProcessor;
   await processor?.forceFlush?.();

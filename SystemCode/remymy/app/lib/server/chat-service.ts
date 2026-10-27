@@ -13,7 +13,8 @@ import { validBudget } from "../budget";
 import { interpretRequest, type Preferences } from "@/lib/preferences";
 import { MAX_CHAT_TEXT_CHARS, MAX_CHAT_TURNS } from "./request-guards";
 import { callMcpTool } from "./mcp-client";
-import { withLangfuseSpan } from "./langfuse";
+import { currentTraceId, withLangfuseSpan } from "./langfuse";
+import { scheduleJevEval } from "./jev-eval";
 
 export const CHAT_TIMEOUT_MS = 60_000;
 export const MAX_TOOL_TURNS = 4;
@@ -365,6 +366,19 @@ export async function runChat(
       },
     });
     span.setTraceIO?.({ output: result });
+    // Non-blocking: the JEV run is attached to this request's trace but does not delay the response.
+    scheduleJevEval(
+      {
+        request: { messages: request.messages, preferences: request.preferences },
+        response: {
+          text: result.text,
+          preferences: result.preferences,
+          recommendations: result.recommendations.map((item) => ({ id: item.meal.id, title: item.meal.title })),
+          toolsUsed: result.toolsUsed,
+        },
+      },
+      await currentTraceId(),
+    );
     return result;
   }, { asType: "agent", traceName: "remymy-agent-chat" });
 }
