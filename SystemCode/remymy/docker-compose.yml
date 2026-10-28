@@ -141,6 +141,24 @@ services:
     networks:
       - remymy
 
+  # downloads the OpenAI-GPT vocabulary that decodes PP_recipes.csv token IDs, once;
+  # it skips the download when the file is already there
+  models-vocab:
+    profiles: [recommender]
+    image: curlimages/curl:8.10.1
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        [ -s /data/raw/food-com/openai-gpt-vocab.json ] ||
+        curl -fsSL --retry 3 -o /data/raw/food-com/openai-gpt-vocab.json
+        https://huggingface.co/openai-community/openai-gpt/resolve/main/vocab.json
+    volumes:
+      - "${DATA_DIR:-./data}/raw/food-com:/data/raw/food-com"
+    networks:
+      - remymy
+
   models:
     profiles: [recommender]
     build:
@@ -157,6 +175,9 @@ services:
       PORT: 8001
       MODEL_ARTIFACT_PATH: /data/models/${MODEL_FILE:-hybrid-foodcom-bpr.npz}
       TOKEN_VOCAB_PATH: /data/raw/food-com/openai-gpt-vocab.json
+    depends_on:
+      models-vocab:
+        condition: service_completed_successfully
     volumes:
       - "${DATA_DIR:-./data}:/data:ro"
     healthcheck:
