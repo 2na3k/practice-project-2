@@ -10,3 +10,4 @@ redis==8.1.0
 sqlalchemy==2.0.44
 torch==2.14.0
 uvicorn[standard]==0.53.0
+pynndescent<=0.5.13

@@ -259,6 +259,7 @@ services:
       context: ./langfuse-gateway
       dockerfile: Dockerfile
     image: remymy-langfuse-gateway:dev
+    user: "0:0"
     restart: unless-stopped
     depends_on:
       langfuse-web:
