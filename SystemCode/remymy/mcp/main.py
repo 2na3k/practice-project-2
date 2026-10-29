@@ -22,7 +22,7 @@ from eval.evaluation import save_evaluation
 from eval.review_api import grades_post, review_get
 from features.screens import (
     DAIRY_TERMS, EGG_TERMS, HALAL_BLOCKED_TERMS, MEAT_TERMS,
-    SEAFOOD_TERMS, VEGAN_EXTRA_TERMS, has_any_term, normalize,
+    SEAFOOD_TERMS, VEGAN_EXTRA_TERMS, has_any_term, normalize, _term_re,
 )
 from core.config import pool_size
 
