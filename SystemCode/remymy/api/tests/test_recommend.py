@@ -397,27 +397,28 @@ def test_the_recommender_is_built_on_the_databases_catalog(tmp_path, monkeypatch
     assert load_recommender().fdc_ids == {1, 2}
 
 
-def test_the_recommendations_are_refreshed_once_more_than_ten_ratings_are_counted(stores, models, repository, cache):
+def test_the_recommendations_are_refreshed_once_more_than_the_refresh_count_of_ratings_is_counted(stores, models, repository, cache):
     alice = seed_alice(stores)
     recommendations = f"recommendations:{alice}"
     ratings = f"number_of_ratings:{alice}"
 
     with TestClient(app) as client:
         client.get("/api/recommend/alice", params={"top_k": 3})
-        for like in [False, True] * 5:
+        for number in range(RATINGS_BEFORE_REFRESH):
+            like = number % 2 == 1
             assert client.put("/api/recipes/175237/rating", params={"user_id": alice, "like": like}).status_code == 200
-        # ten ratings, likes and dislikes alike, each counted and each keeping the count a day from then
+        # RATINGS_BEFORE_REFRESH ratings, likes and dislikes alike, each counted and each keeping the count a day from then
         counted = int(cache.store[ratings]), cache.ttls[ratings]
         still_cached = recommendations in cache.store
         client.get("/api/recommend/alice", params={"top_k": 3})
         calls_before_refresh = len(models.calls)
         client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": True})
-        # the eleventh drops the recommendations and the count
+        # one more drops the recommendations and the count
         refreshed = recommendations not in cache.store and ratings not in cache.store
         client.get("/api/recommend/alice", params={"top_k": 3})
         client.put("/api/recipes/168516/rating", params={"user_id": alice, "like": False})
 
-    assert counted == (10, 86400)
+    assert counted == (RATINGS_BEFORE_REFRESH, 86400)
     assert still_cached and calls_before_refresh == 1
     assert refreshed
     assert len(models.calls) == 2
