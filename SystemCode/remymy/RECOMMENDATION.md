@@ -232,11 +232,17 @@ For each recommendation (one at a time) it:
 3. Turns every food of each entry's recipe into a history item with that
    entry's date and its like as a rating on the model's 0–5 scale: 5 liked, 0
    not (training counted 3 to 5 as liked).
-4. Averages the history items' normalized embeddings into one query vector and
-   retrieves the 100 nearest catalog foods, excluding the history itself. When
+4. Clusters the liked history items (3 to 5 on the model's scale) by cosine
+   distance into interests (average linkage, cut at 0.5), since one average of
+   the whole history would land between the user's tastes. The 100 nearest
+   catalog foods are split over the 3 largest interests by size, each retrieved
+   with the mean of its items' normalized embeddings, excluding the history
+   itself and with no food twice. Disliked items make no interest, so a user
+   who has liked nothing gets no recommendations. When
    the user's preferences set a diet or a budget, only foods meeting both can
    come back (the preferred nutrient does not filter), found by cluster-first routing
-   ([`inference/recommender.MD`](api/src/remymy_api/inference/recommender.MD)):
+   ([`inference/recommender.MD`](api/src/remymy_api/inference/recommender.MD)),
+   once for all the interests:
    - At startup, each food gets a tag for each diet it passes (vegetarian,
      halal, Hinduism), and the foods' tag sets are clustered agglomeratively
      by Jaccard distance into 6 macro-clusters, each a Roaring bitmap of its

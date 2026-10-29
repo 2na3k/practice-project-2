@@ -117,6 +117,44 @@ On the 10,658-food catalog a scan is one or two buckets, so threads do not pay t
 - **Ties at the cut.** Jaccard distances are ratios of small counts and often land exactly on the threshold, so a
   small tolerance stops float rounding from deciding which side a merge falls.
 
+## 9. Multi-interest queries
+
+- **One mean misses.** A user's liked recipes sit far apart: the median cosine between two of them is 0.41. Their
+  mean lands between their tastes, near none of them.
+- **Cluster the liked history.** The recipes a user liked (rated 3 or more, the reranker's training label) are
+  clustered by cosine distance with average linkage (the same `average_linkage` as the tags), cut at 0.5. The 3
+  largest clusters are the user's interests, and each searches with the mean of its recipes. This clusters the
+  user's history, not the catalog: the catalog is still routed by tags (see "What the measurements changed", 2).
+- **Liked recipes only, in every approach.** A disliked recipe makes no interest: a cluster of them would search
+  for more of what the user dislikes. The normal approach takes only the liked recipes too: a cut of 2, the largest
+  cosine distance, keeps them all in one interest, one mean of them (`--interest-threshold 2`). A user who liked
+  nothing gets no recommendations: searching near what they disliked would bring more of it, and the reranker could
+  not tell, as it reads ratings centered on the user's mean, all 0 then. Disliked recipes still count in the
+  near-duplicate check and in the reranker.
+- **Candidates split by size,** by largest remainder: 100 over interests of 3, 1 and 1 recipes is 60, 20 and 20.
+- **Routed once, none twice.** The constraints are routed once for every interest (`search_many`), and each
+  interest's search leaves out the rows the larger ones returned, so the 100 candidates stay distinct.
+- **Near-duplicates per interest.** The bucket ranges rely on cosines to one query, so each interest's candidates
+  are bucketed by their cosine to its own embedding.
+
+**Measured** (the last liked recipe of 737 Food.com users of the catalog left out, each with 3+ earlier ratings
+there; is it among the 100 candidates?):
+
+| Query | Held-out recipe retrieved |
+|---|---|
+| Normal approach: one mean of the liked recipes (the baseline) | 4.1% |
+| One mean of the whole history, dislikes included (the code before) | 4.1% |
+| **Up to 3 interests, cut at 0.5** | **6.5%** (+2.4 points over the baseline, 95% CI +0.7 to +4.3) |
+
+Cuts from 0.4 to 0.6 with 2 to 5 interests all gave 6.1–6.8%; 0.5 with 3 sits in the middle. Through the whole
+pipeline, the held-out recipe reached the top 10 for 0.8% of the users against 0.4% with the baseline, too few to
+tell apart: the reranker, not retrieval, limits that now. A recommendation took 3.6 ms instead of 3.2 ms (median).
+
+Taking only the liked recipes changed nothing by itself here. Of the 137 users with a disliked recipe, a median 17%
+of the history is disliked, and the two means point almost the same way (median cosine 0.979); 88 of the 137 have
+only 0-ratings, which on Food.com can be a review left without stars. The API's dislikes are explicit, so there it
+may matter more; this data cannot show it.
+
 ---
 
 ## What the measurements changed

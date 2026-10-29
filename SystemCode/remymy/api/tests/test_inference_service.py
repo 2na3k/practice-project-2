@@ -40,7 +40,7 @@ def priced_food(fdc_id: int, description: str, product: str, price: float, kcal:
     return row
 
 
-def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatch):
+def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("INDEX_DIR", str(tmp_path / "index"))
     rows = [
         priced_food(1, "Chicken breast, roasted", "chicken breast", 6.5, 165, 31),
@@ -67,3 +67,11 @@ def test_recommender_scores_the_catalog_with_the_real_model(tmp_path, monkeypatc
     assert {item["fdc_id"] for item in items}.isdisjoint({1, 2})
     assert all(0 <= item["p_like"] <= 1 for item in items)
     assert set(items[0]) == {"fdc_id", "name", "price", "p_like", "similarity"}
+
+    disliked = History(2)
+    disliked.add(UserRating(user_id=2, timestamp=datetime(2026, 9, 1, tzinfo=timezone.utc), like=False,
+                            recipe_id="openrecipes:1"))
+    # only disliked foods: nothing to retrieve by, rather than more foods like the ones disliked
+    assert recommender.recommend(disliked, {"openrecipes:1": soup}, top_k=3) == []
+    # and not because recommending failed: the service logs an error and answers [] then
+    assert "Error encountered" not in caplog.text
