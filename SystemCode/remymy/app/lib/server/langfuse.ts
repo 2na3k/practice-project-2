@@ -15,6 +15,18 @@ function isLangfuseEnabled(): boolean {
 
 const passthroughSpan: LangfuseSpan = { update: () => undefined };
 
+export async function traceCarrier(): Promise<Record<string, string> | undefined> {
+  if (!isLangfuseEnabled()) return undefined;
+  try {
+    const { propagation, context } = await import("@opentelemetry/api");
+    const carrier: Record<string, string> = {};
+    propagation.inject(context.active(), carrier);   // writes { traceparent: "00-<trace>-<span>-01" }
+    return Object.keys(carrier).length ? carrier : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function withLangfuseSpan<T>(
   name: string,
   run: (span: LangfuseSpan) => Promise<T>,
