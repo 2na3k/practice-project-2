@@ -5,8 +5,8 @@ reranker of model_training_reranker_avgemb.ipynb.
    catalog database, is embedded by the reranker's ItemEncoder, i.e. its product / adj / verb tokens concatenated with
    its standardized [price, nutrients], and the embeddings go into an HNSW index with cosine distance.
 2. Query: the user's interests. The history recipes they liked (rated 3 or more, as training labelled them) are
-   clustered by cosine distance with average linkage, and each of the MAX_INTERESTS largest clusters is one interest,
-   whose representative embedding is the average of its recipes' embeddings. One average of the whole history would
+   clustered by cosine distance with average linkage, and each cluster is one interest (the cut alone decides how
+   many), whose representative embedding is the average of its recipes' embeddings. One average of the whole history would
    land between the user's interests, near none of them. Disliked recipes make no interest, so a user who liked
    nothing gets no recommendations; a cut of 2 keeps every liked recipe in one interest, the normal approach.
 3. Retrieval: for each interest, HNSW returns the recipes closest to its embedding by cosine similarity, its share of
@@ -95,13 +95,13 @@ MAX_SIMILARITY = 0.97
 BUCKET_WIDTH = 0.1
 # Multi-interest retrieval. A user's liked recipes sit far apart (median cosine 0.41 between two of them, over the
 # Food.com users of the catalog), so one mean of them all lands between their interests, near none of them. The liked
-# recipes are clustered instead (average linkage on cosine distance, cut at INTEREST_THRESHOLD), and each of the
-# MAX_INTERESTS largest clusters retrieves its share of the candidates with its own mean. Leaving out the last liked
-# recipe of 737 Food.com users of the catalog, it was among the 100 candidates for 6.5% of them, against 4.1% with the
-# normal approach, one mean of the liked recipes (a cut of 2), and 4.1% with one mean of the whole history; cuts of
-# 0.4 to 0.6 with 2 to 5 interests gave 6.1-6.8%.
+# recipes are clustered instead (average linkage on cosine distance, cut at INTEREST_THRESHOLD), and every cluster
+# retrieves its share of the candidates with its own mean: the threshold alone decides how many clusters there are.
+# Leaving out the last liked recipe of 737 Food.com users of the catalog, the 3 largest clusters at a cut of 0.5 found
+# it among the 100 candidates for 6.5% of them, against 4.1% with the normal approach, one mean of the liked recipes
+# (a cut of 2), and 4.1% with one mean of the whole history; cuts of 0.4 to 0.6 with 2 to 5 interests gave 6.1-6.8%.
+# Every cluster, with no cap, is not measured yet.
 INTEREST_THRESHOLD = 0.5
-MAX_INTERESTS = 3
 # A history recipe is liked at this rating or more, as the reranker's training labelled them (its positive_min_rating).
 POSITIVE_MIN_RATING = 3
 # Widens the history ranges past float32 rounding in HNSW's and torch's cosines, so none is missed at a range's edge.
@@ -1392,10 +1392,10 @@ class RetrievalPipeline:
         return [(liked[members], self.user_embedding(history_emb[liked[members]])) for members in clusters]
 
     def recommend(self, user, n_candidates=100, top_k=10, mmr_lambda=MMR_LAMBDA, max_similarity=MAX_SIMILARITY,
-                  log=None, show=20, max_interests=MAX_INTERESTS, interest_threshold=INTEREST_THRESHOLD):
+                  log=None, show=20, interest_threshold=INTEREST_THRESHOLD):
         """Up to top_k of n_candidates retrieved recipes, picked by MMR over P(like) and the cosine similarity of their
-        item embeddings, in pick order. The candidates are retrieved per interest, by the max_interests largest of the
-        liked history cut at interest_threshold (2 keeps one, the normal approach); a user who liked nothing gets none.
+        item embeddings, in pick order. The candidates are retrieved per interest, every cluster of the liked history
+        cut at interest_threshold (2 keeps one, the normal approach); a user who liked nothing gets none.
         A candidate whose cosine to a history recipe or to a pick is max_similarity or more is left out, so fewer than
         top_k come back when every other candidate is that close to one. mmr_lambda = 1 with max_similarity = None
         gives the top_k by P(like), most likely first.
@@ -1437,11 +1437,10 @@ class RetrievalPipeline:
                 f"{str(recipe.get('name', ''))[:48]:<48} {str(recipe.get('rating', '-')):>6} {rating:>12.3f} "
                 f"{window:>6} {emb.norm():>6.2f}")
 
-        found = self.interests(history, history_emb, interest_threshold)
-        interests = found[:max_interests]
+        interests = self.interests(history, history_emb, interest_threshold)
         log(f"\n=== Step 2. Interests: the liked history recipes (rating >= {self.liked_rating():g}) clustered by cosine "
-            f"distance, average linkage cut at {interest_threshold:g}: {len(found)} interests, the {len(interests)} "
-            f"largest kept; each one's representative embedding is the mean of its recipes' L2-normalized ones ===")
+            f"distance, average linkage cut at {interest_threshold:g}: {len(interests)} interests; each one's "
+            f"representative embedding is the mean of its recipes' L2-normalized ones ===")
         if not interests:
             log("  no liked recipe, so nothing to retrieve by")
             return []
@@ -1607,8 +1606,6 @@ def main():
     parser.add_argument("--max-similarity", type=float, default=MAX_SIMILARITY,
                         help="a candidate whose cosine to a history recipe or to a recommendation is this or more is "
                              "left out; 2 turns it off")
-    parser.add_argument("--max-interests", type=int, default=MAX_INTERESTS,
-                        help="clusters of the liked history that each retrieve their share of the candidates")
     parser.add_argument("--interest-threshold", type=float, default=INTEREST_THRESHOLD,
                         help="cosine distance at which the liked history is cut into interests; 2 keeps them all in "
                              "one, the normal approach (one mean of the liked recipes)")
@@ -1637,7 +1634,7 @@ def main():
         return
     user = json.loads(args.user.read_text())
     results = pipeline.recommend(user, args.candidates, args.top_k, args.mmr_lambda, args.max_similarity,
-                                 log=None if args.quiet else print, show=args.show, max_interests=args.max_interests,
+                                 log=None if args.quiet else print, show=args.show,
                                  interest_threshold=args.interest_threshold)
     print_recommendations(user, results)
     if args.output:

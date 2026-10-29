@@ -241,7 +241,7 @@ For each recommendation (one at a time) it:
 4. Clusters the liked history items (3 to 5 on the model's scale) by cosine
    distance into interests (average linkage, cut at 0.5), since one average of
    the whole history would land between the user's tastes. The 100 nearest
-   catalog foods are split over the 3 largest interests by size, each retrieved
+   catalog foods are split over all the interests by size, each retrieved
    with the mean of its items' normalized embeddings, excluding the history
    itself and with no food twice. Disliked items make no interest, so a user
    who has liked nothing gets no recommendations. When

@@ -122,8 +122,9 @@ On the 10,658-food catalog a scan is one or two buckets, so threads do not pay t
 - **One mean misses.** A user's liked recipes sit far apart: the median cosine between two of them is 0.41. Their
   mean lands between their tastes, near none of them.
 - **Cluster the liked history.** The recipes a user liked (rated 3 or more, the reranker's training label) are
-  clustered by cosine distance with average linkage (the same `average_linkage` as the tags), cut at 0.5. The 3
-  largest clusters are the user's interests, and each searches with the mean of its recipes. This clusters the
+  clustered by cosine distance with average linkage (the same `average_linkage` as the tags), cut at 0.5. Every
+  cluster is one of the user's interests, with no cap on how many: the cut alone decides, and each searches with the
+  mean of its recipes. This clusters the
   user's history, not the catalog: the catalog is still routed by tags (see "What the measurements changed", 2).
 - **Liked recipes only, in every approach.** A disliked recipe makes no interest: a cluster of them would search
   for more of what the user dislikes. The normal approach takes only the liked recipes too: a cut of 2, the largest
@@ -146,7 +147,8 @@ there; is it among the 100 candidates?):
 | One mean of the whole history, dislikes included (the code before) | 4.1% |
 | **Up to 3 interests, cut at 0.5** | **6.5%** (+2.4 points over the baseline, 95% CI +0.7 to +4.3) |
 
-Cuts from 0.4 to 0.6 with 2 to 5 interests all gave 6.1–6.8%; 0.5 with 3 sits in the middle. Through the whole
+Cuts from 0.4 to 0.6 with 2 to 5 interests all gave 6.1–6.8%; 0.5 with 3 sits in the middle. The cap of 3 is now
+removed, so every cluster at the 0.5 cut retrieves; that setting is not measured yet. Through the whole
 pipeline, the held-out recipe reached the top 10 for 0.8% of the users against 0.4% with the baseline, too few to
 tell apart: the reranker, not retrieval, limits that now. A recommendation took 3.6 ms instead of 3.2 ms (median).
 
