@@ -1066,6 +1066,18 @@ class RecipeIndex:
             found.append(results)
         return found
 
+    def random_rows(self, k, conditions=None, exclude=(), seed=None):
+        """Up to k rows in a random order that seed fixes (the same seed, the same order), the first ones the
+        conditions (the user's preferences) allow, as route() finds them for a search, the rows in exclude left out."""
+        allowed = np.ones(len(self.fdc_ids), dtype=bool)
+        routed = self.route(conditions or {}, exclude) if self.clusters else None
+        if routed is not None:
+            allowed[:] = False
+            allowed[np.asarray(routed[0].to_array(), dtype=np.intp)] = True
+        allowed[np.fromiter(exclude, dtype=np.intp)] = False
+        order = np.random.default_rng(seed).permutation(len(self.fdc_ids))
+        return order[allowed[order]][:k].tolist()
+
     def masked_hnsw(self, query, matching, n, ef):
         """The n nearest of the matching rows by HNSW, bitset masking the rest: its filter admits a row only when the
         Roaring bitmap holds it. None when the search cannot reach n of them."""
@@ -1286,6 +1298,15 @@ class RetrievalPipeline:
     def holds(self, item_id):
         """Whether the item (a food's fdc_id or a recipe's id) is one the pipeline recommends from."""
         return item_key(item_id) in self.row_of
+
+    def random_items(self, k, preferences=None, exclude=(), seed=None):
+        """Cold start, before the model recommends: up to k items in a random order that seed fixes, the ones the
+        preferences' diet, allergies and budget allow, the items in exclude (their ids) left out; each as
+        {"fdc_id", "name", "price"}."""
+        rows = self.recipe_index.random_rows(k, dict(preferences or {}),
+                                             {self.row_of[item_key(item_id)] for item_id in exclude
+                                              if self.holds(item_id)}, seed)
+        return [{key: self.recipes[row][key] for key in ("fdc_id", "name", "price")} for row in rows]
 
     @classmethod
     def from_recipes(cls, recipes, artifacts=DEFAULT_ARTIFACTS, index_dir=DEFAULT_INDEX_DIR, rebuild=False,

@@ -2220,6 +2220,7 @@ img {
 .for-you-item-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px; }
 .for-you .like-button, .for-you .save-button { width:26px; height:26px; }
 .for-you-actions, .meal-card-actions { display:flex; align-items:center; flex-shrink:0; gap:5px; }
+.for-you-actions { margin-left:auto; }
 .for-you-note { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:11px; line-height:1.6; color:#7c8c69; }
 .for-you-note.is-error { color:#a25236; }
 .for-you-note button { display:inline-flex; align-items:center; gap:5px; padding:4px 0; font-size:11px; font-weight:600; color:#a05235; text-decoration:underline; text-underline-offset:3px; }

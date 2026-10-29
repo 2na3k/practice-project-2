@@ -33,14 +33,19 @@ sequenceDiagram
         A->>R: "store user:{username} (1 day TTL)"
     end
     A->>U: "newest 50 history rows"
-    A->>R: "recommendations:{user_id}"
-    alt cache miss
-        A->>D: "ingredient lines of each history recipe"
-        A->>A: "the likes go into a History recipe_repository digests each recipe into a DigestedRecipe"
-        A->>M: "recommend(history, recipes, top_k=50)"
-        M-->>A: "scored items"
-        A->>A: "compute UserProfileOutput from the History"
-        A->>R: "store recommendations:{user_id} (1 day TTL)"
+    alt 10 ratings or fewer (cold start)
+        A->>M: "random_items(history, top_k=50, preferences)"
+        M-->>A: "random items the preferences allow, rated ones left out (not cached)"
+    else more than 10 ratings
+        A->>R: "recommendations:{user_id}"
+        alt cache miss
+            A->>D: "ingredient lines of each history recipe"
+            A->>A: "the likes go into a History recipe_repository digests each recipe into a DigestedRecipe"
+            A->>M: "recommend(history, recipes, top_k=50)"
+            M-->>A: "scored items"
+            A->>A: "compute UserProfileOutput from the History"
+            A->>R: "store recommendations:{user_id} (1 day TTL)"
+        end
     end
     A-->>C: "profile + first top_k items, or 503 when no catalog is loaded"
 ```
@@ -298,7 +303,8 @@ For each recommendation (one at a time) it:
 - **Guest users:** there is no seeded user. `POST /api/guests` creates a
   guest (`guest-<32 hex digits>`); the app makes one per browser through its
   `/api/guest` route and keeps it in a cookie. A new guest has no history, so it
-  gets no profile and no recommendations until it rates recipes.
+  gets no profile, and random foods its preferences allow until it has rated
+  more than 10 items (see [cold start](#get-apirecommendusername)).
 
 ### Data API endpoints (port 8002)
 
@@ -309,7 +315,7 @@ For each recommendation (one at a time) it:
 | GET | `/api/recipes` | `q` (optional, max 200 characters), `limit` 1–100 (default 20), `offset` ≥ 0 | Paged recipe summaries. `q` searches titles and ingredient lines, case-insensitive |
 | GET | `/api/recipes/{recipe_id}` | none | Title, ingredient lines, instruction steps; 404 if unknown |
 | GET | `/api/recipe/{fdc_id}` | none | One item of the priced catalog (`Recipe`): its ingredients with their FairPrice pack prices and sizes, and nutrients per 100 g; 404 if unknown, 503 without a catalog |
-| GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods |
+| GET | `/api/recommend/{username}` | `top_k` 1–50 (default 10) | Buying profile and recommended foods: the model's once the user has rated more than 10 items, random ones their preferences allow before |
 | POST | `/api/guests` | none | A new guest user (`201`), `guest-<32 hex digits>` |
 | GET | `/api/users/{username}` | none | The user's `id`, `username` and `preferences`; 404 if unknown |
 | GET | `/api/users/{username}/history` | `limit` 1–200 (default 50) | The user's history, newest first: each rated recipe or catalog food's `recipe_id`, `kind` (`recipe` or `food`), `title` (`null` when its database lacks it), `like` and `timestamp`; 404 if unknown |
@@ -349,7 +355,8 @@ database, rounded:
     {"id": "169286", "title": "Spinach, canned, regular pack, drained solids", "score": 0.795},
     {"id": "168916", "title": "Pasta, whole grain, 51% whole wheat, remaining unenriched semolina, cooked", "score": 0.784},
     {"id": "2709617", "title": "Spinach, canned, cooked, no added fat", "score": 0.782}
-  ]
+  ],
+  "source": "model"
 }
 ```
 
@@ -362,8 +369,21 @@ lines (see [Limitations](#limitations)).
   It is `null` when no ingredient in the history matched a priced food.
 - **`items`:** catalog foods, not recipes. `id` is the FDC id, `title` the FDC
   description, and `score` the model's P(like), highest first.
-- **Unknown user, or no history:** `{"profile": null, "items": []}` with status
-  200.
+- **`source`:** `"model"` when the model ranked the items, `"random"` at cold
+  start.
+- **Cold start:** until the user has rated more than 10 items
+  (`RATINGS_BEFORE_REFRESH` in [`cache.py`](api/src/remymy_api/cache.py), the
+  count at which cached recommendations refresh), the items are random catalog
+  foods, not the model's, with `source` `"random"` and each `score` 0. With
+  preferences set, only the foods their diet, allergies and budget allow come
+  back, filtered by the same routing the model's retrieval uses; foods the user
+  rated are left out. Each user has their own random order, fixed by their user
+  id, so the picks stay the same from one request to the next, and a food they
+  rate makes way for the next one. These picks are not cached, so the model
+  recommends from the 11th rating on. The profile is the history's, as with the
+  model.
+- **Unknown user:** `{"profile": null, "items": [], "source": "model"}` with
+  status 200.
 - **Errors:**
   - 503 `Recommendations are unavailable: the food catalog is not loaded.` when
     the API started with neither the catalog CSV nor the catalog database.

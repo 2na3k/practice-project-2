@@ -152,6 +152,7 @@ class RecommendedRecipe(BaseModel):
 
     id: str
     title: str
+    # the model's P(like); 0 for a random pick (source "random"), which no model scored
     score: float
 
 class RecommendationResponse(BaseModel):
@@ -159,6 +160,9 @@ class RecommendationResponse(BaseModel):
 
     profile: UserProfileOutput | None
     items: list[RecommendedRecipe]
+    # "model" when the model ranked the items for the user; "random" at cold start, until the user has rated more than
+    # cache.RATINGS_BEFORE_REFRESH items: random items their preferences allow
+    source: Literal["model", "random"] = "model"
 
 class ItemPrice(BaseModel):
     model_config = ConfigDict(extra="forbid")

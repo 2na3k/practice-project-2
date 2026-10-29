@@ -12,13 +12,24 @@ describe("recommendation API contract", () => {
   });
 
   it("accepts a user with no history yet", () => {
-    expect(parseRecommendations({ profile: null, items: [] })).toEqual({ profile: null, items: [] });
+    expect(parseRecommendations({ profile: null, items: [], source: "model" })).toEqual({ profile: null, items: [], source: "model" });
+  });
+
+  it("accepts random picks for a profile the model does not recommend for yet", () => {
+    const result = parseRecommendations({ profile: null, items: [{ id: "175237", title: "Beans, black, cooked", score: 0 }], source: "random" });
+    expect(result.source).toBe("random");
+    expect(result.items[0].id).toBe("175237");
+  });
+
+  it("takes picks without a source for the model's", () => {
+    expect(parseRecommendations({ profile: null, items: [] }).source).toBe("model");
   });
 
   it("rejects fields with the wrong shape", () => {
     expect(() => parseRecommendations({ profile: null, items: [{ id: 167516, title: "Waffles", score: 0.8 }] })).toThrow();
     expect(() => parseRecommendations({ profile: { user_id: 1, avg_price: "4.2", avg_nutrient_values: {} }, items: [] })).toThrow();
     expect(() => parseRecommendations({ items: [] })).toThrow();
+    expect(() => parseRecommendations({ profile: null, items: [], source: "popular" })).toThrow();
   });
 });
 
