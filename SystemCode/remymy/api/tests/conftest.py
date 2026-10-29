@@ -75,25 +75,28 @@ def cache(monkeypatch) -> FakeCache:
 
 
 class FakeRecommender:
-    """Stands in for inference.service.Recommender, recording what each recommend and random_items call was given."""
+    """Stands in for inference.service.Recommender, recording what each recommend and cold_start_items call was
+    given."""
 
     def __init__(self) -> None:
         self.handler: Callable[[History, Mapping[str, DigestedRecipe], int], list[dict]] = (
             lambda history, recipes, top_k: []
         )
         self.calls: list[dict] = []
-        # what random_items answers at cold start
-        self.random: list[dict] = []
-        self.random_calls: list[dict] = []
+        # what cold_start_items answers
+        self.cold_start: list[dict] = []
+        self.cold_start_calls: list[dict] = []
 
     def recommend(self, history: History, recipes: Mapping[str, DigestedRecipe], top_k: int,
                   preferences: Mapping | None = None) -> list[dict]:
         self.calls.append({"history": history, "recipes": recipes, "top_k": top_k, "preferences": preferences})
         return self.handler(history, recipes, top_k)
 
-    def random_items(self, history: History, top_k: int, preferences: Mapping | None = None) -> list[dict]:
-        self.random_calls.append({"history": history, "top_k": top_k, "preferences": preferences})
-        return list(self.random)
+    def cold_start_items(self, history: History, top_k: int, preferences: Mapping | None = None,
+                         rating_counts: Mapping[str, int] | None = None) -> list[dict]:
+        self.cold_start_calls.append({"history": history, "top_k": top_k, "preferences": preferences,
+                                      "rating_counts": rating_counts})
+        return list(self.cold_start)
 
 
 @pytest.fixture(autouse=True)

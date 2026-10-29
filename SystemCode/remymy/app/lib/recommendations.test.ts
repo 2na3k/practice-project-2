@@ -15,9 +15,9 @@ describe("recommendation API contract", () => {
     expect(parseRecommendations({ profile: null, items: [], source: "model" })).toEqual({ profile: null, items: [], source: "model" });
   });
 
-  it("accepts random picks for a profile the model does not recommend for yet", () => {
-    const result = parseRecommendations({ profile: null, items: [{ id: "175237", title: "Beans, black, cooked", score: 0 }], source: "random" });
-    expect(result.source).toBe("random");
+  it("accepts the most rated picks for a profile the model does not recommend for yet", () => {
+    const result = parseRecommendations({ profile: null, items: [{ id: "175237", title: "Beans, black, cooked", score: 0 }], source: "popular" });
+    expect(result.source).toBe("popular");
     expect(result.items[0].id).toBe("175237");
   });
 
@@ -29,7 +29,7 @@ describe("recommendation API contract", () => {
     expect(() => parseRecommendations({ profile: null, items: [{ id: 167516, title: "Waffles", score: 0.8 }] })).toThrow();
     expect(() => parseRecommendations({ profile: { user_id: 1, avg_price: "4.2", avg_nutrient_values: {} }, items: [] })).toThrow();
     expect(() => parseRecommendations({ items: [] })).toThrow();
-    expect(() => parseRecommendations({ profile: null, items: [], source: "popular" })).toThrow();
+    expect(() => parseRecommendations({ profile: null, items: [], source: "random" })).toThrow();
   });
 });
 

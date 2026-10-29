@@ -102,8 +102,8 @@ def models(recommender, repository):
 
 
 FILLER = "openrecipes:filler-"
-RANDOM = [{"fdc_id": 175237, "name": "Beans, black, cooked", "price": 2.72},
-          {"fdc_id": 168516, "name": "Cabbage, savoy, cooked", "price": 4.2}]
+POPULAR = [{"fdc_id": 175237, "name": "Beans, black, cooked", "price": 2.72},
+           {"fdc_id": 168516, "name": "Cabbage, savoy, cooked", "price": 4.2}]
 
 
 def rate_past_cold_start(stores, user_id: int) -> None:
@@ -121,21 +121,27 @@ def seed_alice(stores) -> int:
     return alice.id
 
 
-def test_a_new_user_gets_random_foods_their_preferences_allow_not_the_model(stores, models, cache):
+def test_a_new_user_gets_the_most_rated_foods_their_preferences_allow_not_the_model(stores, models, cache):
     from remymy_api.schemas import Preferences
 
+    seed_alice(stores)
     bob = stores.create_user("bob", Preferences(special_diet="halal", budget=8.5))
-    models.random = RANDOM
+    stores.add_history(bob.id, "openrecipes:1", like=False)
+    carol = stores.create_user("carol")
+    models.cold_start = POPULAR
 
     with TestClient(app) as client:
-        response = client.get("/api/recommend/bob", params={"top_k": 1})
+        response = client.get("/api/recommend/carol", params={"top_k": 1})
+        client.get("/api/recommend/bob")
 
     assert response.status_code == 200
     assert response.json() == {"profile": None, "items": [{"id": "175237", "title": "Beans, black, cooked",
-                                                           "score": 0.0}], "source": "random"}
-    (call,) = models.random_calls
-    assert (call["preferences"]["special_diet"], call["preferences"]["budget"]) == ("halal", 8.5)
-    assert call["history"].user_id == bob.id and len(call["history"]) == 0
+                                                           "score": 0.0}], "source": "popular"}
+    first, second = models.cold_start_calls
+    # how many users rated each item, liked or not: alice and bob both rated openrecipes:1
+    assert first["rating_counts"]["openrecipes:1"] == 2 and first["rating_counts"]["openrecipes:2"] == 1
+    assert first["history"].user_id == carol.id and len(first["history"]) == 0
+    assert (second["preferences"]["special_diet"], second["preferences"]["budget"]) == ("halal", 8.5)
     assert models.calls == []
     # not cached: the model takes over as soon as the history is past cold start
     assert f"recommendations:{bob.id}" not in cache.store
@@ -144,31 +150,31 @@ def test_a_new_user_gets_random_foods_their_preferences_allow_not_the_model(stor
 def test_cold_start_reports_the_historys_profile_and_hands_its_ratings_over(stores, models, cache):
     alice = stores.create_user("alice")
     stores.add_history(alice.id, "openrecipes:1", like=True)
-    models.random = RANDOM
+    models.cold_start = POPULAR
 
     with TestClient(app) as client:
         body = client.get("/api/recommend/alice").json()
 
-    assert body["source"] == "random"
+    assert body["source"] == "popular"
     # tomatoes 2.0 and salt 1.0, as the model's recommendations would report it
     assert body["profile"]["avg_price"] == pytest.approx(1.5)
-    (call,) = models.random_calls
-    # the rated recipe goes over for random_items to leave out
+    (call,) = models.cold_start_calls
+    # the rated recipe goes over for cold_start_items to leave out
     assert [(entry.recipe_id, entry.like) for entry in call["history"]] == [("openrecipes:1", True)]
 
 
 def test_the_model_recommends_once_more_than_the_refresh_count_is_rated(stores, models, repository, cache):
     alice = stores.create_user("alice")
     rate_past_cold_start(stores, alice.id)
-    models.random = RANDOM
+    models.cold_start = POPULAR
 
     with TestClient(app) as client:
         cold = client.get("/api/recommend/alice").json()
         assert client.put("/api/recipes/175237/rating", params={"user_id": alice.id, "like": True}).status_code == 200
         warm = client.get("/api/recommend/alice").json()
 
-    # RATINGS_BEFORE_REFRESH ratings: still random; one more, and the model recommends
-    assert cold["source"] == "random" and len(models.random_calls) == 1
+    # RATINGS_BEFORE_REFRESH ratings: still the most rated; one more, and the model recommends
+    assert cold["source"] == "popular" and len(models.cold_start_calls) == 1
     assert warm["source"] == "model" and [item["id"] for item in warm["items"]] == ["167516", "175237", "168516"]
     assert len(models.calls) == 1
 
@@ -302,7 +308,7 @@ def test_unknown_user_neither_calls_the_model_nor_caches(stores, models, cache):
         response = client.get("/api/recommend/nobody")
 
     assert response.json() == {"profile": None, "items": [], "source": "model"}
-    assert models.calls == [] and models.random_calls == []
+    assert models.calls == [] and models.cold_start_calls == []
     assert cache.store == {}
 
 

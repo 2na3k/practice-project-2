@@ -1066,9 +1066,10 @@ class RecipeIndex:
             found.append(results)
         return found
 
-    def random_rows(self, k, conditions=None, exclude=(), seed=None):
-        """Up to k rows in a random order that seed fixes (the same seed, the same order), the first ones the
-        conditions (the user's preferences) allow, as route() finds them for a search, the rows in exclude left out."""
+    def cold_start_rows(self, k, conditions=None, exclude=(), counts=None, seed=None):
+        """Up to k rows, the most rated first (counts[row]: how many users rated it), the first ones the conditions
+        (the user's preferences) allow, as route() finds them for a search, the rows in exclude left out. Rows rated
+        as often, and every row without counts, go in a random order that seed fixes (the same seed, the same order)."""
         allowed = np.ones(len(self.fdc_ids), dtype=bool)
         routed = self.route(conditions or {}, exclude) if self.clusters else None
         if routed is not None:
@@ -1076,6 +1077,8 @@ class RecipeIndex:
             allowed[np.asarray(routed[0].to_array(), dtype=np.intp)] = True
         allowed[np.fromiter(exclude, dtype=np.intp)] = False
         order = np.random.default_rng(seed).permutation(len(self.fdc_ids))
+        if counts is not None:
+            order = order[np.argsort(-np.asarray(counts)[order], kind="stable")]
         return order[allowed[order]][:k].tolist()
 
     def masked_hnsw(self, query, matching, n, ef):
@@ -1299,13 +1302,17 @@ class RetrievalPipeline:
         """Whether the item (a food's fdc_id or a recipe's id) is one the pipeline recommends from."""
         return item_key(item_id) in self.row_of
 
-    def random_items(self, k, preferences=None, exclude=(), seed=None):
-        """Cold start, before the model recommends: up to k items in a random order that seed fixes, the ones the
-        preferences' diet, allergies and budget allow, the items in exclude (their ids) left out; each as
-        {"fdc_id", "name", "price"}."""
-        rows = self.recipe_index.random_rows(k, dict(preferences or {}),
-                                             {self.row_of[item_key(item_id)] for item_id in exclude
-                                              if self.holds(item_id)}, seed)
+    def cold_start_items(self, k, preferences=None, exclude=(), rating_counts=None, seed=None):
+        """Cold start, before the model recommends: up to k items, the most rated first (rating_counts: {item id: how
+        many users rated it}), the ones the preferences' diet, allergies and budget allow, the items in exclude (their
+        ids) left out; ties in a random order that seed fixes. Each as {"fdc_id", "name", "price"}."""
+        counts = np.zeros(len(self.recipes), dtype=np.int64)
+        for item_id, count in (rating_counts or {}).items():
+            if self.holds(item_id):
+                counts[self.row_of[item_key(item_id)]] = count
+        rows = self.recipe_index.cold_start_rows(k, dict(preferences or {}),
+                                                 {self.row_of[item_key(item_id)] for item_id in exclude
+                                                  if self.holds(item_id)}, counts, seed)
         return [{key: self.recipes[row][key] for key in ("fdc_id", "name", "price")} for row in rows]
 
     @classmethod

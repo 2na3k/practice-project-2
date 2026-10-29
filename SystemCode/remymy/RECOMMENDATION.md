@@ -34,8 +34,9 @@ sequenceDiagram
     end
     A->>U: "newest 50 history rows"
     alt 10 ratings or fewer (cold start)
-        A->>M: "random_items(history, top_k=50, preferences)"
-        M-->>A: "random items the preferences allow, rated ones left out (not cached)"
+        A->>U: "how many users rated each item"
+        A->>M: "cold_start_items(history, top_k=50, preferences, rating_counts)"
+        M-->>A: "most rated items the preferences allow, rated ones left out (not cached)"
     else more than 10 ratings
         A->>R: "recommendations:{user_id}"
         alt cache miss
@@ -303,8 +304,8 @@ For each recommendation (one at a time) it:
 - **Guest users:** there is no seeded user. `POST /api/guests` creates a
   guest (`guest-<32 hex digits>`); the app makes one per browser through its
   `/api/guest` route and keeps it in a cookie. A new guest has no history, so it
-  gets no profile, and random foods its preferences allow until it has rated
-  more than 10 items (see [cold start](#get-apirecommendusername)).
+  gets no profile, and the most rated foods its preferences allow until it has
+  rated more than 10 items (see [cold start](#get-apirecommendusername)).
 
 ### Data API endpoints (port 8002)
 
@@ -369,19 +370,20 @@ lines (see [Limitations](#limitations)).
   It is `null` when no ingredient in the history matched a priced food.
 - **`items`:** catalog foods, not recipes. `id` is the FDC id, `title` the FDC
   description, and `score` the model's P(like), highest first.
-- **`source`:** `"model"` when the model ranked the items, `"random"` at cold
+- **`source`:** `"model"` when the model ranked the items, `"popular"` at cold
   start.
 - **Cold start:** until the user has rated more than 10 items
   (`RATINGS_BEFORE_REFRESH` in [`cache.py`](api/src/remymy_api/cache.py), the
-  count at which cached recommendations refresh), the items are random catalog
-  foods, not the model's, with `source` `"random"` and each `score` 0. With
+  count at which cached recommendations refresh), the items are the catalog
+  foods rated by the most users (liked or not, one rating per user and item),
+  not the model's, with `source` `"popular"` and each `score` 0. With
   preferences set, only the foods their diet, allergies and budget allow come
   back, filtered by the same routing the model's retrieval uses; foods the user
-  rated are left out. Each user has their own random order, fixed by their user
-  id, so the picks stay the same from one request to the next, and a food they
-  rate makes way for the next one. These picks are not cached, so the model
-  recommends from the 11th rating on. The profile is the history's, as with the
-  model.
+  rated are left out. Foods rated by as many users, including every food no one
+  has rated yet, follow in a random order fixed by the user's id, so the picks
+  stay the same from one request to the next. These picks are not cached, so
+  the model recommends from the 11th rating on. The profile is the history's,
+  as with the model.
 - **Unknown user:** `{"profile": null, "items": [], "source": "model"}` with
   status 200.
 - **Errors:**

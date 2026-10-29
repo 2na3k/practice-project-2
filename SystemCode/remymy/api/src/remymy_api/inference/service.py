@@ -172,11 +172,13 @@ class Recommender(Singleton):
             for result in results
         ]
 
-    def random_items(self, history: History, top_k: int, preferences: Mapping | None = None) -> list[dict]:
-        """Cold start: up to top_k of the pipeline's items in a random order fixed per user (the same user, the same
-        order), the ones the preferences' diet, allergies and budget allow, the items the user rated left out."""
-        return self.pipeline.random_items(top_k, preferences, {entry.recipe_id for entry in history},
-                                          seed=history.user_id)
+    def cold_start_items(self, history: History, top_k: int, preferences: Mapping | None = None,
+                         rating_counts: Mapping[str, int] | None = None) -> list[dict]:
+        """Cold start: up to top_k of the pipeline's items, the ones rated by the most users first (rating_counts),
+        the ones the preferences' diet, allergies and budget allow, the items the user rated left out. Items rated as
+        often go in a random order fixed per user (the same user, the same order)."""
+        return self.pipeline.cold_start_items(top_k, preferences, {entry.recipe_id for entry in history},
+                                              rating_counts, seed=history.user_id)
 
 def catalog_query(food: Recipe, tags: list[str], unpriced_band: float) -> dict:
     """A catalog recipe as a clustering query, by what the catalog stores of it, as the model's training read its

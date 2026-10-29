@@ -46,16 +46,16 @@ export function RecommendationPanel({ username, onItemCount, ratings, onRate, sa
   };
 
   const loading = !result && !error;
-  // until the profile has rated enough for the model, the picks are random ones its preferences allow, unscored
-  const random = result?.source === "random";
+  // until the profile has rated enough for the model, the picks are the most rated ones its preferences allow, unscored
+  const popular = result?.source === "popular";
 
   return (
     <section className="for-you" aria-labelledby="for-you-title" aria-busy={loading}>
       <div className="for-you-header">
         <div>
           <p className="eyebrow">PICKED FOR YOU</p>
-          <h2 className="for-you-title" id="for-you-title"><ChefHat size={18} aria-hidden="true" />{random ? "A few to try" : <>Recipes you&apos;ll probably like</>}</h2>
-          <p className="for-you-caption">{random ? "Picked at random from what your settings allow. Rate what you try, and picks to your taste follow." : <>Based on the recipes you&apos;ve rated.</>}</p>
+          <h2 className="for-you-title" id="for-you-title"><ChefHat size={18} aria-hidden="true" />{popular ? "Popular to start with" : <>Recipes you&apos;ll probably like</>}</h2>
+          <p className="for-you-caption">{popular ? "The most rated picks your settings allow. Rate what you try, and picks to your taste follow." : <>Based on the recipes you&apos;ve rated.</>}</p>
         </div>
       </div>
       {error ? (
@@ -70,7 +70,7 @@ export function RecommendationPanel({ username, onItemCount, ratings, onRate, sa
               <li className="for-you-item" key={item.id}>
                 <button className="for-you-name" onClick={() => onOpen(item.id)}>{item.title}</button>
                 <div className="for-you-item-footer">
-                  {!random && <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>}
+                  {!popular && <span className="for-you-score" title="Predicted chance you'd like it">{Math.round(item.score * 100)}% match</span>}
                   <div className="for-you-actions">
                     <RecipeLikeButtons title={item.title} rating={ratings[item.id]} onRate={(like) => onRate(item.id, like)} />
                     <button
@@ -89,7 +89,7 @@ export function RecommendationPanel({ username, onItemCount, ratings, onRate, sa
           })}
         </ol>
       ) : (
-        <p className="for-you-note">{random ? "Nothing in the catalog fits your settings. Try a higher budget or fewer restrictions." : "No picks yet. They appear once the profile has rated recipes."}</p>
+        <p className="for-you-note">{popular ? "Nothing in the catalog fits your settings. Try a higher budget or fewer restrictions." : "No picks yet. They appear once the profile has rated recipes."}</p>
       )}
     </section>
   );
