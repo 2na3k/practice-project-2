@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_SECONDS = 86400
 # A user's cached recommendations are made again once they have rated more than this many items since they were
-# cached; the count lives a day from the user's latest rating.
-RATINGS_BEFORE_REFRESH = 10
+# cached; the count lives a day from the user's latest rating. Until a user has rated more than this many in all,
+# they are at cold start: the most rated items their preferences allow, not the model's (routes.get_recommendation).
+RATINGS_BEFORE_REFRESH = 5
 RATINGS_TTL_SECONDS = 86400
 
 

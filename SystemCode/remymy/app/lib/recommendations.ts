@@ -7,7 +7,7 @@ export type BuyingProfile = {
 };
 
 // A food from the priced FDC catalog (id its FDC id, all digits) or a Food.com recipe (id "openrecipes:<n>"); score
-// is the model's probability that the user likes it.
+// is the model's probability that the user likes it, 0 for a cold-start pick.
 export type RecommendedFood = {
   id: string;
   title: string;
@@ -22,6 +22,9 @@ export function isFoodId(id: string): boolean {
 export type Recommendations = {
   profile: BuyingProfile | null;
   items: RecommendedFood[];
+  // "model" when the model ranked the items for the user; "popular" until they have rated enough for it: the foods
+  // rated by the most users that their preferences allow, which no model scored
+  source: "model" | "popular";
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -46,11 +49,14 @@ function isRecommendedFood(value: unknown): value is RecommendedFood {
 export function parseRecommendations(value: unknown): Recommendations {
   if (!value || typeof value !== "object") throw new Error("Recommendation service returned an unexpected response.");
   const result = value as Partial<Recommendations>;
+  // a Data API from before cold-start picks sends no source: its picks are the model's
+  const source = result.source ?? "model";
   if (!(result.profile === null || isBuyingProfile(result.profile)) ||
-    !Array.isArray(result.items) || !result.items.every(isRecommendedFood)) {
+    !Array.isArray(result.items) || !result.items.every(isRecommendedFood) ||
+    (source !== "model" && source !== "popular")) {
     throw new Error("Recommendation service returned an unexpected response.");
   }
-  return result as Recommendations;
+  return { ...result, source } as Recommendations;
 }
 
 export async function fetchRecommendations(username: string, topK: number, signal?: AbortSignal): Promise<Recommendations> {

@@ -22,7 +22,7 @@ from .cache import (
 )
 from .dependencies import Classifying, Clustering, Recipes, RecipeStore, Recommending, Users
 from .inference.food_query import EmptyQuery, UnknownFood
-from .recommend import recommend
+from .recommend import cold_start_recommendations, recommend
 from .schema import has_food_data
 from .repository.recipe_repository import is_food_id
 from .schemas import (
@@ -239,11 +239,24 @@ def get_recommendation(
     recommender: Recommending,
     top_k: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> RecommendationResponse:
+    """The user's top_k recommendations. At cold start, until they have rated more than RATINGS_BEFORE_REFRESH items
+    (the count their cached recommendations refresh at), the items rated by the most users that their preferences
+    allow, not cached, so the model takes over as soon as the history passes it; after that the model's, cached."""
     cache = request.app.state.cache
     user_history = users.fetch_user_history(username)
-    if len(user_history) == 0:
-        logger.debug("No history for %r, so no recommendations.", username)
-        return RecommendationResponse(profile=None, items=[])
+    if len(user_history) <= RATINGS_BEFORE_REFRESH:
+        user = users.get_user(username)
+        if user is None:
+            logger.debug("No user %r, so no recommendations.", username)
+            return RecommendationResponse(profile=None, items=[])
+        if recommender is None or catalog is None:
+            logger.warning("Recommendations for user %d asked for, but no recipe is loaded.", user.id)
+            raise HTTPException(status_code=503, detail="Recommendations are unavailable: the recipe is not loaded.")
+        profile = UserProfileInput(user_id=user.id, preferences=user.preferences, history=list(reversed(user_history)))
+        recommendations = cold_start_recommendations(recommender, profile, catalog, users.rating_counts())
+        logger.debug("Cold start for user %d (%d of more than %d ratings): %d most rated foods.", user.id,
+                     len(user_history), RATINGS_BEFORE_REFRESH, len(recommendations.items))
+        return recommendations.model_copy(update={"items": recommendations.items[:top_k]})
 
     user_id = user_history[0].user_id
     recommendations = read_recommendations(cache, user_id)
