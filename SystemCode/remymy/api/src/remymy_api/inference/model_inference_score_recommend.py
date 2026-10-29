@@ -4,14 +4,20 @@ reranker of model_training_reranker_avgemb.ipynb.
 1. Index (once per model and catalog): every recipe of the catalog, the foods RecipeRepository reads from the
    catalog database, is embedded by the reranker's ItemEncoder, i.e. its product / adj / verb tokens concatenated with
    its standardized [price, nutrients], and the embeddings go into an HNSW index with cosine distance.
-2. Query: the user's representative embedding is the average of their history recipes' embeddings.
-3. Retrieval: HNSW returns the recipes closest to it by cosine similarity, the history's own recipes excluded, sorted
-   by that similarity, most similar first. Under the user's constraints (diet, budget), the search
-   is routed first (recommender.MD): the foods are clustered by their tags into macro-clusters, each a Roaring
-   bitmap of its rows; the constraints are matched against the clusters' centroids for the rows they allow, and by
-   how large a share of the catalog those are, HNSW searches them through a bitset mask or they are scanned exactly.
-4. Near-duplicates of the history: the candidates go into a dictionary of buckets by that similarity ([0.9, 1],
-   [0.8, 0.9), ...). Each history recipe gives a range of it, the similarities a recipe at cosine MAX_SIMILARITY or
+2. Query: the user's interests. The history recipes they liked (rated 3 or more, as training labelled them) are
+   clustered by cosine distance with average linkage, and each cluster is one interest (the cut alone decides how
+   many), whose representative embedding is the average of its recipes' embeddings. One average of the whole history would
+   land between the user's interests, near none of them. Disliked recipes make no interest, so a user who liked
+   nothing gets no recommendations; a cut of 2 keeps every liked recipe in one interest, the normal approach.
+3. Retrieval: for each interest, HNSW returns the recipes closest to its embedding by cosine similarity, its share of
+   the candidates (in proportion to its size), the history's own recipes and the other interests' candidates excluded;
+   together they are sorted by that similarity, most similar first. Under the user's constraints (diet, budget), the
+   search is routed first, once for all the interests (recommender.MD): the foods are clustered by their tags into
+   macro-clusters, each a Roaring bitmap of its rows; the constraints are matched against the clusters' centroids for
+   the rows they allow, and by how large a share of the catalog those are, HNSW searches them through a bitset mask or
+   they are scanned exactly.
+4. Near-duplicates of the history: each interest's candidates go into a dictionary of buckets by that similarity ([0.9,
+   1], [0.8, 0.9), ...). Each history recipe gives a range of it, the similarities a recipe at cosine MAX_SIMILARITY or
    more to that history recipe can have; the buckets the range overlaps are looked up, a window slides over their
    candidates inside the range, and the ones at cosine MAX_SIMILARITY or more to the history recipe are dropped. (The
    catalog has many near-identical recipes under different fdc_ids, e.g. the same food as patties and as crumbles.)
@@ -85,8 +91,19 @@ MMR_LAMBDA = 0.5
 # Near-duplicate cutoff (cosine): a candidate this close to a history recipe or to a pick is never recommended,
 # whatever its P(like).
 MAX_SIMILARITY = 0.97
-# Candidates are bucketed by cosine to the user embedding: [0.9, 1], [0.8, 0.9), ...
+# Candidates are bucketed by cosine to their interest's embedding: [0.9, 1], [0.8, 0.9), ...
 BUCKET_WIDTH = 0.1
+# Multi-interest retrieval. A user's liked recipes sit far apart (median cosine 0.41 between two of them, over the
+# Food.com users of the catalog), so one mean of them all lands between their interests, near none of them. The liked
+# recipes are clustered instead (average linkage on cosine distance, cut at INTEREST_THRESHOLD), and every cluster
+# retrieves its share of the candidates with its own mean: the threshold alone decides how many clusters there are.
+# Leaving out the last liked recipe of 737 Food.com users of the catalog, the 3 largest clusters at a cut of 0.5 found
+# it among the 100 candidates for 6.5% of them, against 4.1% with the normal approach, one mean of the liked recipes
+# (a cut of 2), and 4.1% with one mean of the whole history; cuts of 0.4 to 0.6 with 2 to 5 interests gave 6.1-6.8%.
+# Every cluster, with no cap, is not measured yet.
+INTEREST_THRESHOLD = 0.5
+# A history recipe is liked at this rating or more, as the reranker's training labelled them (its positive_min_rating).
+POSITIVE_MIN_RATING = 3
 # Widens the history ranges past float32 rounding in HNSW's and torch's cosines, so none is missed at a range's edge.
 RANGE_SLACK = 1e-4
 SEED = 42
@@ -1008,34 +1025,61 @@ class RecipeIndex:
         With conditions (the user's preferences), only the rows route() finds may come back (step 3.3 of
         recommender.MD): from BROAD_MATCH_SHARE of the catalog up, HNSW searches them through a bitset mask, and under
         it they are scanned exactly. When HNSW cannot reach k of them, they are scanned exactly too."""
-        log = log or (lambda *_: None)
-        query = np.asarray(query, dtype=np.float32).reshape(-1)
-        routed = self.route(conditions or {}, exclude) if self.clusters else None
-        if routed is None:
-            exclude = set(exclude)
-            # Ask for enough neighbours that k remain after dropping the excluded rows.
-            n = min(k + len(exclude), self.index.get_current_count())
-            if k <= 0 or n == 0:
-                return []
-            self.index.set_ef(max(ef, n))
-            rows, distances = self.index.knn_query(query.reshape(1, -1), k=n)
-            return [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])
-                    if row not in exclude][:k]
+        return self.search_many([query], [k], conditions, exclude, ef, log)[0]
 
-        matching, plan = routed
-        share = len(matching) / max(len(self.fdc_ids), 1)
-        n = min(k, len(matching))
-        if n <= 0:
-            results, how = [], "nothing to search"
-        elif share < BROAD_MATCH_SHARE:
-            results, how = self.scan(query, matching, n), "exact scan"
-        else:
-            results, how = self.masked_hnsw(query, matching, n, ef), "HNSW through a bitset mask"
-            if results is None:
-                results, how = self.scan(query, matching, n), "exact scan (HNSW could not reach k)"
-        log(f"  routing: {plan['whole']} macro-clusters taken whole, {plan['partial']} in part, {plan['skipped']} "
-            f"skipped of {len(self.clusters)}; {len(matching):,} matching rows ({share:.2%} of the catalog) -> {how}")
-        return results
+    def search_many(self, queries, ks, conditions=None, exclude=(), ef=HNSW_EF_SEARCH, log=None):
+        """For each query its ks[i] nearest, as search() finds them, and no row twice: a query's results leave out the
+        rows the queries before it returned. The conditions are routed once for all of them."""
+        log = log or (lambda *_: None)
+        routed = self.route(conditions or {}, exclude) if self.clusters else None
+        exclude, taken, found = set(exclude), set(), []
+        for query, k in zip(queries, ks):
+            query = np.asarray(query, dtype=np.float32).reshape(-1)
+            if routed is None:
+                left_out = exclude | taken
+                # Ask for enough neighbours that k remain after dropping the left-out rows.
+                n = min(k + len(left_out), self.index.get_current_count())
+                results = []
+                if k > 0 and n > 0:
+                    self.index.set_ef(max(ef, n))
+                    rows, distances = self.index.knn_query(query.reshape(1, -1), k=n)
+                    results = [(int(row), 1.0 - float(distance)) for row, distance in zip(rows[0], distances[0])
+                               if row not in left_out][:k]
+            else:
+                matching, plan = routed
+                if taken:
+                    matching = matching - BitMap(taken)
+                share = len(matching) / max(len(self.fdc_ids), 1)
+                n = min(k, len(matching))
+                if n <= 0:
+                    results, how = [], "nothing to search"
+                elif share < BROAD_MATCH_SHARE:
+                    results, how = self.scan(query, matching, n), "exact scan"
+                else:
+                    results, how = self.masked_hnsw(query, matching, n, ef), "HNSW through a bitset mask"
+                    if results is None:
+                        results, how = self.scan(query, matching, n), "exact scan (HNSW could not reach k)"
+                log(f"  routing: {plan['whole']} macro-clusters taken whole, {plan['partial']} in part, "
+                    f"{plan['skipped']} skipped of {len(self.clusters)}; {len(matching):,} matching rows ({share:.2%} "
+                    f"of the catalog) -> {how}")
+            taken.update(row for row, _ in results)
+            found.append(results)
+        return found
+
+    def cold_start_rows(self, k, conditions=None, exclude=(), counts=None, seed=None):
+        """Up to k rows, the most rated first (counts[row]: how many users rated it), the first ones the conditions
+        (the user's preferences) allow, as route() finds them for a search, the rows in exclude left out. Rows rated
+        as often, and every row without counts, go in a random order that seed fixes (the same seed, the same order)."""
+        allowed = np.ones(len(self.fdc_ids), dtype=bool)
+        routed = self.route(conditions or {}, exclude) if self.clusters else None
+        if routed is not None:
+            allowed[:] = False
+            allowed[np.asarray(routed[0].to_array(), dtype=np.intp)] = True
+        allowed[np.fromiter(exclude, dtype=np.intp)] = False
+        order = np.random.default_rng(seed).permutation(len(self.fdc_ids))
+        if counts is not None:
+            order = order[np.argsort(-np.asarray(counts)[order], kind="stable")]
+        return order[allowed[order]][:k].tolist()
 
     def masked_hnsw(self, query, matching, n, ef):
         """The n nearest of the matching rows by HNSW, bitset masking the rest: its filter admits a row only when the
@@ -1127,6 +1171,28 @@ class RecipeIndex:
         return [(row, similarity) for similarity, row in sorted(best, reverse=True)]
 
 
+def interest_clusters(history_unit, threshold=INTEREST_THRESHOLD):
+    """The user's interests: the rows of history_unit (L2-normalized embeddings of the liked history recipes, date
+    order) clustered by cosine distance with average linkage, cut at threshold, as each cluster's positions in it.
+    Largest first; of two as large, the one rated more recently first. A recipe rated more than once is clustered once,
+    weighted by how many times, as macro_clusters clusters a tag set. A cut of 2, the largest cosine distance, keeps
+    every recipe in one: the normal approach, one mean of them all."""
+    values, inverse, counts = np.unique(history_unit, axis=0, return_inverse=True, return_counts=True)
+    labels = (average_linkage(np.clip(1.0 - values @ values.T, 0.0, 2.0).astype(np.float64), threshold, counts)
+              if len(values) > 1 and threshold < 2 else np.zeros(len(values), dtype=np.intp))[inverse.reshape(-1)]
+    clusters = [np.flatnonzero(labels == label) for label in np.unique(labels)]
+    return sorted(clusters, key=lambda members: (-len(members), -members[-1]))
+
+
+def split_candidates(sizes, n):
+    """n candidates split over interests of these sizes, in proportion by largest remainder: the counts sum to n."""
+    share = np.asarray(sizes, dtype=np.float64) / np.sum(sizes) * n
+    counts = np.floor(share).astype(int)
+    for index in np.argsort(-(share - counts), kind="stable")[:n - counts.sum()]:
+        counts[index] += 1
+    return counts.tolist()
+
+
 def bucket_of(similarity):
     """Bucket of a cosine similarity: bucket b holds [b * BUCKET_WIDTH, (b + 1) * BUCKET_WIDTH), the top one also 1."""
     scale = round(1 / BUCKET_WIDTH)
@@ -1134,8 +1200,8 @@ def bucket_of(similarity):
 
 
 def similarity_buckets(candidates):
-    """{bucket: [(row, similarity), ...]} of (row, cosine similarity to the user embedding) candidates, each bucket's
-    most similar first."""
+    """{bucket: [(row, similarity), ...]} of (row, cosine similarity to an interest's embedding) candidates, each
+    bucket's most similar first."""
     buckets = {}
     for row, similarity in sorted(candidates, key=lambda candidate: -candidate[1]):
         buckets.setdefault(bucket_of(similarity), []).append((row, similarity))
@@ -1143,10 +1209,10 @@ def similarity_buckets(candidates):
 
 
 def history_ranges(history_similarity, max_similarity=MAX_SIMILARITY):
-    """{(position, low, high)}, one per history recipe: the cosine similarities to the user embedding that a recipe at
-    cosine max_similarity or more to that history recipe can have.
+    """{(position, low, high)}, one per history recipe: the cosine similarities to an interest's embedding that a
+    recipe at cosine max_similarity or more to that history recipe can have.
 
-    Angles between vectors obey the triangle inequality, so the angle of such a recipe to the user embedding is the
+    Angles between vectors obey the triangle inequality, so the angle of such a recipe to the embedding is the
     history recipe's ± arccos(max_similarity), 14 degrees for 0.97; the range is those angles' cosines. A fixed small
     margin would miss some: with the current model, ± 0.01 around the history recipe's similarity misses 9 of the 14
     near-duplicates in the example users' candidates."""
@@ -1221,7 +1287,7 @@ def item_key(item_id):
 
 
 class RetrievalPipeline:
-    """User profile → HNSW candidates → reranked → diversified (MMR) recommendations."""
+    """User interests → HNSW candidates of each → reranked → diversified (MMR) recommendations."""
 
     def __init__(self, reranker, recipes, recipe_index):
         if [recipe["fdc_id"] for recipe in recipes] != recipe_index.fdc_ids:
@@ -1235,6 +1301,19 @@ class RetrievalPipeline:
     def holds(self, item_id):
         """Whether the item (a food's fdc_id or a recipe's id) is one the pipeline recommends from."""
         return item_key(item_id) in self.row_of
+
+    def cold_start_items(self, k, preferences=None, exclude=(), rating_counts=None, seed=None):
+        """Cold start, before the model recommends: up to k items, the most rated first (rating_counts: {item id: how
+        many users rated it}), the ones the preferences' diet, allergies and budget allow, the items in exclude (their
+        ids) left out; ties in a random order that seed fixes. Each as {"fdc_id", "name", "price"}."""
+        counts = np.zeros(len(self.recipes), dtype=np.int64)
+        for item_id, count in (rating_counts or {}).items():
+            if self.holds(item_id):
+                counts[self.row_of[item_key(item_id)]] = count
+        rows = self.recipe_index.cold_start_rows(k, dict(preferences or {}),
+                                                 {self.row_of[item_key(item_id)] for item_id in exclude
+                                                  if self.holds(item_id)}, counts, seed)
+        return [{key: self.recipes[row][key] for key in ("fdc_id", "name", "price")} for row in rows]
 
     @classmethod
     def from_recipes(cls, recipes, artifacts=DEFAULT_ARTIFACTS, index_dir=DEFAULT_INDEX_DIR, rebuild=False,
@@ -1297,14 +1376,31 @@ class RetrievalPipeline:
         recipe weighs the same under cosine similarity."""
         return F.normalize(history_emb, dim=1).mean(0)
 
-    def recommend(self, user, n_candidates=100, top_k=10, mmr_lambda=MMR_LAMBDA, max_similarity=MAX_SIMILARITY,
-                  log=None, show=20):
-        """Up to top_k of n_candidates retrieved recipes, picked by MMR over P(like) and the cosine similarity of their
-        item embeddings, in pick order. A candidate whose cosine to a history recipe or to a pick is max_similarity or
-        more is left out, so fewer than top_k come back when every other candidate is that close to one.
-        mmr_lambda = 1 with max_similarity = None gives the top_k by P(like), most likely first.
+    def liked_rating(self):
+        """The rating from which a history recipe is liked: the reranker's training's, POSITIVE_MIN_RATING by default."""
+        return self.reranker.config.get("positive_min_rating", POSITIVE_MIN_RATING)
 
-        With log (e.g. print), each step is reported: the history, the user embedding, the HNSW candidates (the first
+    def interests(self, history, history_emb, threshold=INTEREST_THRESHOLD):
+        """The user's interests (interest_clusters, cut at threshold), largest first, each as (the positions of its
+        history recipes, its representative embedding). Only the liked recipes count, and one without a rating: none
+        when the user liked nothing, as searching near what they disliked would bring more of it."""
+        liked = np.array([position for position, recipe in enumerate(history)
+                          if recipe.get("rating") is None or recipe["rating"] >= self.liked_rating()], dtype=np.intp)
+        if not len(liked):
+            return []
+        clusters = interest_clusters(F.normalize(history_emb[liked], dim=1).numpy(), threshold)
+        return [(liked[members], self.user_embedding(history_emb[liked[members]])) for members in clusters]
+
+    def recommend(self, user, n_candidates=100, top_k=10, mmr_lambda=MMR_LAMBDA, max_similarity=MAX_SIMILARITY,
+                  log=None, show=20, interest_threshold=INTEREST_THRESHOLD):
+        """Up to top_k of n_candidates retrieved recipes, picked by MMR over P(like) and the cosine similarity of their
+        item embeddings, in pick order. The candidates are retrieved per interest, every cluster of the liked history
+        cut at interest_threshold (2 keeps one, the normal approach); a user who liked nothing gets none.
+        A candidate whose cosine to a history recipe or to a pick is max_similarity or more is left out, so fewer than
+        top_k come back when every other candidate is that close to one. mmr_lambda = 1 with max_similarity = None
+        gives the top_k by P(like), most likely first.
+
+        With log (e.g. print), each step is reported: the history, the interests, the HNSW candidates (the first
         `show` of them), the near-duplicates of the history dropped, how the reranker reorders the rest and what MMR
         picks."""
         log = log or (lambda *_: None)
@@ -1341,58 +1437,77 @@ class RetrievalPipeline:
                 f"{str(recipe.get('name', ''))[:48]:<48} {str(recipe.get('rating', '-')):>6} {rating:>12.3f} "
                 f"{window:>6} {emb.norm():>6.2f}")
 
-        query = self.user_embedding(history_emb)
-        member_cosine = F.cosine_similarity(history_emb, query.unsqueeze(0)).tolist()
-        log(f"\n=== Step 2. Representative embedding: mean of the {len(history)} L2-normalized history embeddings "
-            f"({query.numel()} dims, norm {query.norm():.3f}) ===")
-        log("  first 8 dims: " + " ".join(f"{value:+.3f}" for value in query[:8].tolist()))
-        for recipe, cosine in zip(history, member_cosine):
-            log(f"  cosine to {str(recipe.get('name', ''))[:48]:<48} {cosine:.3f}")
+        interests = self.interests(history, history_emb, interest_threshold)
+        log(f"\n=== Step 2. Interests: the liked history recipes (rating >= {self.liked_rating():g}) clustered by cosine "
+            f"distance, average linkage cut at {interest_threshold:g}: {len(interests)} interests; each one's "
+            f"representative embedding is the mean of its recipes' L2-normalized ones ===")
+        if not interests:
+            log("  no liked recipe, so nothing to retrieve by")
+            return []
+        history_unit = F.normalize(history_emb, dim=1)
+        for number, (members, query) in enumerate(interests, start=1):
+            log(f"  interest {number}: {len(members)} recipes, norm {query.norm():.3f}")
+            for position, cosine in zip(members[:show], (history_unit[members[:show]] @ F.normalize(query, dim=0))):
+                log(f"    cosine to {str(history[position].get('name', ''))[:48]:<48} {cosine:.3f}")
 
         seen = {self.row_of[recipe["fdc_id"]] for recipe in history if "fdc_id" in recipe}
-        log(f"\n=== Step 3. Retrieval: the {n_candidates} nearest of {len(self.recipes):,} recipes by cosine similarity "
-            f"({len(seen)} history recipes excluded) ===")
-        # HNSW already returns them most similar first; the buckets and the retrieval ranks rely on it.
-        retrieved = sorted(self.recipe_index.search(query.numpy(), n_candidates, conditions=preferences, exclude=seen,
-                                                    log=log),
+        quotas = split_candidates([len(members) for members, _ in interests], n_candidates)
+        log(f"\n=== Step 3. Retrieval: the {n_candidates} nearest of {len(self.recipes):,} recipes by cosine similarity, "
+            f"split over the interests by size ({' + '.join(map(str, quotas))}), none twice ({len(seen)} history "
+            f"recipes excluded) ===")
+        per_interest = self.recipe_index.search_many([query.numpy() for _, query in interests], quotas,
+                                                     conditions=preferences, exclude=seen, log=log)
+        interest_of = {row: number for number, results in enumerate(per_interest, start=1) for row, _ in results}
+        # each by its cosine to its own interest; the buckets and the retrieval ranks rely on most similar first
+        retrieved = sorted((candidate for results in per_interest for candidate in results),
                            key=lambda candidate: -candidate[1])
         log(f"  {len(retrieved)} retrieved")
-        log(f"  {'rank':>4}  {'fdc_id':>8}  {'recipe':<56} {'cosine':>7}")
+        log(f"  {'rank':>4}  {'fdc_id':>8}  {'recipe':<56} {'cosine':>7} {'interest':>8}")
         for rank, (row, similarity) in enumerate(retrieved[:show], start=1):
-            log(f"  {rank:>4}  {self.recipes[row]['fdc_id']:>8}  {self.recipes[row]['name'][:56]:<56} {similarity:>7.3f}")
+            log(f"  {rank:>4}  {self.recipes[row]['fdc_id']:>8}  {self.recipes[row]['name'][:56]:<56} {similarity:>7.3f} "
+                f"{interest_of[row]:>8}")
         if len(retrieved) > show:
             log(f"  ... {len(retrieved) - show} more")
         if not retrieved:
             return []
 
-        buckets = similarity_buckets(retrieved)
         if max_similarity is not None:
-            rows = [row for row, _ in retrieved]
-            retrieved_unit = F.normalize(torch.from_numpy(self.recipe_index.embeddings[rows]), dim=1).numpy()
-            ranges = history_ranges(member_cosine, max_similarity)
-            kept, near = drop_near_history(buckets, ranges, dict(zip(rows, retrieved_unit)),
-                                           F.normalize(history_emb, dim=1).numpy(), max_similarity)
-            log(f"\n=== Step 4. Near-duplicates of the history: candidates bucketed by cosine to the user embedding; "
-                f"each history recipe's range (where a recipe at cosine >= {max_similarity:g} to it can be) is looked "
-                f"up in the buckets and slid over; {len(near)} such candidates dropped ===")
-            log(f"  {'bucket':<10} {'retrieved':>9} {'kept':>5}")
-            for bucket, items in sorted(buckets.items(), reverse=True):
-                label = (f"[{bucket * BUCKET_WIDTH:.1f}, {(bucket + 1) * BUCKET_WIDTH:.1f}"
-                         f"{']' if bucket == bucket_of(1.0) else ')'}")
-                log(f"  {label:<10} {len(items):>9} {len(kept.get(bucket, [])):>5}")
-            log(f"  {'history recipe':<48} {'cosine':>7}  {'range':<14} {'in range':>8} {'dropped':>7}")
-            for position, low, high in sorted(ranges):
-                inside = sum(low <= similarity <= high for _, similarity in retrieved)
-                dropped = sum(near_position == position for near_position, _ in near.values())
-                log(f"  {str(history[position].get('name', ''))[:48]:<48} {member_cosine[position]:>7.3f}  "
-                    f"{f'[{low:.3f}, {high:.3f}]':<14} {inside:>8} {dropped:>7}")
+            # per interest: its candidates' cosines are to its embedding, and so are the history recipes' ranges
+            near, steps = {}, []
+            for number, ((_, query), results) in enumerate(zip(interests, per_interest), start=1):
+                if not results:
+                    continue
+                buckets = similarity_buckets(results)
+                rows = [row for row, _ in results]
+                retrieved_unit = F.normalize(torch.from_numpy(self.recipe_index.embeddings[rows]), dim=1).numpy()
+                member_cosine = (history_unit @ F.normalize(query, dim=0)).tolist()
+                ranges = history_ranges(member_cosine, max_similarity)
+                kept, dropped = drop_near_history(buckets, ranges, dict(zip(rows, retrieved_unit)),
+                                                  history_unit.numpy(), max_similarity)
+                near.update(dropped)
+                steps.append((number, results, buckets, kept, dropped, ranges, member_cosine))
+            log(f"\n=== Step 4. Near-duplicates of the history: each interest's candidates bucketed by cosine to its "
+                f"embedding; each history recipe's range (where a recipe at cosine >= {max_similarity:g} to it can "
+                f"be) is looked up in the buckets and slid over; {len(near)} such candidates dropped ===")
+            for number, results, buckets, kept, dropped, ranges, member_cosine in steps:
+                log(f"  interest {number}: " + ", ".join(
+                    f"[{bucket * BUCKET_WIDTH:.1f}, {(bucket + 1) * BUCKET_WIDTH:.1f}"
+                    f"{']' if bucket == bucket_of(1.0) else ')'} {len(kept.get(bucket, []))} of {len(items)} kept"
+                    for bucket, items in sorted(buckets.items(), reverse=True)))
+                log(f"    {'history recipe':<48} {'cosine':>7}  {'range':<14} {'in range':>8} {'dropped':>7}")
+                for position, low, high in sorted(ranges)[:show]:
+                    inside = sum(low <= similarity <= high for _, similarity in results)
+                    count = sum(near_position == position for near_position, _ in dropped.values())
+                    log(f"    {str(history[position].get('name', ''))[:48]:<48} {member_cosine[position]:>7.3f}  "
+                        f"{f'[{low:.3f}, {high:.3f}]':<14} {inside:>8} {count:>7}")
             for row, (position, similarity) in list(near.items())[:show]:
                 log(f"  dropped {self.recipes[row]['fdc_id']:>8}  {self.recipes[row]['name'][:44]:<44} cosine "
                     f"{similarity:.3f} to {str(history[position].get('name', ''))[:40]}")
             if len(near) > show:
                 log(f"  ... {len(near) - show} more")
-            buckets = kept
-        candidates = [candidate for bucket in sorted(buckets, reverse=True) for candidate in buckets[bucket]]
+            candidates = [candidate for candidate in retrieved if candidate[0] not in near]
+        else:
+            candidates = retrieved
         if not candidates:
             return []
 
@@ -1414,7 +1529,7 @@ class RetrievalPipeline:
         retrieval_rank = {row: rank for rank, (row, _) in enumerate(retrieved, start=1)}
         results = [{"fdc_id": self.recipes[row]["fdc_id"], "name": self.recipes[row]["name"],
                     "price": self.recipes[row]["price"], "p_like": p_like, "like": p_like >= THRESHOLD,
-                    "similarity": similarity, "retrieval_rank": retrieval_rank[row]}
+                    "similarity": similarity, "interest": interest_of[row], "retrieval_rank": retrieval_rank[row]}
                    for (row, similarity), p_like in zip(candidates, p_likes.tolist())]
         reranked = sorted(results, key=lambda result: -result["p_like"])
         for rank, result in enumerate(reranked, start=1):
@@ -1464,10 +1579,11 @@ class RetrievalPipeline:
 
 def print_recommendations(user, results):
     print(f"\nRecommendations for user {user.get('user_id', '?')}: {len(user['history'])} history recipes")
-    print(f"  {'fdc_id':>8}  {'recipe':<60} {'P(like)':>8} {'cosine':>7} {'retrieved':>9} {'reranked':>8}")
+    print(f"  {'fdc_id':>8}  {'recipe':<60} {'P(like)':>8} {'cosine':>7} {'interest':>8} {'retrieved':>9} "
+          f"{'reranked':>8}")
     for result in results:
         print(f"  {result['fdc_id']:>8}  {result['name'][:60]:<60} {result['p_like']:>8.4f} "
-              f"{result['similarity']:>7.3f} {'#' + str(result['retrieval_rank']):>9} "
+              f"{result['similarity']:>7.3f} {result['interest']:>8} {'#' + str(result['retrieval_rank']):>9} "
               f"{'#' + str(result['rerank_rank']):>8}")
 
 
@@ -1490,6 +1606,9 @@ def main():
     parser.add_argument("--max-similarity", type=float, default=MAX_SIMILARITY,
                         help="a candidate whose cosine to a history recipe or to a recommendation is this or more is "
                              "left out; 2 turns it off")
+    parser.add_argument("--interest-threshold", type=float, default=INTEREST_THRESHOLD,
+                        help="cosine distance at which the liked history is cut into interests; 2 keeps them all in "
+                             "one, the normal approach (one mean of the liked recipes)")
     parser.add_argument("--output", type=Path, help="also write the recommendations to this JSON file")
     parser.add_argument("--quiet", action="store_true", help="print only the final recommendations, not each step")
     parser.add_argument("--show", type=int, default=20, help="rows printed per step")
@@ -1515,7 +1634,8 @@ def main():
         return
     user = json.loads(args.user.read_text())
     results = pipeline.recommend(user, args.candidates, args.top_k, args.mmr_lambda, args.max_similarity,
-                                 log=None if args.quiet else print, show=args.show)
+                                 log=None if args.quiet else print, show=args.show,
+                                 interest_threshold=args.interest_threshold)
     print_recommendations(user, results)
     if args.output:
         windows = pipeline.user_states.get(user.get("user_id"), {}).get("windows", [])

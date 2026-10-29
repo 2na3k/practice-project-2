@@ -8,7 +8,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 from redis import Redis
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..cache import read_user_id, write_user_id
@@ -87,6 +87,13 @@ class UserRepository:
             .limit(limit)
         )
         return [UserRating.model_validate(entry) for entry in entries]
+
+    def rating_counts(self) -> dict[str, int]:
+        """How many users rated each recipe or catalog food, by its id, liked or not: a user's rating of an item is one
+        row, however often they rated it."""
+        rows = self.session.execute(select(UserHistoryEntry.recipe_id, func.count())
+                                    .group_by(UserHistoryEntry.recipe_id))
+        return {recipe_id: count for recipe_id, count in rows}
 
     def fetch_user_likes(self, username: str) -> dict[str, bool] | None:
         """Whether the user liked each recipe or catalog food they rated, by its id, as their latest row for it says;

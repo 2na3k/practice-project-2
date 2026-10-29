@@ -117,3 +117,18 @@ def recommend(recommender: Recommender, user: UserProfileInput, catalog: RecipeR
             for item in recommended_items
         ],
     )
+
+
+def cold_start_recommendations(recommender: Recommender, user: UserProfileInput, catalog: RecipeRepository,
+                               rating_counts: Mapping[str, int]) -> RecommendationResponse:
+    """Cold start, until the user has rated enough for the model: the items rated by the most users (rating_counts),
+    the ones their preferences allow, the items they rated left out. The buying profile is their history's, as with
+    the model's."""
+    history = History.from_ratings(user.user_id, user.history)
+    items = recommender.cold_start_items(history, MAX_TOP_K, preferences=user.preferences.model_dump(),
+                                         rating_counts=rating_counts)
+    return RecommendationResponse(
+        profile=buying_profile(history, digest_recipes(history, catalog)),
+        items=[RecommendedRecipe(id=str(item["fdc_id"]), title=item["name"], score=0.0) for item in items],
+        source="popular",
+    )
