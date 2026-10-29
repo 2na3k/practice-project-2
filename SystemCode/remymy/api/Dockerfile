@@ -27,6 +27,7 @@ RUN apt-get update \
 
 COPY src ./src
 COPY migrations ./migrations
+COPY eval ./eval
 COPY README.md .
 
 EXPOSE 8002

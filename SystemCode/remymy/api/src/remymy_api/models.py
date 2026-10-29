@@ -282,6 +282,22 @@ class SavedRecipe(Base):
     recipe: Mapped[RecipeEntry] = relationship()
 
 
+class RecipeImpression(Base):
+    """One ranked recipe shown to a user in a chat recommendation event."""
+
+    __tablename__ = "recipe_impressions"
+    __table_args__ = (Index("recipe_impressions_by_user", "user_id", "shown_at"),)
+    __mapper_args__ = {"eager_defaults": True}
+
+    impression_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.user_id", ondelete="CASCADE"))
+    trace_id: Mapped[str | None] = mapped_column(Text)
+    recipe_id: Mapped[str] = mapped_column(Text)
+    rank: Mapped[int]
+    shown_at: Mapped[datetime] = mapped_column(UtcTimestamp, server_default=NOW)
+    event_id: Mapped[str] = mapped_column(Text)
+
+
 def create_tables(engine: Engine) -> None:
     """Create the tables only the ORM defines, where missing. The ones schema.FOOD_SCHEMA and users.SCHEMA create, with
     checks and triggers the ORM does not model, are left to them: they run first."""

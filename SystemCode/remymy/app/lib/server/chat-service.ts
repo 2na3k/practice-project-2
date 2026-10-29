@@ -351,11 +351,13 @@ export async function runChat(
     const fallbackText = recommendations.length
       ? `I found ${recommendations.slice(0, 3).map((item) => `**${item.meal.title}**`).join(", ")}. Open any meal below for the full details.`
       : "I couldn't find a match in the Food.com recipe data with those preferences.";
+    const traceId = await currentTraceId();
     const result = {
       text: usedCatalogFallback ? fallbackText : text || fallbackText,
       preferences,
       recommendations,
       toolsUsed,
+      trace_id: traceId ?? null,
     };
     span.update({
       output: {
@@ -377,7 +379,7 @@ export async function runChat(
           toolsUsed: result.toolsUsed,
         },
       },
-      await currentTraceId(),
+      traceId,
     );
     return result;
   }, { asType: "agent", traceName: "remymy-agent-chat" });

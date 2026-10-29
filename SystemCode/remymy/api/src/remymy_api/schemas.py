@@ -82,6 +82,21 @@ class UserRating(BaseModel):
     like: bool
     recipe_id: str
 
+
+class ImpressionRequest(BaseModel):
+    """An ordered list of recipe ids shown in one chat recommendation event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(min_length=1, max_length=100)
+    trace_id: str | None = Field(default=None, max_length=200)
+
+
+class ImpressionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+
 class HistoryItem(BaseModel):
     """One row of a user's history as a client shows it: what they rated, its title and whether they liked it."""
 

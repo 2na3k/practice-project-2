@@ -94,6 +94,9 @@ services:
       LEGACY_USER_DATABASE_PATH: /state/remymy-users.db
       # db 1 of the shared redis; Langfuse uses db 0
       REDIS_URL: redis://:${REDIS_AUTH:-myredissecret}@redis:6379/1
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
     depends_on:
       api-migrate:
         condition: service_completed_successfully
