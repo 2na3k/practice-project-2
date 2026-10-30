@@ -1,5 +1,7 @@
 # Remymy (a.k.a Remy2): An Agentic Conversational Meal-Ranking System
 
+Link repo: https://github.com/2na3k/practice-project-2
+
 ## EXECUTIVE SUMMARY / PAPER ABSTRACT
 
 Remy is an agentic chatbot weekly meal recommendation application that helps users choose recipes based on their preferences. The project treats meal planning as a data-integration and reasoning problem. A recipe is represented through its ingredient requirements; each requirement is linked to a normalized food concept; candidate nutrition profiles are used to estimate nutrients and FairPrice evidence is attached to the product or offer that can satisfy the requirement. A generic food profile, a branded product, and a dated retail offer therefore remain separate records.
