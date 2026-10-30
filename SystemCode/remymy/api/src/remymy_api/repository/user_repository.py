@@ -3,6 +3,7 @@ models.SavedRecipe)."""
 from __future__ import annotations
 
 import logging
+from uuid import uuid4
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -11,7 +12,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..cache import read_user_id, write_user_id
-from ..models import NOW, AppUser, RecipeEntry, SavedRecipe, UserHistoryEntry
+from ..models import NOW, AppUser, RecipeEntry, RecipeImpression, SavedRecipe, UserHistoryEntry
 from ..schemas import Preferences, SavedItem, User, UserRating
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,22 @@ class UserRepository:
         )
         return [SavedItem(recipe_id=recipe_id, kind=SAVED_KINDS[kind], title=title, saved_at=saved_at)
                 for recipe_id, saved_at, title, kind in rows]
+
+    def log_impression(self, user_id: int, trace_id: str | None, recipe_ids: list[str]) -> str:
+        """Persist one impression event as ordered rows and return its shared event id."""
+        event_id = str(uuid4())
+        with self._transaction():
+            self.session.add_all([
+                RecipeImpression(
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    recipe_id=recipe_id,
+                    rank=rank,
+                    event_id=event_id,
+                )
+                for rank, recipe_id in enumerate(recipe_ids, start=1)
+            ])
+        return event_id
 
     def save_recipe(self, user_id: int, recipe_id: str) -> SavedItem | None:
         """Save a recipe of any kind for the user; one saved already keeps the time it was. None for a recipe the

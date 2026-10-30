@@ -32,6 +32,8 @@ from .schemas import (
     FoodClassification,
     HealthResponse,
     HistoryItem,
+    ImpressionRequest,
+    ImpressionResponse,
     Preferences,
     Recipe,
     RecipeDetail,
@@ -454,6 +456,20 @@ def get_saved_recipes(username: str, users: Users) -> list[SavedItem]:
     if saved is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return saved
+
+
+@router.post("/api/users/{username}/impressions", status_code=201, response_model=ImpressionResponse, tags=["users"])
+def log_user_impression(username: str, payload: ImpressionRequest, users: Users) -> ImpressionResponse:
+    """Record the ordered recipe ids shown to a user in a chat recommendation."""
+    try:
+        user_id = users.find_user_id(username)
+        if user_id is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        event_id = users.log_impression(user_id, payload.trace_id, payload.recipe_ids)
+    except SQLAlchemyError:
+        logger.exception("Recording an impression for %r failed.", username)
+        raise HTTPException(status_code=503, detail="User data is unavailable.")
+    return ImpressionResponse(event_id=event_id)
 
 
 @router.put("/api/users/{username}/saved/{recipe_id}", response_model=SavedItem, tags=["users"])

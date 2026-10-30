@@ -1,5 +1,5 @@
 import { Client, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
-import { withLangfuseSpan } from "./langfuse";
+import {traceCarrier, withLangfuseSpan} from "./langfuse";
 
 export class McpClientError extends Error {
   constructor(message: string) {
@@ -38,8 +38,13 @@ export async function callMcpTool(
     const transport = new StreamableHTTPClientTransport(endpoint);
     try {
       await client.connect(transport);
+      const carrier = await traceCarrier();
       const result = await client.callTool(
-        { name, arguments: args },
+        {
+          name,
+          arguments: args,
+          _meta: carrier
+        },
         { requestSignal: signal },
       );
       const text = textFromToolResult(result);
@@ -73,7 +78,7 @@ export async function callMcpTool(
       if (error instanceof McpClientError) throw error;
       throw new McpClientError("The Python MCP service is unavailable.");
     } finally {
-      await transport.terminateSession().catch(() => undefined);
+      // void transport.terminateSession().catch(() => undefined);
       await client.close().catch(() => undefined);
     }
   }, { asType: "tool" });

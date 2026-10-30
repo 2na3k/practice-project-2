@@ -47,6 +47,7 @@ import type {
 import { fetchRecipeDetail, fetchRecipeLikes, fetchRecipePage, saveRecipeRating, type RecipeDetail, type RecipePage, type RecipeSummary } from "@/lib/recipes";
 import { fetchRecommendations, isFoodId, nutrientHighlights, type BuyingProfile } from "@/lib/recommendations";
 import { fetchSaved, parseSavedFoods, saveItem, unsaveItem, type SavedFood } from "@/lib/saved";
+import { logImpression } from "@/lib/impressions";
 import { saveUserPreferences } from "@/lib/user-preferences";
 import { fetchHistory, formatHistoryDate, type HistoryItem } from "@/lib/history";
 import { fetchCatalogItem, formatPrice, type CatalogItem } from "@/lib/catalog";
@@ -108,7 +109,8 @@ function validChatResult(value: unknown): value is ChatResult {
   if (!value || typeof value !== "object") return false;
   const result = value as Partial<ChatResult>;
   return typeof result.text === "string" && validPreferences(result.preferences) && validRecommendations(result.recommendations) &&
-    (result.toolsUsed === undefined || (Array.isArray(result.toolsUsed) && result.toolsUsed.every((tool) => typeof tool === "string")));
+    (result.toolsUsed === undefined || (Array.isArray(result.toolsUsed) && result.toolsUsed.every((tool) => typeof tool === "string"))) &&
+    (result.trace_id === undefined || result.trace_id === null || typeof result.trace_id === "string");
 }
 
 function validConnectionStatus(value: unknown): value is ConnectionStatus {
@@ -514,6 +516,9 @@ export default function HomePage() {
           : responseSource,
         recommendations: result.recommendations,
       } : message));
+      if (guest && result.recommendations.length > 0) {
+        logImpression(guest, result.trace_id ?? null, result.recommendations.map((item) => item.meal.id));
+      }
     } catch (error) {
       if (controller.signal.aborted || !mountedRef.current) return;
       const message = error instanceof Error ? error.message : "The model could not answer.";

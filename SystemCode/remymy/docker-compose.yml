@@ -94,6 +94,9 @@ services:
       LEGACY_USER_DATABASE_PATH: /state/remymy-users.db
       # db 1 of the shared redis; Langfuse uses db 0
       REDIS_URL: redis://:${REDIS_AUTH:-myredissecret}@redis:6379/1
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
     depends_on:
       api-migrate:
         condition: service_completed_successfully
@@ -126,6 +129,8 @@ services:
     restart: unless-stopped
     ports:
       - "${MCP_PORT:-8000}:8000"
+    mem_limit: 1g
+    memswap_limit: 1g
     environment:
       ENV: ${ENV:-nonprod}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -133,11 +138,31 @@ services:
       PORT: 8000
       MODEL_URL: http://models:8001
       RECIPE_CATALOG_PATH: /data/RAW_recipes.csv
+      REMYMY_EVAL_ENABLED: ${REMYMY_EVAL_ENABLED:-false}
+      REMYMY_EVAL_SAMPLE_RATE: ${REMYMY_EVAL_SAMPLE_RATE:-1}
+      REMYMY_EVALUATION_TOKEN: ${REMYMY_EVALUATION_TOKEN:-}
+      REMYMY_EVALUATION_DB: ${REMYMY_EVALUATION_DB:-/app/target/evaluations.sqlite3}
+      REMYMY_EVAL_K: ${REMYMY_EVAL_K:-6}
+      REMYMY_POOL_SIZE: ${REMYMY_POOL_SIZE:-500}
+      REMYMY_COLLABORATIVE_WEIGHT: ${REMYMY_COLLABORATIVE_WEIGHT:-0.75}
+      REMYMY_MODEL_VERSION: ${REMYMY_MODEL_VERSION:-/models/hybrid-foodcom.npz}
+      REMYMY_DATA_VERSION: ${REMYMY_DATA_VERSION:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-7ef62aaf-3045-4ad7-ae99-902911322871}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-c5f77a16-7cd1-4a6e-88a0-b04f6cb5453b}
+      JEV_API_KEY: ${JEV_API_KEY:-}
     depends_on:
       models:
         condition: service_healthy
     volumes:
       - "${DATA_DIR:-./data}/raw/food-com/RAW_recipes.csv:/data/RAW_recipes.csv:ro"
+      - remymy-mcp-data:/app/target
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 180s
+      retries: 5
     networks:
       - remymy
 
@@ -204,6 +229,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    mem_limit: 640m
+    memswap_limit: 640m
     networks:
       - remymy
 
@@ -219,6 +246,8 @@ services:
         condition: service_healthy
       langfuse-clickhouse:
         condition: service_healthy
+    mem_limit: 1g
+    memswap_limit: 1g
     environment: &langfuse-worker-env
       NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:${LANGFUSE_PORT:-3030}}
       DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-postgres}@langfuse-postgres:5432/postgres
@@ -245,6 +274,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
       REDIS_CONNECTION_STRING: redis://:${REDIS_AUTH:-myredissecret}@redis:6379/0
+      NODE_OPTIONS: "--max-old-space-size=768"
     networks:
       - remymy
 
@@ -252,6 +282,8 @@ services:
     image: docker.langfuse.com/langfuse/langfuse:3
     restart: unless-stopped
     depends_on: *langfuse-depends-on
+    mem_limit: 1280m
+    memswap_limit: 1280m
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-remymy-nonprod-nextauth-secret}
@@ -266,6 +298,7 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-remymy@example.com}
       LANGFUSE_INIT_USER_NAME: remymy
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-remymylocal}
+      NODE_OPTIONS: "--max-old-space-size=960"
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --quiet http://$$(hostname):3000/api/public/health"]
       interval: 15s
@@ -305,6 +338,8 @@ services:
   langfuse-clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     restart: unless-stopped
+    mem_limit: 1536m
+    memswap_limit: 1536m
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
@@ -325,6 +360,8 @@ services:
   langfuse-minio:
     image: rustfs/rustfs:latest
     restart: unless-stopped
+    mem_limit: 384m
+    memswap_limit: 384m
     environment:
       RUSTFS_ACCESS_KEY: ${LANGFUSE_MINIO_USER:-minio}
       RUSTFS_SECRET_KEY: ${LANGFUSE_MINIO_PASSWORD:-miniosecret}
@@ -362,6 +399,8 @@ services:
   langfuse-postgres:
     image: postgres:16
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-postgres}
@@ -383,6 +422,7 @@ networks:
     driver: bridge
 
 volumes:
+  remymy-mcp-data:
   remymy-user-data:
   remymy-model-cache:
   remymy-app-state:
